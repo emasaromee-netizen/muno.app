@@ -1,0 +1,165 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* MUNO · ISA Design System
+   Todos los colores HSL. Tokens semánticos.
+*/
+
+@layer base {
+  :root {
+    /* ISA Brand */
+    --isa-navy: 222 31% 21%;       /* #242e44 */
+    --isa-black: 0 0% 0%;
+    --isa-dusty: 211 38% 67%;      /* #8fafcb */
+    --isa-light: 51 11% 91%;       /* #ebebe7 */
+    --isa-white: 0 0% 100%;
+    --isa-border: 51 6% 84%;       /* #d8d8d4 */
+
+    /* MUNO Action */
+    --muno-blue: 222 88% 52%;      /* #1A56F0 */
+    --muno-teal: 168 100% 36%;     /* #00B89C */
+    --muno-red: 0 84% 60%;         /* #EF4444 */
+    --muno-amber: 38 95% 50%;
+    --muno-emerald: 160 84% 39%;   /* #10B981 */
+
+    /* Semantic — mapped to ISA */
+    --background: var(--isa-light);
+    --foreground: var(--isa-navy);
+
+    --card: var(--isa-white);
+    --card-foreground: var(--isa-navy);
+
+    --popover: var(--isa-white);
+    --popover-foreground: var(--isa-navy);
+
+    --primary: var(--isa-navy);
+    --primary-foreground: var(--isa-white);
+
+    --secondary: var(--isa-dusty);
+    --secondary-foreground: var(--isa-navy);
+
+    --muted: 51 8% 88%;
+    --muted-foreground: 222 14% 38%;
+
+    --accent: 211 38% 92%;
+    --accent-foreground: var(--isa-navy);
+
+    --destructive: var(--muno-red);
+    --destructive-foreground: 0 0% 100%;
+
+    --border: var(--isa-border);
+    --input: var(--isa-border);
+    --ring: var(--isa-navy);
+
+    --radius: 1rem;
+
+    --sidebar-background: var(--isa-navy);
+    --sidebar-foreground: 0 0% 95%;
+    --sidebar-primary: var(--isa-white);
+    --sidebar-primary-foreground: var(--isa-navy);
+    --sidebar-accent: 222 28% 28%;
+    --sidebar-accent-foreground: 0 0% 100%;
+    --sidebar-border: 222 25% 30%;
+    --sidebar-ring: var(--isa-dusty);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html, body, #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Nunito', system-ui, -apple-system, sans-serif;
+    font-weight: 400;
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1 { font-size: 20px; }
+  h2 { font-size: 18px; }
+  h3 { font-size: 16px; }
+  h4 { font-size: 14px; }
+  h1, h2, h3, h4 {
+    font-weight: 700;
+    color: hsl(var(--isa-black));
+    letter-spacing: -0.01em;
+  }
+}
+
+@layer utilities {
+  .phone-frame {
+    width: 100%;
+    max-width: 430px;
+    margin: 0 auto;
+    background: hsl(var(--background));
+    min-height: 100vh;
+  }
+  @media (min-width: 768px) {
+    .phone-frame {
+      margin: 24px auto;
+      min-height: calc(100vh - 48px);
+      height: calc(100vh - 48px);
+      border-radius: 40px;
+      box-shadow: 0 30px 80px -20px rgba(0,0,0,0.25), 0 0 0 10px #1a1a1a, 0 0 0 12px #2a2a2a;
+      overflow: hidden;
+    }
+  }
+}
+
+@layer components {
+  .isa-card {
+    @apply bg-card rounded-2xl;
+    border: 0.5px solid hsl(var(--border));
+  }
+  .isa-chip {
+    @apply inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold;
+  }
+  .empty-state {
+    @apply flex flex-col items-center justify-center text-center gap-3 py-16 px-6 rounded-2xl;
+    background: hsl(var(--isa-light));
+    border: 0.5px dashed hsl(var(--border));
+  }
+  /* Touch targets mínimos accesibles */
+  button, a[role="button"], [data-touch] {
+    min-height: 44px;
+  }
+  /* Tablas → cards apiladas en mobile */
+  @media (max-width: 767px) {
+    .responsive-table { display: block; width: 100%; }
+    .responsive-table thead { display: none; }
+    .responsive-table tbody, .responsive-table tr { display: block; width: 100%; }
+    .responsive-table tr {
+      background: hsl(var(--card));
+      border: 1px solid hsl(var(--border));
+      border-radius: 16px;
+      padding: 12px 14px;
+      margin-bottom: 10px;
+    }
+    .responsive-table td {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 6px 0;
+      border: none;
+      font-size: 13px;
+    }
+    .responsive-table td::before {
+      content: attr(data-label);
+      font-weight: 700;
+      color: hsl(var(--muted-foreground));
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+  }
+}
+
+@layer utilities {
+  .scrollbar-none::-webkit-scrollbar { display: none; }
+  .scrollbar-none { -ms-overflow-style: none; scrollbar-width: none; }
+}

@@ -16,7 +16,9 @@ export default function ProtectedRoute({
   const location = useLocation();
 
   // Demo/preview mode bypasses auth completely
-  if (preview) return <>{children}</>;
+  const isDev = import.meta.env.DEV;
+
+if (isDev && preview) return <>{children}</>;
 
   if (loading) {
     return (

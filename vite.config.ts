@@ -19,4 +19,10 @@ export default defineConfig(({ mode }) => ({
     },
     dedupe: ["react", "react-dom", "react/jsx-runtime", "react/jsx-dev-runtime", "@tanstack/react-query", "@tanstack/query-core"],
   },
+  // SOLUCIÓN QUIRÚRGICA (Mitigación NH-05)
+  build: {
+    // Genera mapas de origen únicamente para depuración local; desactivado por completo en producción
+    sourcemap: mode === "development",
+    minify: "esbuild",
+  }
 }));

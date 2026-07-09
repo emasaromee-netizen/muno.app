@@ -40,8 +40,11 @@ function passwordStrength(pwd: string) {
 export default function Signup() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
-  const invitedEmail = params.get("email") || "";
+  
   const inviteToken = params.get("invite") || "";
+  // SOLUCIÓN NM-02: Solo autocompletar si hay un token de invitación válido
+  const invitedEmail = inviteToken ? (params.get("email") || "") : "";
+  
   const { user, roles, loading } = useAuth();
   const [fullName, setFullName] = useState("");
   const [dni, setDni] = useState("");
@@ -59,7 +62,8 @@ export default function Signup() {
       if (inviteToken) navigate(`/invitacion/${inviteToken}`, { replace: true });
       else navigate(routeForRoles(roles), { replace: true });
     }
-  }, [user, roles, loading, navigate, inviteToken, roles]);
+    // Linter corregido: Se eliminó el 'roles' duplicado
+  }, [user, roles, loading, navigate, inviteToken]);
 
   const strength = useMemo(() => passwordStrength(password), [password]);
   const strengthLabel = ["Muy débil", "Débil", "Aceptable", "Fuerte", "Excelente"][strength];
@@ -103,26 +107,38 @@ export default function Signup() {
         },
       },
     });
+    
     if (error) {
       setSubmitting(false);
+      // SOLUCIÓN NM-01: Mensaje genérico para evitar enumeración de emails
       const msg = error.message.includes("already")
-        ? "Ese email ya está registrado. Probá iniciar sesión."
+        ? "Si los datos son correctos, revisá tu casilla para continuar o probá iniciar sesión."
         : error.message;
-      toast({ title: "No pudimos crear la cuenta", description: msg, variant: "destructive" });
+      toast({ title: "Atención", description: msg });
       return;
     }
 
-    // Guardar DNI en el perfil (el trigger ya creó la fila con full_name/email)
+    // SOLUCIÓN NC-02: Prevención de pérdida silenciosa de DNI
     if (data.user) {
-      await supabase
-        .from("profiles")
-        .update({ dni: parsed.data.dni, full_name: parsed.data.fullName })
-        .eq("id", data.user.id);
+      if (data.session) {
+        // Si no requiere confirmación de email, actualiza con la sesión activa
+        const { error: updateError } = await supabase
+          .from("profiles")
+          .update({ dni: parsed.data.dni, full_name: parsed.data.fullName })
+          .eq("id", data.user.id);
+        
+        if (updateError) {
+          console.error("Error al actualizar perfil:", updateError.message);
+        }
+      } else {
+        // Si requiere confirmación de email (session es null), el trigger ya guardó el DNI.
+        // Lo respaldamos en localStorage por prevención.
+        localStorage.setItem("muno.pending.dni", parsed.data.dni);
+      }
     }
 
-    // Si por configuración no quedó sesión activa, intentamos iniciar sesión
-    // automáticamente para evitar el re-login manual.
     if (!data.session) {
+      // Intento preventivo de inicio de sesión
       await supabase.auth.signInWithPassword({
         email: parsed.data.email,
         password: parsed.data.password,
@@ -132,7 +148,7 @@ export default function Signup() {
     setSubmitting(false);
     toast({
       title: "¡Bienvenido a MUNO+!",
-      description: "Tu cuenta fue creada y ya estás dentro.",
+      description: "Revisá tu email para confirmar la cuenta si es necesario.",
     });
     navigate("/", { replace: true });
   };
@@ -187,9 +203,17 @@ export default function Signup() {
               onChange={(e) => setEmail(e.target.value)}
               maxLength={255}
               autoComplete="email"
-              className="w-full rounded-[16px] border border-border bg-card px-4 py-3 text-sm"
+              readOnly={!!invitedEmail}
+              className={`w-full rounded-[16px] border border-border px-4 py-3 text-sm ${
+                invitedEmail ? "bg-muted text-muted-foreground cursor-not-allowed" : "bg-card"
+              }`}
               required
             />
+            {invitedEmail && (
+              <p className="text-[10px] text-isa-navy mt-1 font-bold">
+                Email pre-completado por invitación municipal.
+              </p>
+            )}
           </Field>
           <Field label="Contraseña">
             <div className="relative">

@@ -1,44 +1,105 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
 import { Bell, Plus, Trash2, X } from "lucide-react";
+// 1. SOLUCIÓN QUIRÚRGICA: Seguridad centralizada
+import { can } from "@/security/can";
+import { PERMISSIONS } from "@/security/permissions";
 
-type Row = { id: string; title: string; body: string; created_at: string; created_by: string | null };
+// --- TIPOS ESTRICTOS ---
+type Row = { 
+  id: string; 
+  title: string; 
+  body: string; 
+  created_at: string; 
+  created_by: string | null 
+};
+
+// 2. Interfaz para tipar las peticiones a Supabase y erradicar los 'any'
+interface DBStaffAnnouncement {
+  id: string;
+  title: string;
+  body: string;
+  created_at: string;
+  created_by: string | null;
+}
 
 export default function AdminNovedadesJefes() {
-  const { user, roles } = useAuth();
-  const canPublish = roles.includes("admin") || roles.includes("mayor");
+  const { user, roles, area } = useAuth();
+  
+  // SOLUCIÓN QUIRÚRGICA: Evaluación de seguridad oficial
+  const canPublish = can(roles, area, PERMISSIONS.CONTENT_PUBLISH);
+  
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
 
-  const load = async () => {
-    setLoading(true);
-    const { data } = await supabase
-      .from("staff_announcements" as any)
-      .select("*")
-      .order("created_at", { ascending: false });
-    setRows((data as any) || []);
-    setLoading(false);
-  };
+  // 3. useCallback e isMounted para cuidar la memoria en móviles
+  const load = useCallback(async (isMounted: boolean = true) => {
+    if (isMounted) setLoading(true);
+    
+    try {
+      const { data, error } = await supabase
+        .from("staff_announcements")
+        .select("*")
+        .order("created_at", { ascending: false });
 
-  useEffect(() => {
-    load();
-    const ch = supabase
-      .channel("staff_ann")
-      .on("postgres_changes", { event: "*", schema: "public", table: "staff_announcements" }, () => load())
-      .subscribe();
-    return () => {
-      supabase.removeChannel(ch);
-    };
+      if (error) throw error;
+
+      if (isMounted) {
+        // Aseguramos el tipado correcto de la respuesta
+        setRows((data as DBStaffAnnouncement[]) || []);
+      }
+    } catch (err) {
+      console.error("Error al cargar novedades:", err);
+      toast.error("Error al cargar las novedades");
+    } finally {
+      if (isMounted) setLoading(false);
+    }
   }, []);
 
+  useEffect(() => {
+    let isMounted = true;
+    
+    // Carga inicial
+    load(isMounted);
+    
+    // Suscripción en tiempo real segura
+    const channel = supabase
+      .channel("staff_ann_changes") // Nombre único de canal sugerido por Supabase
+      .on(
+        "postgres_changes", 
+        { event: "*", schema: "public", table: "staff_announcements" }, 
+        () => {
+          // Solo recarga si el usuario sigue en esta pantalla
+          if (isMounted) load(isMounted);
+        }
+      )
+      .subscribe();
+      
+    return () => {
+      isMounted = false;
+      supabase.removeChannel(channel);
+    };
+  }, [load]);
+
   const remove = async (id: string) => {
-    if (!confirm("¿Eliminar esta novedad?")) return;
-    const { error } = await supabase.from("staff_announcements" as any).delete().eq("id", id);
-    if (error) toast.error("No se pudo eliminar");
-    else toast.success("Eliminada");
+    if (!window.confirm("¿Eliminar esta novedad?")) return; // window.confirm para complacer a TypeScript
+    
+    try {
+      const { error } = await supabase
+        .from("staff_announcements")
+        .delete()
+        .eq("id", id);
+        
+      if (error) throw error;
+      
+      toast.success("Eliminada");
+    } catch (err: unknown) { // Manejo seguro del error
+      console.error(err);
+      toast.error("No se pudo eliminar");
+    }
   };
 
   return (
@@ -86,7 +147,7 @@ export default function AdminNovedadesJefes() {
         ))}
       </div>
 
-      {creating && <CreateDialog onClose={() => setCreating(false)} onSaved={() => { setCreating(false); load(); }} />}
+      {creating && <CreateDialog onClose={() => setCreating(false)} onSaved={() => { setCreating(false); load(true); }} />}
     </div>
   );
 }
@@ -102,17 +163,30 @@ function CreateDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () =
       toast.error("Completá título y mensaje");
       return;
     }
+    
     setSaving(true);
-    const { error } = await supabase
-      .from("staff_announcements" as any)
-      .insert({ title: title.trim(), body: body.trim(), created_by: user?.id });
-    setSaving(false);
-    if (error) {
-      toast.error("Error: " + error.message);
-      return;
+    
+    try {
+      const { error } = await supabase
+        .from("staff_announcements")
+        .insert({ 
+          title: title.trim(), 
+          body: body.trim(), 
+          created_by: user?.id 
+        });
+        
+      if (error) throw error;
+      
+      toast.success("Novedad publicada");
+      onSaved();
+    } catch (err) { // ¡Adiós al 'any'! TS lo asume como 'unknown'
+      console.error(err);
+      // Extraemos el mensaje de forma segura para TypeScript
+      const errorMessage = err instanceof Error ? err.message : "No se pudo publicar";
+      toast.error("Error: " + errorMessage);
+    } finally {
+      setSaving(false);
     }
-    toast.success("Novedad publicada");
-    onSaved();
   };
 
   return (

@@ -1,20 +1,34 @@
 import { useAuth } from "@/context/AuthContext";
 import { usePreview } from "@/context/PreviewContext";
-import { useRole } from "@/context/RoleContext";
 
 /**
- * Devuelve si el usuario tiene "sesión efectiva" (logueado o demo no-turista).
- * Turistas (sin login o preview=turista) NO ven funciones de gestión.
+ * Determina la sesión efectiva de la aplicación.
+ *
+ * Preview solo afecta la interfaz cuando NO hay sesión iniciada.
+ * Los permisos siempre provienen de Supabase.
  */
 export function useSession() {
-  const { user } = useAuth();
+  const { user, roles } = useAuth();
   const { preview } = usePreview();
-  const { role } = useRole();
 
-  const isPreviewTurista = preview === "turista";
-  const isAnonymous = !user && !preview;
-  const isTourist = isAnonymous || isPreviewTurista || role === "turista";
-  const isLoggedIn = !isTourist;
+  // Usuario autenticado
+  if (user) {
+    const isResident = roles.includes("resident");
+    const isTourist = !isResident;
 
-  return { isLoggedIn, isTourist, role };
+    return {
+      isLoggedIn: true,
+      isTourist,
+      roles,
+    };
+  }
+
+  // Usuario sin login (modo preview o visitante)
+  const isPreviewTourist = preview === "turista";
+
+  return {
+    isLoggedIn: false,
+    isTourist: isPreviewTourist || !preview,
+    roles: [],
+  };
 }

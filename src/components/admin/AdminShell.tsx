@@ -19,36 +19,66 @@ import {
   Settings,
   Wallet,
 } from "lucide-react";
-import { useRole, type AdminArea } from "@/context/RoleContext";
+
 import { useAuth } from "@/context/AuthContext";
 import StaffNewsWidget from "./StaffNewsWidget";
+import type { LucideIcon } from "lucide-react";
 
-type Item = { to: string; label: string; icon: any };
+type Item = {
+  to: string;
+  label: string;
+  icon: LucideIcon;
+};
+type AdminArea =
+  | "ISA"
+  | "Intendencia"
+  | "Infraestructura"
+  | "Turismo"
+  | "Comercios"
+  | "Cultura"
+  | "Deporte";
+
+  const VALID_AREAS: readonly AdminArea[] = [
+  "ISA",
+  "Intendencia",
+  "Infraestructura",
+  "Turismo",
+  "Comercios",
+  "Cultura",
+  "Deporte",
+];
 
 const ALL: Record<string, Item> = {
-  home:        { to: "/admin",              label: "Inicio",              icon: LayoutDashboard },
-  reclamos:    { to: "/admin/reclamos",     label: "Gestión de Reclamos", icon: AlertTriangle },
-  comercios:   { to: "/admin/comercios",    label: "Habilitaciones",      icon: Store },
-  lugares:     { to: "/admin/lugares",      label: "Puntos de Interés",   icon: MapPin },
-  cultura:     { to: "/admin/cultura",      label: "Inscripciones",       icon: Users },
-  contenido:   { to: "/admin/contenido",    label: "Agenda de Eventos",   icon: CalendarDays },
-  banners:     { to: "/admin/banners",      label: "Banners Home",        icon: Megaphone },
-  metricas:    { to: "/admin/metricas",     label: "Analítica ISA",       icon: BarChart3 },
-  metricasIn:  { to: "/admin/metricas/cargar", label: "Cargar métricas ISA", icon: FileEdit },
-  tareas:      { to: "/admin/tareas",       label: "Tareas internas",     icon: ListTodo },
-  equipo:      { to: "/admin/colaboradores",label: "Mi Equipo",            icon: Users },
-  deporte:     { to: "/admin/deporte",      label: "Inscripciones Deporte", icon: ListTodo },
-  contenidoEd: { to: "/admin/contenido",    label: "Cargar Contenido",    icon: FileEdit },
-  usuarios:    { to: "/admin/usuarios",     label: "Gestión de Gabinete", icon: Users },
-  auditoria:   { to: "/admin/auditoria",    label: "Auditoría",           icon: ScrollText },
-  config:      { to: "/admin/configuracion",label: "Configuración",       icon: Settings },
-  turismo:     { to: "/admin/guia-turista", label: "Guía Turista",       icon: MapPin },
-  hacienda:    { to: "/admin/hacienda",     label: "Hacienda",            icon: Wallet },
+  home:        { to: "/admin",              label: "Inicio",                       icon: LayoutDashboard },
+  reclamos:    { to: "/admin/reclamos",     label: "Gestión de Reclamos",          icon: AlertTriangle },
+  comercios:   { to: "/admin/comercios",    label: "Habilitaciones",               icon: Store },
+  lugares:     { to: "/admin/lugares",      label: "Puntos de Interés",            icon: MapPin },
+  cultura:     { to: "/admin/cultura",      label: "Inscripciones",                icon: Users },
+  contenido:   { to: "/admin/contenido",    label: "Agenda de Eventos",            icon: CalendarDays },
+  banners:     { to: "/admin/banners",      label: "Banners Home",                 icon: Megaphone },
+  metricas:    { to: "/admin/metricas",     label: "Analítica ISA",                icon: BarChart3 },
+  metricasIn:  { to: "/admin/metricas/cargar", label: "Cargar métricas ISA",       icon: FileEdit },
+  tareas:      { to: "/admin/tareas",       label: "Tareas internas",              icon: ListTodo },
+  equipo:      { to: "/admin/colaboradores",label: "Mi Equipo",                    icon: Users },
+  deporte:     { to: "/admin/deporte",      label: "Inscripciones Deporte",        icon: ListTodo },
+  contenidoEd: { to: "/admin/contenido",    label: "Cargar Contenido",             icon: FileEdit },
+  usuarios:    { to: "/admin/usuarios",     label: "Gestión de Gabinete",          icon: Users },
+  auditoria:   { to: "/admin/auditoria",    label: "Auditoría",                    icon: ScrollText },
+  config:      { to: "/admin/configuracion",label: "Configuración",                icon: Settings },
+  turismo:     { to: "/admin/guia-turista", label: "Guía Turista",                 icon: MapPin },
+  hacienda:    { to: "/admin/hacienda",     label: "Hacienda",                     icon: Wallet },
   dashboardInt:{ to: "/admin/dashboard-intendente", label: "Dashboard Intendente", icon: LayoutDashboard },
-  novedades:   { to: "/admin/novedades",    label: "Novedades para Jefes", icon: Megaphone },
+  novedades:   { to: "/admin/novedades",    label: "Novedades para Jefes",         icon: Megaphone },
+  isa:         { to: "/isa/panel",          label: "Panel ISA",                    icon: BarChart3,
+},
 };
 
-function menuFor(area: AdminArea, isAdmin: boolean, isMayor: boolean, isTourism: boolean): Item[] {
+  function menuFor(
+  area: AdminArea,
+  isAdmin: boolean,
+  isMayor: boolean,
+  isTourism: boolean
+): Item[] {
   if (isMayor && !isAdmin) {
     // Intendente: supervisión read-only de todo + dashboard ejecutivo + banners + novedades
     return [
@@ -68,6 +98,8 @@ function menuFor(area: AdminArea, isAdmin: boolean, isMayor: boolean, isTourism:
   }
   const adminExtras = isAdmin ? [ALL.usuarios, ALL.equipo, ALL.novedades, ALL.auditoria, ALL.config] : [];
   switch (area) {
+    case "ISA":
+     return [ALL.isa];
     case "Intendencia":
       return [
         ALL.home, ALL.dashboardInt, ALL.reclamos, ALL.hacienda, ALL.comercios, ALL.lugares,
@@ -86,20 +118,36 @@ function menuFor(area: AdminArea, isAdmin: boolean, isMayor: boolean, isTourism:
     case "Deporte":
       return [ALL.home, ALL.contenido, ALL.deporte, ALL.equipo, ALL.tareas];
     default:
-      return [ALL.home];
+     return [ALL.home];
   }
 }
 
 export default function AdminShell({ children }: { children?: ReactNode }) {
-  const { adminArea } = useRole();
-  const { signOut, roles } = useAuth();
+  const { signOut, roles, area } = useAuth();
+
+const adminArea: AdminArea =
+  roles.includes("isa_super_admin") || roles.includes("isa_consultant")
+    ? "ISA"
+    : roles.includes("mayor")
+    ? "Intendencia"
+    : roles.includes("tourism_chief")
+    ? "Turismo"
+    : VALID_AREAS.includes(area as AdminArea)
+      ? (area as AdminArea)
+      : "Intendencia";
+
   const nav = useNavigate();
   const { pathname } = useLocation();
+
   const isMayor = roles.includes("mayor");
   const isAdmin = roles.includes("admin");
   const isTourism = roles.includes("tourism_chief");
+
   const items = menuFor(adminArea, isAdmin, isMayor, isTourism);
-  const isaUnread = typeof window !== "undefined" && localStorage.getItem("muno.isa.report.unread") === "1";
+
+  const isaUnread =
+  typeof window !== "undefined" &&
+  localStorage.getItem("muno.isa.report.unread") === "1";
 
   return (
     <div className="min-h-screen w-full flex" style={{ background: "#F9FAFB" }}>
@@ -113,7 +161,8 @@ export default function AdminShell({ children }: { children?: ReactNode }) {
             <div className="w-9 h-9 rounded-xl bg-white text-isa-navy grid place-items-center font-extrabold">M</div>
             <div>
               <div className="font-display font-extrabold text-[15px] leading-tight">MUNO+ · Backoffice</div>
-              <div className="text-[10px] uppercase tracking-[0.18em] text-white/60 mt-0.5">Área · {adminArea}</div>
+              <div className="text-[10px] uppercase tracking-[0.18em] text-white/60 mt-0.5"> {adminArea === "ISA"
+                   ? "ISA BUSINESS ANALYST" : `Área · ${adminArea}`} </div>
             </div>
           </div>
         </div>
@@ -236,6 +285,7 @@ export default function AdminShell({ children }: { children?: ReactNode }) {
 }
 
 function pageTitle(p: string) {
+  if (p.startsWith("/isa")) return "ISA Business Analyst";
   if (p === "/admin") return "Panel Municipal";
   if (p.startsWith("/admin/reclamos")) return "Gestión de Reclamos";
   if (p.startsWith("/admin/comercios")) return "Habilitaciones · Comercios";
@@ -253,6 +303,7 @@ function pageTitle(p: string) {
   return "Panel Municipal";
 }
 function pageSubtitle(p: string) {
+  if (p.startsWith("/isa")) return "Panel global de municipios.";
   if (p === "/admin") return "Resumen ejecutivo del municipio.";
   if (p.startsWith("/admin/metricas")) return "Auditoría manual mensual elaborada por la consultora.";
   if (p.startsWith("/admin/comercios")) return "Monitoreo de vencimientos y habilitaciones.";

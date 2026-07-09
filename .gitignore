@@ -30,4 +30,4 @@ dist-ssr
 supabase/.temp/
 
 # Exportaciones
-repopack-output.txt
+repomix-output.txt

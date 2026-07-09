@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import BottomNav from "./BottomNav";
 import { ArrowLeft } from "lucide-react";
-import { ROLE_LABEL, useRole, type AdminArea } from "@/context/RoleContext";
+import { useAuth } from "@/context/AuthContext";
 import NotificationsBell from "./NotificationsBell";
 import FullscreenToggle from "./FullscreenToggle";
 
@@ -40,16 +40,23 @@ const matchTitle = (path: string) => {
   return "MUNO+";
 };
 
-const ADMIN_AREAS: AdminArea[] = ["Intendencia", "Cultura", "Turismo", "Deporte", "Infraestructura", "Comercios"];
-
 export default function AppLayout() {
   const { pathname } = useLocation();
   const navigate = useNavigate();
-  const { role, adminArea, setAdminArea } = useRole();
-  const title = matchTitle(pathname);
-  const showBack = pathname !== "/" && pathname !== "/admin";
-  const isAdmin = role === "admin";
-  const [mobile, setMobile] = useState(false);
+  const { roles, area } = useAuth();
+
+const title = matchTitle(pathname);
+const showBack = pathname !== "/" && pathname !== "/admin";
+
+const isAdmin =
+  roles.includes("admin") ||
+  roles.includes("mayor") ||
+  roles.includes("tourism_chief") ||
+  roles.includes("area_manager") ||
+  roles.includes("isa_super_admin") ||
+  roles.includes("isa_consultant");
+
+const [mobile, setMobile] = useState(false);
 
   return (
     <div className="min-h-screen w-full bg-isa-light">
@@ -59,9 +66,6 @@ export default function AppLayout() {
             <button onClick={() => setMobile(false)} className={`px-3 py-1 rounded-full ${!mobile ? "bg-isa-navy text-isa-white" : "text-isa-navy"}`}>🖥️ Web</button>
             <button onClick={() => setMobile(true)} className={`px-3 py-1 rounded-full ${mobile ? "bg-isa-navy text-isa-white" : "text-isa-navy"}`}>📱 Móvil</button>
           </div>
-          <select value={adminArea} onChange={(e) => setAdminArea(e.target.value as AdminArea)} className="bg-card border rounded-full px-3 py-1.5 text-xs font-bold text-isa-navy shadow-md">
-            {ADMIN_AREAS.map((a) => <option key={a} value={a}>{a}</option>)}
-          </select>
         </div>
       )}
       <div className={isAdmin && !mobile ? "w-full max-w-7xl mx-auto flex flex-col min-h-screen pt-14" : "phone-frame flex flex-col"}>
@@ -84,7 +88,23 @@ export default function AppLayout() {
           <div className="flex items-center gap-2">
             <FullscreenToggle />
             {!isAdmin && <NotificationsBell />}
-            <span className="isa-chip bg-accent text-isa-navy">{ROLE_LABEL[role]}{isAdmin ? ` · ${adminArea}` : ""}</span>
+            <span className="isa-chip bg-accent text-isa-navy">
+  {roles.includes("isa_super_admin")
+    ? "ISA Super Admin"
+    : roles.includes("isa_consultant")
+    ? "Consultor ISA"
+    : roles.includes("admin")
+    ? "Administrador"
+    : roles.includes("mayor")
+    ? "Intendente"
+    : roles.includes("tourism_chief")
+    ? "Jefe de Turismo"
+    : roles.includes("area_manager")
+    ? area ?? "Jefe de Área"
+    : roles.includes("resident")
+    ? "Vecino"
+    : "Turista"}
+</span>
           </div>
         </header>
         <main className="flex-1 overflow-y-auto p-4 animate-fade-in">

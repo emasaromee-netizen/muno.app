@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
+import { can } from "@/security/can";
+import { PERMISSIONS } from "@/security/permissions";
 import { logActivity } from "@/lib/audit";
 import { toast } from "sonner";
 import { UserPlus, Pencil, Power, ShieldCheck, X, Copy } from "lucide-react";
@@ -21,10 +23,8 @@ type Row = {
 };
 
 export default function AdminUsuariosMunicipales() {
-  const { roles } = useAuth();
-  const isAdmin = roles.includes("admin");
-  const isMayor = roles.includes("mayor");
-  const canManage = isAdmin || isMayor;
+  const { roles, area: adminArea } = useAuth();
+  const canManageUsers = can(roles, adminArea, PERMISSIONS.USERS_MANAGE);
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<Row | null>(null);
@@ -59,7 +59,7 @@ export default function AdminUsuariosMunicipales() {
     load();
   };
 
-  if (!canManage) {
+  if (!canManageUsers) {
     return <div className="bg-white border rounded-[16px] p-6 text-center text-sm text-muted-foreground">Acceso reservado al Intendente.</div>;
   }
 

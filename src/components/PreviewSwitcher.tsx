@@ -2,26 +2,23 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { UserCog, Check, X, EyeOff } from "lucide-react";
 import { usePreview, PreviewRole } from "@/context/PreviewContext";
-import { useRole, type AdminArea } from "@/context/RoleContext";
 
 type Opt = {
   id: PreviewRole;
   label: string;
   sub: string;
   route: string;
-  appRole: any;
-  area?: AdminArea;
 };
 
 const OPTIONS: Opt[] = [
-  { id: "turista",   label: "Turista",     sub: "Sin login",                  route: "/",                  appRole: "turista" },
-  { id: "vecino",    label: "Vecino",      sub: "Incluye Comercio",           route: "/",                  appRole: "vecino"  },
-  { id: "intendente",            label: "Intendente",          sub: "Acceso completo",       route: "/admin/dashboard", appRole: "admin", area: "Intendencia" },
-  { id: "jefe_infraestructura",  label: "Jefe Infraestructura", sub: "Reclamos / Obras",     route: "/admin/dashboard", appRole: "admin", area: "Infraestructura" },
-  { id: "jefe_cultura",          label: "Jefe Cultura",        sub: "Eventos / Inscripciones", route: "/admin/dashboard", appRole: "admin", area: "Cultura" },
-  { id: "jefe_deporte",          label: "Jefe Deportes",       sub: "Inscripciones / Agenda", route: "/admin/dashboard", appRole: "admin", area: "Deporte" },
-  { id: "municipio", label: "Municipio (legacy)", sub: "Vista clásica",        route: "/admin/dashboard",   appRole: "admin", area: "Intendencia" },
-  { id: "isa",       label: "ISA Global",  sub: "Super Administrador",        route: "/isa/global",        appRole: "admin"   },
+  { id: "turista", label: "Turista", sub: "Sin login", route: "/" },
+  { id: "vecino", label: "Vecino", sub: "Incluye Comercio", route: "/" },
+  { id: "intendente", label: "Intendente", sub: "Acceso completo", route: "/admin/dashboard" },
+  { id: "jefe_infraestructura", label: "Jefe Infraestructura", sub: "Reclamos / Obras", route: "/admin/dashboard" },
+  { id: "jefe_cultura", label: "Jefe Cultura", sub: "Eventos / Inscripciones", route: "/admin/dashboard" },
+  { id: "jefe_deporte", label: "Jefe Deportes", sub: "Inscripciones / Agenda", route: "/admin/dashboard" },
+  { id: "municipio", label: "Municipio (legacy)", sub: "Vista clásica", route: "/admin/dashboard" },
+  { id: "isa", label: "ISA Global", sub: "Super Administrador", route: "/isa/global" },
 ];
 
 const VISIBILITY_KEY = "muno.preview.hidden";
@@ -30,7 +27,6 @@ export default function PreviewSwitcher() {
   const [open, setOpen] = useState(false);
   const [hidden, setHidden] = useState(() => localStorage.getItem(VISIBILITY_KEY) === "1");
   const { preview, setPreview } = usePreview();
-  const { setRole, setAdminArea } = useRole();
   const navigate = useNavigate();
 
   const forced = typeof window !== "undefined" && localStorage.getItem("muno.preview.force") === "1";
@@ -39,8 +35,6 @@ export default function PreviewSwitcher() {
 
   const select = (opt: Opt) => {
     setPreview(opt.id);
-    setRole(opt.appRole);
-    if (opt.area) setAdminArea(opt.area);
     setOpen(false);
     navigate(opt.route);
   };

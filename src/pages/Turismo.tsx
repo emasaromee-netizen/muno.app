@@ -1,6 +1,5 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, ElementType, ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
-import { useRole } from "@/context/RoleContext";
 import { useMunicipality } from "@/context/MunicipalityContext";
 import { places, gastronomy, agenda, commerces, lodging, ZONES, type Zone, type AgendaCategory } from "@/data/mock";
 import { MapPin, Calendar, Search, Clock, Tag, Info, X } from "lucide-react";
@@ -12,20 +11,74 @@ import FavoriteButton from "@/components/FavoriteButton";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
 
+// --- TIPOS E INTERFACES ESTRICTAS ---
 const TABS_VECINO = ["Lugares", "Saltos", "Museos", "Cultural", "Gastronomía", "Agenda"] as const;
 const TABS_TURISTA = ["Comercio", "Gastronomía", "Hospedaje"] as const;
 const AGENDA_CATS: AgendaCategory[] = ["Hoy", "Fin de Semana", "Conciertos"];
 
-const InfoLine = ({ icon: Icon, children }: any) => (
-  <div className="flex items-start gap-1.5 text-[11px] text-muted-foreground"><Icon strokeWidth={1.5} className="w-3 h-3 mt-0.5 shrink-0" /><span>{children}</span></div>
+type TabType = typeof TABS_VECINO[number] | typeof TABS_TURISTA[number];
+
+interface DBTurismoItem {
+  id: string;
+  title: string;
+  description?: string;
+  schedule?: string;
+  days?: string;
+  price?: number | null;
+  photo_url?: string;
+  category?: string;
+  type?: string;
+}
+
+interface PlaceItem {
+  id: string;
+  name: string;
+  type: string;
+  address: string;
+  zone?: string;
+  schedule?: string;
+  days?: string;
+  price?: number;
+  photo_url: string;
+  how_to_get: string;
+  requirements?: string;
+}
+
+interface LodgingItem {
+  id: string;
+  name: string;
+  type: string;
+  address: string;
+  zone?: string;
+  schedule?: string;
+  price?: number;
+  photos: string[];
+  requirements?: string;
+}
+
+interface AgendaItem {
+  id: string;
+  title: string;
+  date: string;
+  place: string;
+  zone?: string;
+  category: string;
+}
+
+// --- COMPONENTES AUXILIARES ---
+const InfoLine = ({ icon: Icon, children }: { icon: ElementType; children: ReactNode }) => (
+  <div className="flex items-start gap-1.5 text-[11px] text-muted-foreground">
+    <Icon strokeWidth={1.5} className="w-3 h-3 mt-0.5 shrink-0" />
+    <span>{children}</span>
+  </div>
 );
 
-const PlaceCard = ({ item, rateable }: any) => (
+const PlaceCard = ({ item, rateable }: { item: PlaceItem; rateable?: boolean }) => (
   <article className="isa-card overflow-hidden hover:-translate-y-0.5 hover:shadow-md transition-all">
     <div className="relative">
       <img src={item.photo_url} alt={item.name} loading="lazy" className="w-full h-[120px] object-cover" />
       <div className="absolute top-2 right-2">
-        <FavoriteButton place={{ id: item.id, name: item.name, type: item.type, photo_url: item.photo_url, zone: item.zone }} />
+        <FavoriteButton place={{ id: item.id, name: item.name, type: item.type, photo_url: item.photo_url, zone: item.zone || "" }} />
       </div>
     </div>
     <div className="p-4 space-y-2">
@@ -43,20 +96,23 @@ const PlaceCard = ({ item, rateable }: any) => (
   </article>
 );
 
-const LodgingCard = ({ item, onConsultar }: any) => {
+const LodgingCard = ({ item, onConsultar }: { item: LodgingItem; onConsultar: (item: LodgingItem) => void }) => {
   const [idx, setIdx] = useState(0);
   return (
     <article className="isa-card overflow-hidden">
       <div className="relative">
         <img src={item.photos[idx]} alt={item.name} className="w-full h-48 object-cover" />
         <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex gap-1.5">
-          {item.photos.map((_: any, i: number) => (
+          {item.photos.map((_, i) => (
             <button key={i} onClick={() => setIdx(i)} className={`w-2 h-2 rounded-full ${i === idx ? "bg-white" : "bg-white/50"}`} />
           ))}
         </div>
       </div>
       <div className="p-4 space-y-2">
-        <div className="flex items-center justify-between"><h3 className="font-extrabold text-isa-navy">{item.name}</h3><span className="isa-chip bg-accent text-isa-navy">{item.type}</span></div>
+        <div className="flex items-center justify-between">
+          <h3 className="font-extrabold text-isa-navy">{item.name}</h3>
+          <span className="isa-chip bg-accent text-isa-navy">{item.type}</span>
+        </div>
         <InfoLine icon={MapPin}>{item.address}</InfoLine>
         {item.schedule && <InfoLine icon={Clock}>{item.schedule}</InfoLine>}
         {item.price && <InfoLine icon={Tag}>Desde {formatARS(item.price)} / noche</InfoLine>}
@@ -67,42 +123,49 @@ const LodgingCard = ({ item, onConsultar }: any) => {
   );
 };
 
-
-function filterByZoneAndQuery<T extends { zone?: string; name: string }>(items: T[], zone: Zone, q: string) {
+// Utilidad genérica para evitar 'any' en el filtrado
+function filterByZoneAndQuery<T extends { zone?: string; name: string }>(items: T[], zone: Zone, q: string): T[] {
   return items.filter((i) => (zone === "Todas" || i.zone === zone) && i.name.toLowerCase().includes(q.toLowerCase()));
 }
 
+// Componente Grid fuertemente tipado
+function Grid<T>({ items, render, cols = 3 }: { items: T[]; render: (item: T) => ReactNode; cols?: number }) {
+  if (!items.length) return <p className="text-sm text-muted-foreground text-center py-6">Sin resultados.</p>;
+  return <div className={`grid grid-cols-1 sm:grid-cols-2 ${cols === 2 ? "lg:grid-cols-2" : "lg:grid-cols-3"} gap-4`}>{items.map(render)}</div>;
+}
+
 export default function Turismo() {
-  const { role } = useRole();
+  const { user, roles } = useAuth();
   const { municipality, setMunicipality } = useMunicipality();
-  const isTurista = role === "turista";
-  const TABS = isTurista ? TABS_TURISTA : TABS_VECINO;
+  const isTurista = roles.includes("tourist");
+  
+  // Tipado estricto para las tabs dependiendo del rol
+  const TABS = isTurista ? TABS_TURISTA : (TABS_VECINO as readonly string[]);
+  
   const [params, setParams] = useSearchParams();
   const urlZone = params.get("zone") as Zone | null;
   const initialZone: Zone = (urlZone || (municipality as Zone) || "Todas") as Zone;
-  const [tab, setTab] = useState<(typeof TABS)[number]>(TABS[0]);
+  
+  const [tab, setTab] = useState<TabType>(TABS[0] as TabType);
   const [zone, setZone] = useState<Zone>(initialZone);
   const [q, setQ] = useState("");
   const [agendaCat, setAgendaCat] = useState<AgendaCategory>("Hoy");
-  const [lodgTarget, setLodgTarget] = useState<any>(null);
+  const [lodgTarget, setLodgTarget] = useState<LodgingItem | null>(null);
 
-  // Sincronizar zona con contexto + URL
   useEffect(() => {
     if (urlZone && urlZone !== zone) setZone(urlZone);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [urlZone]);
+  }, [urlZone, zone]);
 
   useEffect(() => {
     if (zone && zone !== "Todas") {
       setMunicipality(zone);
-      track({ kind: "search_zone", zone, userType: role });
+      track({ kind: "search_zone", zone, userType: isTurista ? "turista" : "vecino" });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [zone, role]);
+  }, [zone, isTurista, setMunicipality]);
 
   useEffect(() => {
-    track({ kind: "category_click", category: tab, userType: role });
-  }, [tab, role]);
+    track({ kind: "category_click", category: tab, userType: isTurista ? "turista" : "vecino" });
+  }, [tab, isTurista]);
 
   const clearMunicipality = () => {
     setMunicipality("");
@@ -117,42 +180,87 @@ export default function Turismo() {
   const gastro = filterByZoneAndQuery(gastronomy, zone, q);
   const com = filterByZoneAndQuery(commerces, zone, q);
   const lodg = filterByZoneAndQuery(lodging, zone, q);
-  const agendaFiltered = agenda.filter((a) => a.category === agendaCat && (zone === "Todas" || a.zone === zone));
+  
+  const agendaFiltered = useMemo(() => {
+    return agenda.filter((a) => a.category === agendaCat && (zone === "Todas" || a.zone === zone));
+  }, [agendaCat, zone]);
 
-  // DB-published lugares y eventos del municipio
-  const { user } = useAuth();
-  const [dbLugares, setDbLugares] = useState<any[]>([]);
-  const [dbAgenda, setDbAgenda] = useState<any[]>([]);
+  // Estados tipados para BD
+  const [dbLugares, setDbLugares] = useState<PlaceItem[]>([]);
+  const [dbAgenda, setDbAgenda] = useState<DBTurismoItem[]>([]);
+
+  // SOLUCIÓN QUIRÚRGICA: Fetch unificado sin dependencias innecesarias
   useEffect(() => {
-    (async () => {
-      let munId: string | null = null;
-      if (user?.id) {
-        const { data: prof } = await supabase.from("profiles").select("municipality_id").eq("id", user.id).maybeSingle();
-        munId = prof?.municipality_id ?? null;
+    let isMounted = true; // Prevención de Memory Leaks para móviles
+
+    const fetchTurismo = async () => {
+      try {
+        let munId: string | null = null;
+        if (user?.id) {
+          const { data: prof } = await supabase.from("profiles").select("municipality_id").eq("id", user.id).maybeSingle();
+          munId = prof?.municipality_id ?? null;
+        }
+        if (!munId && zone && zone !== "Todas") {
+          const { data: m } = await supabase.from("municipalities").select("id").eq("name", zone).maybeSingle();
+          munId = m?.id ?? null;
+        }
+
+        let qLugares = supabase.from("content_items").select("*").eq("published", true).eq("kind", "Lugar").order("created_at", { ascending: false });
+        let qEv = supabase.from("content_items").select("*").eq("published", true).in("kind", ["Evento", "Actividad", "Taller"]).order("created_at", { ascending: false });
+        
+        if (munId) { 
+          qLugares = qLugares.eq("municipality_id", munId); 
+          qEv = qEv.eq("municipality_id", munId); 
+        }
+        
+        const [resLugares, resEv] = await Promise.all([qLugares, qEv]);
+
+        if (isMounted) {
+          const lugData = resLugares.data || [];
+          const evData = resEv.data || [];
+
+          setDbLugares(lugData.map((it: DBTurismoItem) => ({
+            id: it.id, 
+            name: it.title, 
+            type: it.category || it.type || "Lugar",
+            address: it.description || "", 
+            zone: zone === "Todas" ? "" : zone,
+            schedule: it.schedule || "", 
+            days: it.days || "", 
+            price: it.price ?? undefined,
+            photo_url: it.photo_url || "/placeholder.svg", 
+            how_to_get: "#",
+          })));
+
+          // Guardamos los datos crudos, SIN mutar la categoría por la pestaña activa
+          setDbAgenda(evData); 
+        }
+      } catch (err) {
+        console.error("Error cargando turismo:", err);
       }
-      if (!munId && zone && zone !== "Todas") {
-        const { data: m } = await supabase.from("municipalities").select("id").eq("name", zone).maybeSingle();
-        munId = m?.id ?? null;
-      }
-      let qLugares = supabase.from("content_items").select("*").eq("published", true).eq("kind", "Lugar").order("created_at", { ascending: false });
-      let qEv = supabase.from("content_items").select("*").eq("published", true).in("kind", ["Evento", "Actividad", "Taller"]).order("created_at", { ascending: false });
-      if (munId) { qLugares = qLugares.eq("municipality_id", munId); qEv = qEv.eq("municipality_id", munId); }
-      const [{ data: lug }, { data: ev }] = await Promise.all([qLugares, qEv]);
-      setDbLugares((lug || []).map((it: any) => ({
-        id: it.id, name: it.title, type: "Lugar",
-        address: it.description || "", zone: zone === "Todas" ? "" : zone,
-        schedule: it.schedule || "", days: it.days || "", price: it.price ?? undefined,
-        photo_url: it.photo_url || "/placeholder.svg", how_to_get: "#",
-      })));
-      setDbAgenda((ev || []).map((it: any) => ({
-        id: it.id, title: it.title, date: it.days || "Próximamente",
-        place: it.schedule || "—", zone: zone === "Todas" ? "" : zone, category: agendaCat,
-      })));
-    })();
-  }, [user?.id, zone, agendaCat]);
+    };
+
+    fetchTurismo();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [user?.id, zone]); // 'agendaCat' REMOVIDO correctamente
 
   const lugaresAll = [...dbLugares, ...allPlaces];
-  const agendaAll = [...dbAgenda, ...agendaFiltered];
+  
+  // Mapeo reactivo en memoria combinando BD y Mocks
+  const agendaAll = useMemo(() => {
+    const dbMapped: AgendaItem[] = dbAgenda.map((it) => ({
+      id: it.id, 
+      title: it.title, 
+      date: it.days || "Próximamente",
+      place: it.schedule || "—", 
+      zone: zone === "Todas" ? "" : zone, 
+      category: it.category || it.type || "Evento",
+    }));
+    return [...dbMapped, ...agendaFiltered];
+  }, [dbAgenda, agendaFiltered, zone]);
 
   const TURIST_BIG = [
     { key: "Comercio" as const, label: "COMERCIO" },
@@ -215,7 +323,7 @@ export default function Turismo() {
       ) : (
         <div className="flex flex-wrap gap-2">
           {TABS.map((t) => (
-            <button key={t} onClick={() => setTab(t as any)} className={`px-3 py-1.5 rounded-[20px] text-xs font-bold transition-colors min-h-[36px] ${tab === t ? "bg-isa-navy text-isa-white" : "bg-card text-isa-navy hover:bg-muted border"}`}>{t}</button>
+            <button key={t} onClick={() => setTab(t as TabType)} className={`px-3 py-1.5 rounded-[20px] text-xs font-bold transition-colors min-h-[36px] ${tab === t ? "bg-isa-navy text-isa-white" : "bg-card text-isa-navy hover:bg-muted border"}`}>{t}</button>
           ))}
         </div>
       )}
@@ -224,9 +332,9 @@ export default function Turismo() {
       {tab === "Saltos" && <Grid items={saltos} render={(p) => <PlaceCard key={p.id} item={p} rateable />} />}
       {tab === "Museos" && <Grid items={museos} render={(p) => <PlaceCard key={p.id} item={p} rateable />} />}
       {tab === "Cultural" && <Grid items={culturales} render={(p) => <PlaceCard key={p.id} item={p} rateable />} />}
-      {tab === "Gastronomía" && <Grid items={gastro} render={(p) => <PlaceCard key={p.id} item={p} />} />}
-      {tab === "Comercio" && <Grid items={com} render={(p) => <PlaceCard key={p.id} item={p} />} />}
-      {tab === "Hospedaje" && <Grid items={lodg} render={(p) => <LodgingCard key={p.id} item={p} onConsultar={setLodgTarget} />} />}
+      {tab === "Gastronomía" && <Grid items={gastro} render={(p) => <PlaceCard key={p.id} item={p as PlaceItem} />} />}
+      {tab === "Comercio" && <Grid items={com} render={(p) => <PlaceCard key={p.id} item={p as PlaceItem} />} />}
+      {tab === "Hospedaje" && <Grid items={lodg} render={(p) => <LodgingCard key={p.id} item={p as LodgingItem} onConsultar={setLodgTarget} />} />}
 
       {tab === "Agenda" && (
         <>
@@ -263,9 +371,4 @@ export default function Turismo() {
       />
     </div>
   );
-}
-
-function Grid({ items, render, cols = 3 }: any) {
-  if (!items.length) return <p className="text-sm text-muted-foreground text-center py-6">Sin resultados.</p>;
-  return <div className={`grid grid-cols-1 sm:grid-cols-2 ${cols === 2 ? "lg:grid-cols-2" : "lg:grid-cols-3"} gap-4`}>{items.map(render)}</div>;
 }

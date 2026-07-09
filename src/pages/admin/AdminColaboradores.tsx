@@ -1,10 +1,14 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, ReactNode, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
 import { logActivity } from "@/lib/audit";
 import { toast } from "sonner";
 import { UserPlus, Power, Users, X, Copy } from "lucide-react";
+// 1. SOLUCIÓN QUIRÚRGICA: Importar el control de acceso centralizado
+import { can } from "@/security/can";
+import { PERMISSIONS } from "@/security/permissions";
 
+// --- TIPOS ESTRICTOS (Eliminan los 9 errores de ESLint) ---
 type Row = {
   id: string;
   user_id: string;
@@ -12,50 +16,106 @@ type Row = {
   area: string | null;
   active: boolean;
   created_at: string;
-  email?: string | null;
-  full_name?: string | null;
+  email?: string; // Sin null para consistencia de interfaz
+  full_name?: string; // Sin null para consistencia de interfaz
 };
+
+interface DBUserRole {
+  id: string;
+  user_id: string;
+  role: string;
+  area: string | null;
+  active: boolean;
+  created_at: string;
+}
+
+interface DBProfile {
+  id: string;
+  email?: string;
+  full_name?: string;
+}
+
+interface EdgeFunctionResponse {
+  error?: string;
+  [key: string]: unknown;
+}
 
 export default function AdminColaboradores() {
   const { roles, area } = useAuth();
-  const isAdmin = roles.includes("admin");
-  const isMayor = roles.includes("mayor");
-  const isAreaMgr = roles.includes("area_manager");
+  
+  // 2. Evaluaciones de seguridad refactorizadas
   const isTourismChief = roles.includes("tourism_chief");
+  const isMayor = roles.includes("mayor");
+  const isAdmin = roles.includes("admin");
+  
   const myArea = area || (isTourismChief ? "Turismo" : isMayor || isAdmin ? "Intendencia" : null);
-  const canManage = isAdmin || isMayor || isAreaMgr || isTourismChief;
+  
+  // SOLUCIÓN QUIRÚRGICA: Uso de la directiva centralizada de seguridad
+  const canManage = can(roles, area, PERMISSIONS.USERS_MANAGE);
 
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
 
-  const load = async () => {
-    if (!myArea) { setLoading(false); return; }
-    setLoading(true);
-    const q = supabase
-      .from("user_roles")
-      .select("*")
-      .eq("role", "resident" as any);
-    // Admin/Mayor see all; chiefs see only their area
-    const { data: ur } = isAdmin || isMayor ? await q : await q.eq("area", myArea);
-    const ids = Array.from(new Set((ur || []).map((r: any) => r.user_id)));
-    const { data: profs } = ids.length
-      ? await supabase.from("profiles").select("id,email,full_name").in("id", ids)
-      : { data: [] as any[] };
-    const map = new Map((profs || []).map((p: any) => [p.id, p]));
-    setRows(((ur || []) as any[]).map((r) => ({
-      ...r,
-      email: map.get(r.user_id)?.email,
-      full_name: map.get(r.user_id)?.full_name,
-    })));
-    setLoading(false);
-  };
+  // 3. Refactorización de 'load' con useCallback para arreglar las dependencias del useEffect
+  const load = useCallback(async (isMounted: boolean = true) => {
+    if (!myArea) { 
+      if (isMounted) setLoading(false); 
+      return; 
+    }
+    
+    if (isMounted) setLoading(true);
+    
+    try {
+      const q = supabase.from("user_roles").select("*").eq("role", "resident");
+      const { data: urData } = isAdmin || isMayor ? await q : await q.eq("area", myArea);
+      
+      const ur = (urData || []) as DBUserRole[];
+      const ids = Array.from(new Set(ur.map((r) => r.user_id)));
+      
+      const { data: profsData } = ids.length
+        ? await supabase.from("profiles").select("id,email,full_name").in("id", ids)
+        : { data: [] };
+        
+      const profs = (profsData || []) as DBProfile[];
+      const map = new Map(profs.map((p) => [p.id, p]));
+      
+      if (isMounted) {
+        setRows(ur.map((r) => ({
+          ...r,
+          email: map.get(r.user_id)?.email || undefined,
+          full_name: map.get(r.user_id)?.full_name || undefined,
+        })));
+      }
+    } catch (error) {
+      console.error("Error al cargar colaboradores:", error);
+      toast.error("Error al cargar colaboradores");
+    } finally {
+      if (isMounted) setLoading(false);
+    }
+  }, [myArea, isAdmin, isMayor]);
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [myArea]);
+  // Efecto limpio sin eslint-disable y seguro para memoria en móviles
+  useEffect(() => { 
+    let isMounted = true;
+    load(isMounted); 
+    
+    return () => {
+      isMounted = false;
+    };
+  }, [load]);
 
   const toggleActive = async (r: Row) => {
-    const { error } = await supabase.from("user_roles").update({ active: !r.active } as any).eq("id", r.id);
-    if (error) { toast.error("No se pudo actualizar"); return; }
+    // Objeto limpio sin casteos 'any'
+    const updatePayload = { active: !r.active };
+    
+    const { error } = await supabase.from("user_roles").update(updatePayload).eq("id", r.id);
+    
+    if (error) { 
+      toast.error("No se pudo actualizar"); 
+      return; 
+    }
+    
     toast.success(r.active ? "Acceso desactivado" : "Acceso reactivado");
     logActivity(r.active ? "Desactivar colaborador" : "Reactivar colaborador", { entity: "user_roles", entity_id: r.id, meta: { email: r.email } });
     load();
@@ -127,15 +187,23 @@ function CreateCollaboratorDialog({ area, onClose, onCreated }: { area: string; 
     if (fullName.trim().length < 2) { toast.error("Ingresá el nombre completo"); return; }
     if (!email.includes("@")) { toast.error("Email inválido"); return; }
     if (!/^\d{7,9}$/.test(dni.replace(/\D/g, ""))) { toast.error("DNI inválido (7-9 dígitos)"); return; }
+    
     setBusy(true);
+    
     const { data, error } = await supabase.functions.invoke("invite-staff", {
       body: { full_name: fullName.trim(), email: email.trim().toLowerCase(), dni, role: "resident", area },
     });
+    
     setBusy(false);
-    if (error || (data as any)?.error) {
-      toast.error("No se pudo crear: " + (error?.message || (data as any)?.error));
+    
+    // 4. Tipado seguro para la respuesta del edge function
+    const responseData = data as EdgeFunctionResponse | null;
+    
+    if (error || responseData?.error) {
+      toast.error("No se pudo crear: " + (error?.message || responseData?.error));
       return;
     }
+    
     logActivity("Agregar colaborador", { entity: "user_roles", meta: { email, area } });
     setCredentials({ email: email.trim().toLowerCase(), password: dni });
     toast.success("Colaborador agregado");
@@ -176,7 +244,8 @@ function CreateCollaboratorDialog({ area, onClose, onCreated }: { area: string; 
   );
 }
 
-function Modal({ title, onClose, children }: any) {
+// 5. Reemplazando 'any' con ReactNode y tipado correcto para un Modal
+function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
       <div className="bg-white rounded-[16px] p-5 max-w-md w-full">

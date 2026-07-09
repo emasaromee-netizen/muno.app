@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { Camera, X, CheckCircle2, Pencil, Trash2, Loader2 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
-import { useRole } from "@/context/RoleContext";
 import { AREAS, type Area } from "@/data/mock";
 import { toast } from "sonner";
 import { formatARS } from "@/lib/format";
+import { can } from "@/security/can";
+import { PERMISSIONS } from "@/security/permissions";
 
 const KINDS = ["Actividad", "Evento", "Taller", "Lugar"] as const;
 type Kind = (typeof KINDS)[number];
@@ -27,10 +28,12 @@ type Item = {
 const EMPTY = { title: "", price: "", days: "", schedule: "", desc: "" };
 
 export default function AdminContenido() {
-  const { user, roles } = useAuth();
-  const { adminArea } = useRole();
-  const isAdmin = roles.includes("admin");
-  const isManager = roles.includes("area_manager");
+  const { user, roles, area: adminArea } = useAuth();
+
+  const canCreateContent = can(roles, adminArea, PERMISSIONS.CONTENT_CREATE);
+  const canEditContent = can(roles, adminArea, PERMISSIONS.CONTENT_EDIT);
+  const canDeleteContent = can(roles, adminArea, PERMISSIONS.CONTENT_DELETE);
+  const canEditAllAreas = can(roles, adminArea, PERMISSIONS.SYSTEM_ADMIN);
 
   const [kind, setKind] = useState<Kind>("Evento");
   const [area, setArea] = useState<Area>(((adminArea as Area) && AREAS.includes(adminArea as Area)) ? (adminArea as Area) : "Cultura");
@@ -54,14 +57,19 @@ export default function AdminContenido() {
   const load = async () => {
     setLoading(true);
     let q = supabase.from("content_items").select("*").order("created_at", { ascending: false });
-    if (!isAdmin) q = q.eq("area", area);
+    if (!canEditAllAreas) {
+    q = q.eq("area", area);
+    }
     if (myMunId) q = q.eq("municipality_id", myMunId);
     const { data } = await q;
     setItems((data as Item[]) || []);
     setLoading(false);
   };
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [area, isAdmin, myMunId]);
+  useEffect(() => {
+  load();
+  /* eslint-disable-next-line */
+  }, [area, canEditAllAreas, myMunId]);
 
 
   const onUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -129,6 +137,15 @@ export default function AdminContenido() {
   };
 
   const submit = async () => {
+    if (!canCreateContent && !editingId) {
+    toast.error("No tenés permisos.");
+    return;
+    }
+
+if (!canEditContent && editingId) {
+    toast.error("No tenés permisos.");
+    return;
+    }
     if (!form.title.trim()) {
       toast.error("Falta el título");
       return;
@@ -174,6 +191,10 @@ export default function AdminContenido() {
   };
 
   const startEdit = (it: Item) => {
+  if (!canEditContent) {
+    toast.error("No tenés permisos.");
+    return;
+    }
     setEditingId(it.id);
     setKind(it.kind as Kind);
     setForm({
@@ -189,6 +210,10 @@ export default function AdminContenido() {
   };
 
   const remove = async (id: string) => {
+    if (!canDeleteContent) {
+    toast.error("No tenés permisos.");
+    return;
+    }
     if (!confirm("¿Eliminar esta publicación?")) return;
     const { error } = await supabase.from("content_items").delete().eq("id", id);
     if (error) {
@@ -201,7 +226,7 @@ export default function AdminContenido() {
 
   return (
     <div className="space-y-5">
-      {isAdmin && (
+      {canEditAllAreas && (
         <div className="isa-card p-3 flex items-center gap-2">
           <span className="text-[11px] uppercase tracking-wider font-bold text-muted-foreground">Área</span>
           <select value={area} onChange={(e) => setArea(e.target.value as Area)} className="px-3 py-2 rounded-xl border bg-background text-sm font-bold">
@@ -216,7 +241,8 @@ export default function AdminContenido() {
         ))}
       </div>
 
-      <div className="isa-card p-5 space-y-3">
+      {(canCreateContent || canEditContent) && (
+        <div className="isa-card p-5 space-y-3">
         <h3>{editingId ? `Editar ${kind.toLowerCase()}` : `Nuevo ${kind.toLowerCase()}`} · {area}</h3>
 
         {photo ? (
@@ -264,19 +290,32 @@ export default function AdminContenido() {
         <input placeholder="Horario" value={form.schedule} onChange={(e) => setForm({ ...form, schedule: e.target.value })} className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm" />
 
         <div className="flex gap-2">
-          <button onClick={submit} disabled={!form.title || busy} className="flex-1 bg-isa-navy text-isa-white rounded-[20px] py-3 font-bold disabled:opacity-40 flex items-center justify-center gap-2">
-            {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
-            {editingId ? "Guardar cambios" : "Publicar"}
-          </button>
+          {((canCreateContent && !editingId) ||
+  (canEditContent && editingId)) && (
+  <button
+    onClick={submit}
+    disabled={!form.title || busy}
+    className="flex-1 bg-isa-navy text-isa-white rounded-[20px] py-3 font-bold disabled:opacity-40 flex items-center justify-center gap-2"
+  >
+    {busy ? (
+      <Loader2 className="w-4 h-4 animate-spin" />
+    ) : (
+      <CheckCircle2 className="w-4 h-4" />
+    )}
+
+    {editingId ? "Guardar cambios" : "Publicar"}
+  </button>
+)}
           {editingId && (
             <button onClick={reset} className="px-4 rounded-[20px] border-2 border-isa-navy text-isa-navy font-bold text-sm">Cancelar</button>
           )}
         </div>
       </div>
+      )}
 
       <section>
         <div className="flex items-center justify-between mb-3">
-          <h2>Lo publicado {!isAdmin && `· ${area}`}</h2>
+          <h2> Lo publicado {!canEditAllAreas && `· ${area}`} </h2>
           <span className="text-xs text-muted-foreground">{items.length} ítem(s)</span>
         </div>
         {loading ? (
@@ -298,8 +337,18 @@ export default function AdminContenido() {
                     {it.kind} · {it.area}{it.price ? ` · ${formatARS(it.price)}` : ""}{it.schedule ? ` · ${it.schedule}` : ""}
                   </div>
                 </div>
-                <button onClick={() => startEdit(it)} className="w-9 h-9 grid place-items-center rounded-lg hover:bg-isa-light text-isa-navy"><Pencil className="w-4 h-4" /></button>
-                <button onClick={() => remove(it.id)} className="w-9 h-9 grid place-items-center rounded-lg hover:bg-muno-red/10 text-muno-red"><Trash2 className="w-4 h-4" /></button>
+                {canEditContent && (
+                <button
+                    onClick={() => startEdit(it)}
+                    className="w-9 h-9 grid place-items-center rounded-lg hover:bg-isa-light text-isa-navy" >
+                    <Pencil className="w-4 h-4" />
+               </button>)}
+               {canDeleteContent && (
+               <button
+                    onClick={() => remove(it.id)}
+                    className="w-9 h-9 grid place-items-center rounded-lg hover:bg-muno-red/10 text-muno-red" >
+                    <Trash2 className="w-4 h-4" />
+              </button>)}
               </li>
             ))}
           </ul>

@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, ElementType } from "react";
 import { places } from "@/data/mock";
 import { MapPin, Trees, Landmark, Clock, Tag, Info } from "lucide-react";
 import { formatARS } from "@/lib/format";
@@ -6,21 +6,49 @@ import { track } from "@/lib/analytics";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
 import { useMunicipality } from "@/context/MunicipalityContext";
+import FavoriteButton from "@/components/FavoriteButton";
 
+// 1. Tipos estrictos 
 type Cat = "Naturaleza" | "Cultura";
 
-const NATURE_TYPES = ["Naturaleza", "Salto", "Parque Nacional", "Río", "Dique"];
-const CULTURE_TYPES = ["Museo", "Cultural", "Monumento"];
+interface PlaceItem {
+  id: string;
+  name: string;
+  type: string;
+  address: string;
+  zone: string;
+  schedule: string;
+  days: string;
+  price?: number;
+  photo_url: string;
+  how_to_get: string;
+  requirements?: string;
+}
 
-const InfoLine = ({ icon: Icon, children }: any) => (
+// Interfaz estricta para la respuesta de la base de datos (Elimina el error de la Línea 92)
+interface DBContentItem {
+  id: string;
+  title: string;
+  category?: string;
+  type?: string;
+  description?: string;
+  schedule?: string;
+  days?: string;
+  price?: number | null;
+  photo_url?: string;
+}
+
+const NATURE_TYPES = ["Naturaleza", "Salto", "Parque Nacional", "Río", "Dique"];
+const CULTURE_TYPES = ["Museo", "Cultural", "Monumento", "Cultura"];
+
+// Tipado estricto con ElementType (Elimina el error de la Línea 32)
+const InfoLine = ({ icon: Icon, children }: { icon: ElementType; children: React.ReactNode }) => (
   <div className="flex items-start gap-1.5 text-[11px] text-muted-foreground">
     <Icon strokeWidth={1.5} className="w-3 h-3 mt-0.5 shrink-0" /><span>{children}</span>
   </div>
 );
 
-import FavoriteButton from "@/components/FavoriteButton";
-
-const PlaceCard = ({ item }: any) => (
+const PlaceCard = ({ item }: { item: PlaceItem }) => (
   <article className="isa-card overflow-hidden hover:-translate-y-0.5 hover:shadow-md transition-all">
     <div className="relative">
       <img src={item.photo_url} alt={item.name} loading="lazy" className="w-full h-[140px] object-cover" />
@@ -48,46 +76,66 @@ export default function Lugares() {
   const [cat, setCat] = useState<Cat>("Naturaleza");
   const { user } = useAuth();
   const { municipality } = useMunicipality();
-  const [dbPlaces, setDbPlaces] = useState<any[]>([]);
+  const [dbPlaces, setDbPlaces] = useState<PlaceItem[]>([]);
 
   useEffect(() => {
-    (async () => {
+    let isMounted = true; 
+
+    const fetchLugares = async () => {
       let munId: string | null = null;
+      
       if (user?.id) {
         const { data: prof } = await supabase.from("profiles").select("municipality_id").eq("id", user.id).maybeSingle();
         munId = prof?.municipality_id ?? null;
       }
+      
       if (!munId && municipality) {
         const { data: m } = await supabase.from("municipalities").select("id").eq("name", municipality).maybeSingle();
         munId = m?.id ?? null;
       }
+      
       let q = supabase.from("content_items").select("*").eq("kind", "Lugar").eq("published", true).order("created_at", { ascending: false });
       if (munId) q = q.eq("municipality_id", munId);
+      
       const { data } = await q;
-      setDbPlaces(
-        (data || []).map((it: any) => ({
-          id: it.id,
-          name: it.title,
-          type: cat === "Cultura" ? "Cultural" : "Naturaleza",
-          address: it.description || "",
-          zone: municipality || "",
-          schedule: it.schedule || "",
-          days: it.days || "",
-          price: it.price ?? undefined,
-          photo_url: it.photo_url || "/placeholder.svg",
-          how_to_get: "#",
-        }))
-      );
-    })();
-  }, [user?.id, municipality, cat]);
+
+      if (isMounted) {
+        setDbPlaces(
+          // Aplicamos la interfaz DBContentItem aquí
+          (data || []).map((it: DBContentItem) => ({
+            id: it.id,
+            name: it.title,
+            type: it.category || it.type || "Naturaleza",
+            address: it.description || "",
+            zone: municipality || "",
+            schedule: it.schedule || "",
+            days: it.days || "",
+            price: it.price ?? undefined,
+            photo_url: it.photo_url || "/placeholder.svg",
+            how_to_get: "#",
+          }))
+        );
+      }
+    };
+
+    fetchLugares();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [user?.id, municipality]); 
 
   const filtered = useMemo(() => {
     const allow = cat === "Naturaleza" ? NATURE_TYPES : CULTURE_TYPES;
+    
+    const dbFiltered = dbPlaces.filter((p) => allow.includes(p.type));
     const mockFiltered = places.filter((p) => allow.includes(p.type));
-    return [...dbPlaces, ...mockFiltered];
+    
+    return [...dbFiltered, ...mockFiltered];
   }, [cat, dbPlaces]);
 
-  const Btn = ({ value, icon: Icon, label }: { value: Cat; icon: any; label: string }) => {
+  // Tipado estricto con ElementType (Elimina el error de la Línea 126)
+  const Btn = ({ value, icon: Icon, label }: { value: Cat; icon: ElementType; label: string }) => {
     const active = cat === value;
     return (
       <button

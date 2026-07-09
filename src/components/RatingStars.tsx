@@ -4,10 +4,15 @@ import { initial_ratings } from "@/data/mock";
 import { track } from "@/lib/analytics";
 import { toast } from "sonner";
 import LeadDialog from "./LeadDialog";
-import { useRole } from "@/context/RoleContext";
+import { useAuth } from "@/context/AuthContext";
 
 export default function RatingStars({ id, name }: { id: string; name: string }) {
-  const { role } = useRole();
+  const { roles } = useAuth();
+
+  const canRateDirectly =
+  roles.includes("resident") ||
+  roles.includes("admin") ||
+  roles.includes("isa_super_admin");
   const [ratings, setRatings] = useState<number[]>(initial_ratings[id] || []);
   const [askEmail, setAskEmail] = useState<number | null>(null);
   const [hover, setHover] = useState(0);
@@ -15,12 +20,12 @@ export default function RatingStars({ id, name }: { id: string; name: string }) 
   const avg = ratings.length ? (ratings.reduce((a, b) => a + b, 0) / ratings.length) : 0;
 
   const handleClick = (n: number) => {
-    if (role === "vecino" || role === "admin") {
-      apply(n);
-    } else {
-      setAskEmail(n);
-    }
-  };
+  if (canRateDirectly) {
+    apply(n);
+  } else {
+    setAskEmail(n);
+  }
+};
 
   const apply = (n: number, meta?: any) => {
     setRatings((r) => [...r, n]);

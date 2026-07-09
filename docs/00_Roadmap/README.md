@@ -9,10 +9,10 @@
 | Código | DOC-000 |
 | Documento | Roadmap Maestro |
 | Proyecto | MUNO |
-| Versión | 1.0 |
+| Versión | 1.1 |
 | Estado | En desarrollo |
 | Fecha de creación | 29/06/2026 |
-| Última actualización | 29/06/2026 |
+| Última actualización | 09/07/2026 |
 | Responsable | Equipo MUNO |
 
 ---
@@ -108,8 +108,8 @@ Durante todo el Hito 2 deberán respetarse los siguientes principios:
 | Supabase | Backend |
 | React | Frontend |
 | Vite | Entorno de desarrollo |
-| ChatGPT | Dirección técnica y documentación |
-| Gemini Pro | Auditoría independiente |
+| Repomix | Empaquetado de código fuente |
+| Google AI Studio (Gemini 3.5 Flash) | Auditoría independiente y detección de anomalías |
 | Claude Code | Corrección y refactorización |
 
 ---
@@ -149,11 +149,11 @@ El Expediente Técnico estará compuesto por los siguientes documentos:
 
 Estado actual:
 
-🟡 En construcción del Expediente Técnico.
+🟡 En fase de Corrección Integral (Resolución de deuda técnica y estabilización).
 
 Próxima etapa:
 
-Construcción del Inventario Técnico completo del sistema.
+Verificación Técnica y Testing Funcional del Hito 2 en dispositivos móviles.
 
 ---
 
@@ -162,3 +162,5 @@ Construcción del Inventario Técnico completo del sistema.
 | Versión | Fecha | Descripción |
 |----------|---------|-------------|
 | 1.0 | 29/06/2026 | Creación inicial del Roadmap Maestro |
+| 1.1 | 09/07/2026 | Actualización de herramientas (Repomix/AI Studio) y avance a etapa de Corrección Integral |
+

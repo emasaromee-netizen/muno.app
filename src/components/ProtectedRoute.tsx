@@ -1,6 +1,5 @@
 import { Navigate, useLocation } from "react-router-dom";
 import { useAuth, routeForRoles } from "@/context/AuthContext";
-import { usePreview } from "@/context/PreviewContext";
 
 export default function ProtectedRoute({
   children,
@@ -8,17 +7,11 @@ export default function ProtectedRoute({
   allowedAreas,
 }: {
   children: React.ReactNode;
-  allowed?: ("resident" | "tourist" | "admin" | "area_manager" | "isa_consultant" | "isa_super_admin" | "tourism_chief" | "mayor")[];
+  allowed?: (| "resident" | "tourist" | "merchant" | "admin" | "area_manager" | "isa_consultant" | "isa_super_admin" | "tourism_chief" | "mayor")[];
   allowedAreas?: string[];
 }) {
   const { user, roles, area, loading } = useAuth();
-  const { preview } = usePreview();
   const location = useLocation();
-
-  // Demo/preview mode bypasses auth completely
-  const isDev = import.meta.env.DEV;
-
-if (isDev && preview) return <>{children}</>;
 
   if (loading) {
     return (

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { useRole } from "@/context/RoleContext";
 import { useAuth } from "@/context/AuthContext";
 import { useNavigate } from "react-router-dom";
+import { useMemo } from "react";
 import { Mail, Phone, User, Store, LogOut, Camera, Loader2 } from "lucide-react";
 import MisInscripciones from "@/components/MisInscripciones";
 import RatePueblo from "@/components/RatePueblo";
@@ -10,11 +10,22 @@ import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 
 export default function MiCuenta() {
-  const { role, setRole } = useRole();
-  const { user, signOut } = useAuth();
-  const navigate = useNavigate();
-  const isComercio = role === "comercio";
-  const toggle = () => setRole(isComercio ? "vecino" : "comercio");
+const { user, roles, signOut } = useAuth();
+const navigate = useNavigate();
+
+const profileLabel = useMemo(() => {
+  if (roles.includes("isa_super_admin")) return "ISA Super Admin";
+  if (roles.includes("isa_consultant")) return "Consultor ISA";
+  if (roles.includes("admin")) return "Administrador";
+  if (roles.includes("mayor")) return "Intendente";
+  if (roles.includes("tourism_chief")) return "Jefe de Turismo";
+  if (roles.includes("area_manager")) return "Jefe de Área";
+  if (roles.includes("resident")) return "Vecino";
+
+  return "Turista";
+}, [roles]);
+
+const isTourist = roles.length === 0 || roles.includes("tourist");
 
   const [profile, setProfile] = useState<{ full_name?: string | null; email?: string | null; phone?: string | null; avatar_url?: string | null; cuit?: string | null } | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -83,7 +94,7 @@ export default function MiCuenta() {
     navigate("/auth/login");
   };
 
-  const displayName = profile?.full_name || user?.email?.split("@")[0] || "Vecino MUNO";
+  const displayName = profile?.full_name || user?.email?.split("@")[0] || "Usuario MUNO";
   const displayEmail = profile?.email || user?.email || "—";
   const displayPhone = profile?.phone || "—";
   const initial = (displayName[0] || "V").toUpperCase();
@@ -111,7 +122,7 @@ export default function MiCuenta() {
         </div>
         <div className="flex-1 min-w-0">
           <div className="text-xl font-extrabold text-isa-navy truncate">{displayName}</div>
-          <div className="text-sm text-muted-foreground capitalize">Perfil: {role}</div>
+          <div className="text-sm text-muted-foreground"> Perfil: {profileLabel} </div>
         </div>
       </div>
 
@@ -121,12 +132,16 @@ export default function MiCuenta() {
             <div className="w-10 h-10 rounded-xl bg-muno-blue/10 text-muno-blue grid place-items-center"><Store strokeWidth={1.5} /></div>
             <div>
               <div className="font-extrabold text-isa-navy">Mi Comercio</div>
-              <div className="text-xs text-muted-foreground">Activá el panel de gestión si sos dueño de un negocio (cabaña, restaurante, etc.).</div>
+              <div className="text-xs text-muted-foreground">Próximamente vas a poder vincular un comercio mediante tu CUIT.</div>
             </div>
           </div>
-          <button onClick={toggle} className={`relative w-12 h-7 rounded-full transition-colors shrink-0 ${isComercio ? "bg-muno-teal" : "bg-muted"}`} aria-label="Activar Mi Comercio">
-            <span className={`absolute top-1 w-5 h-5 bg-white rounded-full transition-transform ${isComercio ? "translate-x-6" : "translate-x-1"}`} />
-          </button>
+          <button
+  disabled
+  className="relative w-12 h-7 rounded-full bg-muted shrink-0 opacity-60 cursor-not-allowed"
+  aria-label="Mi Comercio (próximamente)"
+>
+  <span className="absolute top-1 left-1 w-5 h-5 bg-white rounded-full" />
+</button>
         </div>
       </div>
 
@@ -191,12 +206,12 @@ export default function MiCuenta() {
         </div>
       )}
 
-      {role === "turista" && (
-        <>
-          <MisFavoritos />
-          <RatePueblo />
-        </>
-      )}
+      {isTourist && (
+  <>
+    <MisFavoritos />
+    <RatePueblo />
+  </>
+)}
 
       <MisInscripciones />
 

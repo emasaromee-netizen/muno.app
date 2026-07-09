@@ -2,28 +2,53 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Bell, ArrowRight } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+// Importamos el esquema de tipos estáticos de la base de datos
+import type { Database } from "@/integrations/supabase/types";
 
-type Row = { id: string; title: string; body: string; created_at: string };
+// SOLUCIÓN QUIRÚRGICA: Tipado dinámico atado a la tabla real de Supabase
+type Row = Database["public"]["Tables"]["staff_announcements"]["Row"];
 
 export default function StaffNewsWidget() {
   const [rows, setRows] = useState<Row[]>([]);
 
   useEffect(() => {
+    let isMounted = true; // CRÍTICO MOBILE: Control de fugas de memoria
+
     const load = async () => {
-      const { data } = await supabase
-        .from("staff_announcements" as any)
-        .select("id,title,body,created_at")
-        .order("created_at", { ascending: false })
-        .limit(3);
-      setRows((data as any) || []);
+      try {
+        const { data, error } = await supabase
+          .from("staff_announcements")
+          .select("*") // Usamos "*" para que coincida perfectamente con el tipo 'Row'
+          .order("created_at", { ascending: false })
+          .limit(3);
+
+        if (error) throw error;
+
+        // Eliminamos el casteo inseguro
+        if (isMounted && data) {
+          setRows(data);
+        }
+      } catch (err) {
+        console.error("Error al cargar el widget de novedades:", err);
+      }
     };
+
     load();
-    const ch = supabase
-      .channel("staff_ann_widget")
-      .on("postgres_changes", { event: "*", schema: "public", table: "staff_announcements" }, () => load())
+
+    const channel = supabase
+      .channel("staff_ann_widget_changes")
+      .on(
+        "postgres_changes", 
+        { event: "*", schema: "public", table: "staff_announcements" }, 
+        () => {
+          if (isMounted) load();
+        }
+      )
       .subscribe();
+
     return () => {
-      supabase.removeChannel(ch);
+      isMounted = false;
+      supabase.removeChannel(channel);
     };
   }, []);
 

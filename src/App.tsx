@@ -3,7 +3,6 @@ import { BrowserRouter, Route, Routes } from "react-router-dom";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { RoleProvider } from "@/context/RoleContext";
 import { BannersProvider } from "@/context/BannersContext";
 import { AuthProvider } from "@/context/AuthContext";
 import { PreviewProvider } from "@/context/PreviewContext";
@@ -66,10 +65,9 @@ const App = () => (
       <Sonner />
       <BrowserRouter>
         <AuthProvider>
-          <PreviewProvider>
-            <RoleProvider>
-              <MunicipalityProvider>
-              <BannersProvider>
+            <PreviewProvider>
+               <MunicipalityProvider>
+                    <BannersProvider>
                 <PreviewSwitcher />
                 <Routes>
                 {/* Públicas */}
@@ -155,7 +153,6 @@ const App = () => (
                 </Routes>
               </BannersProvider>
               </MunicipalityProvider>
-            </RoleProvider>
           </PreviewProvider>
         </AuthProvider>
       </BrowserRouter>

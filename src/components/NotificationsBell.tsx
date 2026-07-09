@@ -3,7 +3,6 @@ import { Bell, X } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
-import { useRole } from "@/context/RoleContext";
 
 type Notif = {
   id: string;
@@ -32,15 +31,25 @@ function addGuestRead(id: string) {
 }
 
 export default function NotificationsBell() {
-  const { user } = useAuth();
-  const { role } = useRole();
+  const { user, roles } = useAuth();
   const nav = useNavigate();
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<Notif[]>([]);
   const [readIds, setReadIds] = useState<Set<string>>(new Set());
   const ref = useRef<HTMLDivElement>(null);
 
-  const audienceFilter = role === "turista" ? ["tourists", "both"] : ["residents", "both"];
+ const isResident =
+  roles.includes("resident") ||
+  roles.includes("admin") ||
+  roles.includes("mayor") ||
+  roles.includes("tourism_chief") ||
+  roles.includes("area_manager") ||
+  roles.includes("isa_super_admin") ||
+  roles.includes("isa_consultant");
+
+const audienceFilter = isResident
+  ? ["residents", "both"]
+  : ["tourists", "both"];
 
   const load = async () => {
     let query = supabase
@@ -77,7 +86,7 @@ export default function NotificationsBell() {
       supabase.removeChannel(ch);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id, role]);
+  }, [user?.id, roles]);
 
   useEffect(() => {
     const onClick = (e: MouseEvent) => {

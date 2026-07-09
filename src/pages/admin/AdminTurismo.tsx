@@ -1,11 +1,16 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
 import { Plus, Pencil, Trash2, Star, X, Camera, Loader2, MapPin } from "lucide-react";
+// SOLUCIÓN QUIRÚRGICA: Seguridad centralizada
+import { can } from "@/security/can";
+import { PERMISSIONS } from "@/security/permissions";
 
+// --- TIPOS ESTRICTOS ---
 type Category = "commerce" | "gastronomy" | "lodging" | "nature" | "event";
-type TItem = {
+
+interface TItem {
   id: string;
   category: Category;
   title: string;
@@ -15,7 +20,20 @@ type TItem = {
   featured: boolean;
   published: boolean;
   business_id: string | null;
-};
+  municipality_id?: string | null;
+}
+
+// Nueva interfaz para erradicar los 'any' de la tabla businesses
+interface DBBusiness {
+  id: string;
+  name: string;
+  zone: string | null;
+  photo_url: string | null;
+  address: string | null;
+  enabled: boolean;
+  tax_expires_at: string | null;
+  municipality_id: string | null;
+}
 
 const TABS: { id: Category; label: string }[] = [
   { id: "commerce", label: "Comercios" },
@@ -26,93 +44,173 @@ const TABS: { id: Category; label: string }[] = [
 ];
 
 export default function AdminTurismo() {
-  const { user, roles } = useAuth();
-  const canEdit = roles.includes("admin") || roles.includes("tourism_chief");
+  const { user, roles, area } = useAuth();
+  
+  // SOLUCIÓN QUIRÚRGICA: Uso de la política de permisos oficial
+  const canEdit = can(roles, area, PERMISSIONS.CONTENT_EDIT);
+  
   const [tab, setTab] = useState<Category>("commerce");
   const [items, setItems] = useState<TItem[]>([]);
-  const [businesses, setBusinesses] = useState<any[]>([]);
+  const [businesses, setBusinesses] = useState<DBBusiness[]>([]);
   const [editing, setEditing] = useState<TItem | null>(null);
   const [creating, setCreating] = useState(false);
   const [loading, setLoading] = useState(true);
   const [myMunId, setMyMunId] = useState<string | null>(null);
 
   useEffect(() => {
+    let isMounted = true;
     if (!user?.id) return;
-    supabase.from("profiles").select("municipality_id").eq("id", user.id).maybeSingle()
-      .then(({ data }: any) => setMyMunId(data?.municipality_id ?? null));
+
+    const fetchProfile = async () => {
+      try {
+        const { data, error } = await supabase
+          .from("profiles")
+          .select("municipality_id")
+          .eq("id", user.id)
+          .maybeSingle();
+
+        if (isMounted && !error) {
+          const profile = data as { municipality_id?: string | null } | null;
+          setMyMunId(profile?.municipality_id ?? null);
+        }
+      } catch (err) {
+        console.error("Error al cargar perfil:", err);
+      }
+    };
+
+    fetchProfile();
+    return () => { isMounted = false; };
   }, [user?.id]);
 
-  const load = async () => {
-    setLoading(true);
-    let q = supabase
-      .from("tourism_items" as any)
-      .select("*")
-      .eq("category", tab)
-      .order("featured", { ascending: false })
-      .order("created_at", { ascending: false });
-    if (myMunId) q = q.eq("municipality_id", myMunId);
-    const { data } = await q;
-    setItems((data as any) || []);
-    if (tab === "commerce") {
-      let bq = supabase
-        .from("businesses")
-        .select("id,name,zone,photo_url,address,enabled,tax_expires_at,municipality_id")
-        .eq("enabled", true);
-      if (myMunId) bq = bq.eq("municipality_id", myMunId);
-      const { data: biz } = await bq;
-      setBusinesses(biz || []);
-    }
-    setLoading(false);
-  };
+  const load = useCallback(async (isMounted: boolean = true) => {
+    if (isMounted) setLoading(true);
+    
+    try {
+      let q = supabase
+        .from("tourism_items")
+        .select("*")
+        .eq("category", tab)
+        .order("featured", { ascending: false })
+        .order("created_at", { ascending: false });
+        
+      if (myMunId) q = q.eq("municipality_id", myMunId);
+      
+      const { data, error } = await q;
+      if (error) throw error;
+      
+      if (isMounted) setItems((data as TItem[]) || []);
 
-  useEffect(() => {
-    load();
-    const ch = supabase
-      .channel("tourism_items_admin")
-      .on("postgres_changes", { event: "*", schema: "public", table: "tourism_items" }, () => load())
-      .subscribe();
-    return () => {
-      supabase.removeChannel(ch);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+      if (tab === "commerce") {
+        let bq = supabase
+          .from("businesses")
+          .select("id,name,zone,photo_url,address,enabled,tax_expires_at,municipality_id")
+          .eq("enabled", true);
+          
+        if (myMunId) bq = bq.eq("municipality_id", myMunId);
+        
+        const { data: biz, error: bizError } = await bq;
+        if (bizError) throw bizError;
+        
+        if (isMounted) setBusinesses((biz as DBBusiness[]) || []);
+      }
+    } catch (err) {
+      console.error("Error cargando panel de turismo:", err);
+      toast.error("Error al cargar los datos");
+    } finally {
+      if (isMounted) setLoading(false);
+    }
   }, [tab, myMunId]);
 
+  useEffect(() => {
+    let isMounted = true;
+    load(isMounted);
+
+    const channel = supabase
+      .channel("tourism_items_admin_changes")
+      .on(
+        "postgres_changes", 
+        { event: "*", schema: "public", table: "tourism_items" }, 
+        (payload) => {
+          // SOLUCIÓN QUIRÚRGICA: Filtro local para ahorrar batería en móviles
+          const newRecord = payload.new as { municipality_id?: string; category?: string };
+          const oldRecord = payload.old as { municipality_id?: string; category?: string };
+          
+          const newMuni = newRecord?.municipality_id;
+          const oldMuni = oldRecord?.municipality_id;
+          const newCat = newRecord?.category;
+          const oldCat = oldRecord?.category;
+
+          const isRelevantMuni = !myMunId || newMuni === myMunId || oldMuni === myMunId;
+          const isRelevantCat = newCat === tab || oldCat === tab || !newCat;
+
+          // Solo recargamos si el cambio afecta al municipio actual Y a la pestaña actual
+          if (isRelevantMuni && isRelevantCat && isMounted) {
+            load(isMounted);
+          }
+        }
+      )
+      .subscribe();
+      
+    return () => {
+      isMounted = false;
+      supabase.removeChannel(channel);
+    };
+  }, [load, myMunId, tab]);
 
   const remove = async (it: TItem) => {
-    if (!confirm("¿Eliminar este ítem?")) return;
-    const { error } = await supabase.from("tourism_items" as any).delete().eq("id", it.id);
-    if (error) toast.error("No se pudo eliminar");
-    else toast.success("Eliminado");
+    if (!window.confirm("¿Eliminar este ítem?")) return;
+    
+    try {
+      const { error } = await supabase.from("tourism_items").delete().eq("id", it.id);
+      if (error) throw error;
+      toast.success("Eliminado");
+    } catch (err) {
+      console.error(err);
+      toast.error("No se pudo eliminar");
+    }
   };
 
   const toggleFeatured = async (it: TItem) => {
-    const { error } = await supabase
-      .from("tourism_items" as any)
-      .update({ featured: !it.featured })
-      .eq("id", it.id);
-    if (error) toast.error("No se pudo actualizar");
-    else toast.success(it.featured ? "Quitado de destacados" : "Marcado como destacado");
+    try {
+      const { error } = await supabase
+        .from("tourism_items")
+        .update({ featured: !it.featured })
+        .eq("id", it.id);
+        
+      if (error) throw error;
+      toast.success(it.featured ? "Quitado de destacados" : "Marcado como destacado");
+    } catch (err) {
+      console.error(err);
+      toast.error("No se pudo actualizar");
+    }
   };
 
-  const featureBusiness = async (b: any) => {
+  const featureBusiness = async (b: DBBusiness) => {
     const exists = items.find((i) => i.business_id === b.id);
     if (exists) {
       await toggleFeatured(exists);
       return;
     }
-    const { error } = await supabase.from("tourism_items" as any).insert({
-      category: "commerce",
-      title: b.name,
-      description: b.address || "",
-      photo_url: b.photo_url,
-      location: b.zone || b.address || null,
-      business_id: b.id,
-      featured: true,
-      published: true,
-      created_by: user?.id,
-    });
-    if (error) toast.error("No se pudo destacar: " + error.message);
-    else toast.success(`${b.name} destacado en la guía`);
+    
+    try {
+      const { error } = await supabase.from("tourism_items").insert({
+        category: "commerce",
+        title: b.name,
+        description: b.address || "",
+        photo_url: b.photo_url,
+        location: b.zone || b.address || null,
+        business_id: b.id,
+        featured: true,
+        published: true,
+        created_by: user?.id,
+      });
+      
+      if (error) throw error;
+      toast.success(`${b.name} destacado en la guía`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Error desconocido";
+      toast.error("No se pudo destacar: " + msg);
+    }
   };
 
   return (
@@ -242,7 +340,7 @@ export default function AdminTurismo() {
           onSaved={() => {
             setCreating(false);
             setEditing(null);
-            load();
+            load(true);
           }}
         />
       )}
@@ -273,18 +371,23 @@ function ItemDialog({
   const upload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !user) return;
+    
     setUploading(true);
     const ext = file.name.split(".").pop() || "jpg";
     const path = `tourism/${user.id}/${Date.now()}.${ext}`;
-    const { error } = await supabase.storage.from("avatars").upload(path, file, { upsert: true });
-    if (error) {
+    
+    try {
+      const { error } = await supabase.storage.from("avatars").upload(path, file, { upsert: true });
+      if (error) throw error;
+      
+      const { data } = supabase.storage.from("avatars").getPublicUrl(path);
+      setPhoto(data.publicUrl);
+    } catch (err) {
+      console.error(err);
       toast.error("Error subiendo foto");
+    } finally {
       setUploading(false);
-      return;
     }
-    const { data } = supabase.storage.from("avatars").getPublicUrl(path);
-    setPhoto(data.publicUrl);
-    setUploading(false);
   };
 
   const save = async () => {
@@ -292,25 +395,34 @@ function ItemDialog({
       toast.error("Título requerido");
       return;
     }
+    
     setSaving(true);
-    const payload: any = {
+    
+    const payload = {
       category,
       title: title.trim(),
       description: description.trim() || null,
       location: location.trim() || null,
       photo_url: photo,
       published: true,
+      created_by: user?.id,
     };
-    const res = item
-      ? await supabase.from("tourism_items" as any).update(payload).eq("id", item.id)
-      : await supabase.from("tourism_items" as any).insert({ ...payload, created_by: user?.id });
-    setSaving(false);
-    if (res.error) {
-      toast.error("Error: " + res.error.message);
-      return;
+    
+    try {
+      const res = item
+        ? await supabase.from("tourism_items").update(payload).eq("id", item.id)
+        : await supabase.from("tourism_items").insert(payload);
+        
+      if (res.error) throw res.error;
+      
+      toast.success("Guardado");
+      onSaved();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Error desconocido";
+      toast.error("Error: " + msg);
+    } finally {
+      setSaving(false);
     }
-    toast.success("Guardado");
-    onSaved();
   };
 
   return (

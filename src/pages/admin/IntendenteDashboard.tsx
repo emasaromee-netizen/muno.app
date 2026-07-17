@@ -375,32 +375,44 @@ export default function IntendenteDashboard() {
   const [counts, setCounts] = useState({ claims: 0, businesses: 0, content: 0, banners: 0 });
 
   useEffect(() => {
+    let isMounted = true; // <-- Flag de montaje síncrono
     if (!user) return;
+
     (async () => {
-      // Blindaje Multi-Tenant para las métricas globales
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("municipality_id")
-        .eq("id", user.id)
-        .maybeSingle();
+      try {
+        // Blindaje Multi-Tenant para las métricas globales
+        const { data: profile } = await supabase
+          .from("profiles")
+          .select("municipality_id")
+          .eq("id", user.id)
+          .maybeSingle();
 
-      const muniId = profile?.municipality_id;
-      if (!muniId) return;
+        const muniId = profile?.municipality_id;
+        if (!muniId || !isMounted) return;
 
-      const [c1, c2, c3, c4] = await Promise.all([
-        supabase.from("claims").select("id", { count: "exact", head: true }).eq("municipality_id", muniId),
-        supabase.from("businesses").select("id", { count: "exact", head: true }).eq("municipality_id", muniId),
-        supabase.from("content_items").select("id", { count: "exact", head: true }).eq("municipality_id", muniId),
-        supabase.from("announcements").select("id", { count: "exact", head: true }).eq("municipality_id", muniId),
-      ]);
-      
-      setCounts({
-        claims: c1.count || 0,
-        businesses: c2.count || 0,
-        content: c3.count || 0,
-        banners: c4.count || 0,
-      });
+        const [c1, c2, c3, c4] = await Promise.all([
+          supabase.from("claims").select("id", { count: "exact", head: true }).eq("municipality_id", muniId),
+          supabase.from("businesses").select("id", { count: "exact", head: true }).eq("municipality_id", muniId),
+          supabase.from("content_items").select("id", { count: "exact", head: true }).eq("municipality_id", muniId),
+          supabase.from("announcements").select("id", { count: "exact", head: true }).eq("municipality_id", muniId),
+        ]);
+        
+        if (isMounted) {
+          setCounts({
+            claims: c1.count || 0,
+            businesses: c2.count || 0,
+            content: c3.count || 0,
+            banners: c4.count || 0,
+          });
+        }
+      } catch (err) {
+        console.error("Error al recuperar estadísticas en dashboard ejecutivo:", err);
+      }
     })();
+
+    return () => {
+      isMounted = false; // <-- Limpieza al desmontar
+    };
   }, [user]);
 
   return (

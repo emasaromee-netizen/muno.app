@@ -164,7 +164,16 @@ Deno.serve(async (req) => {
       const { error: roleErr } = await admin.from("user_roles").insert(insertPayload);
       if (roleErr) return json({ error: "No se pudo asignar el rol: " + roleErr.message }, 400);
     } else if (area) {
-      await admin.from("user_roles").update({ area, active: true }).eq("id", existingRole.id);
+      // Asegurar que el update de user_roles filtre estrictamente por el tenant del emisor
+      const { error: updateRoleErr } = await admin
+        .from("user_roles")
+        .update({ area, active: true })
+        .eq("id", existingRole.id)
+        .eq("municipality_id", callerMunicipality); // <-- Blindaje BOLA añadido
+
+      if (updateRoleErr) {
+        return json({ error: "No se pudo actualizar el rol debido a discrepancia de jurisdicción" }, 403);
+      }
     }
 
     return json({

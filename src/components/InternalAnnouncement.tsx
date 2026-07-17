@@ -3,25 +3,46 @@ import { Megaphone, Pencil, Save, X } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
+import { can } from "@/security/can";
+import { PERMISSIONS } from "@/security/permissions";
+
+// Interfaces estrictas para erradicar los 'any'
+interface DBAnnouncement {
+  id: string;
+  message: string;
+  updated_at: string;
+  updated_by: string;
+  municipality_id?: string | null;
+}
+
+interface AnnouncementPayload {
+  message: string;
+  updated_by?: string;
+}
 
 export default function InternalAnnouncement() {
-  const { user, roles } = useAuth();
-  const isInternal = roles.includes("admin") || roles.includes("area_manager");
-  const isAdmin = roles.includes("admin");
-  const [row, setRow] = useState<any>(null);
+  const { user, roles, area } = useAuth();
+  
+  // SOLUCIÓN P1: Utilizar el sistema centralizado de permisos
+  const isInternal = can(roles, area, PERMISSIONS.TASKS_MANAGE) || can(roles, area, PERMISSIONS.ANALYTICS_VIEW);
+  const isAdmin = can(roles, area, PERMISSIONS.CONTENT_PUBLISH);
+  
+  const [row, setRow] = useState<DBAnnouncement | null>(null);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
 
   const load = async () => {
     const { data } = await supabase
-      .from("internal_announcements" as any)
+      .from("internal_announcements")
       .select("*")
       .order("updated_at", { ascending: false })
       .limit(1)
       .maybeSingle();
-    setRow(data);
-    setDraft((data as any)?.message || "");
+      
+    const safeData = data as DBAnnouncement | null;
+    setRow(safeData);
+    setDraft(safeData?.message || "");
   };
 
   useEffect(() => {
@@ -35,13 +56,19 @@ export default function InternalAnnouncement() {
     const message = draft.trim();
     if (!message) return toast.error("Escribí un mensaje");
     if (message.length > 500) return toast.error("Máximo 500 caracteres");
+    
     setSaving(true);
-    const payload: any = { message, updated_by: user?.id };
+    
+    const payload: AnnouncementPayload = { message, updated_by: user?.id };
+    
     const res = row?.id
-      ? await supabase.from("internal_announcements" as any).update(payload).eq("id", row.id)
-      : await supabase.from("internal_announcements" as any).insert(payload);
+      ? await supabase.from("internal_announcements").update(payload).eq("id", row.id)
+      : await supabase.from("internal_announcements").insert(payload);
+      
     setSaving(false);
+    
     if (res.error) return toast.error("No se pudo guardar");
+    
     toast.success("Novedad publicada para Jefes de Área");
     setEditing(false);
     load();

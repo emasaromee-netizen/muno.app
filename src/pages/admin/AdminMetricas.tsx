@@ -8,24 +8,47 @@ import {
 
 const COLORS = ["#242E44", "#1A56F0", "#00B89C", "#F5C84B", "#EF4444", "#10B981"];
 
+// SOLUCIÓN TS: Interfaces estrictas para el reporte de base de datos
+interface DBAnalyticsReport {
+  id: string;
+  title: string;
+  period: string | null;
+  created_at: string;
+  body: unknown;
+}
+
+interface ChartCardProps {
+  title: string;
+  children: React.ReactNode;
+  className?: string;
+}
+
 export default function AdminMetricas() {
-  const [reports, setReports] = useState<any[]>([]);
-  const [latest, setLatest] = useState<any>(null);
+  const [reports, setReports] = useState<DBAnalyticsReport[]>([]);
+  const [latest, setLatest] = useState<DBAnalyticsReport | null>(null);
 
   useEffect(() => {
+    let isMounted = true;
     supabase
       .from("analytics_reports")
       .select("*")
       .order("created_at", { ascending: false })
       .then(({ data }) => {
-        const list = data || [];
+        if (!isMounted) return;
+        const list = (data as DBAnalyticsReport[]) || [];
         setReports(list);
         setLatest(list[0] || null);
+        
+        // SOLUCIÓN L-05: Persistir el ID del último reporte visualizado con éxito
+        if (list[0]?.id) {
+          localStorage.setItem("muno.isa.report.last_read_id", list[0].id);
+        }
       });
-    localStorage.setItem("muno.isa.report.unread", "0");
+      
+    return () => { isMounted = false; };
   }, []);
 
-  const download = (r: any) => {
+  const download = (r: DBAnalyticsReport) => {
     const body = (r.body || {}) as IsaReportData;
     const blob = buildIsaReportPDF({
       title: r.title,
@@ -44,7 +67,7 @@ export default function AdminMetricas() {
   };
 
   const body = (latest?.body || {}) as IsaReportData;
-  const hasKPIs = !!latest && (body.searches?.length || body.origins?.length || body.revenue?.length);
+  const hasKPIs = !!latest && (!!body.searches?.length || !!body.origins?.length || !!body.revenue?.length);
 
   return (
     <div className="space-y-6">
@@ -75,12 +98,12 @@ export default function AdminMetricas() {
 
           {hasKPIs && (
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              {body.origins?.length > 0 && (
+              {body.origins && body.origins.length > 0 && (
                 <ChartCard title="Origen de visitantes">
                   <ResponsiveContainer width="100%" height={260}>
                     <PieChart>
                       <Pie data={body.origins} dataKey="value" nameKey="label" cx="50%" cy="50%" outerRadius={90} label>
-                        {body.origins.map((_: any, i: number) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
+                        {body.origins.map((_: unknown, i: number) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
                       </Pie>
                       <Tooltip />
                       <Legend />
@@ -88,7 +111,7 @@ export default function AdminMetricas() {
                   </ResponsiveContainer>
                 </ChartCard>
               )}
-              {body.searches?.length > 0 && (
+              {body.searches && body.searches.length > 0 && (
                 <ChartCard title="Búsquedas por categoría">
                   <ResponsiveContainer width="100%" height={260}>
                     <BarChart data={body.searches}>
@@ -100,7 +123,7 @@ export default function AdminMetricas() {
                   </ResponsiveContainer>
                 </ChartCard>
               )}
-              {body.revenue?.length > 0 && (
+              {body.revenue && body.revenue.length > 0 && (
                 <ChartCard title="Recaudación" className="lg:col-span-2">
                   <ResponsiveContainer width="100%" height={260}>
                     <BarChart data={body.revenue}>
@@ -178,7 +201,8 @@ function Locked() {
   );
 }
 
-function ChartCard({ title, children, className = "" }: any) {
+// SOLUCIÓN TS: Tipado del componente hijo
+function ChartCard({ title, children, className = "" }: ChartCardProps) {
   return (
     <div className={`bg-white rounded-[16px] p-5 border ${className}`}>
       <div className="font-extrabold text-isa-navy text-sm mb-3">{title}</div>

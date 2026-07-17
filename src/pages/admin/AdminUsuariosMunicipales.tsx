@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, ReactNode, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
 import { can } from "@/security/can";
@@ -9,6 +9,8 @@ import { UserPlus, Pencil, Power, ShieldCheck, X, Copy } from "lucide-react";
 
 const AREAS = ["Intendencia", "Cultura", "Turismo", "Deporte", "Infraestructura", "Comercios"] as const;
 const ROLES_VISIBLE = ["area_manager", "isa_consultant", "admin", "tourism_chief", "mayor", "resident"] as const;
+
+type AppRoleType = "area_manager" | "isa_consultant" | "admin" | "tourism_chief" | "mayor" | "resident";
 
 type Row = {
   id: string;
@@ -23,37 +25,92 @@ type Row = {
 };
 
 export default function AdminUsuariosMunicipales() {
-  const { roles, area: adminArea } = useAuth();
+  const { user, roles, area: adminArea } = useAuth();
   const canManageUsers = can(roles, adminArea, PERMISSIONS.USERS_MANAGE);
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<Row | null>(null);
   const [creating, setCreating] = useState(false);
 
-  const load = async () => {
-    setLoading(true);
-    const { data: ur } = await supabase
-      .from("user_roles")
-      .select("*")
-      .in("role", ROLES_VISIBLE as any);
-    const ids = Array.from(new Set((ur || []).map((r: any) => r.user_id)));
-    const { data: profs } = ids.length
-      ? await supabase.from("profiles").select("id, email, full_name").in("id", ids)
-      : { data: [] as any[] };
-    const map = new Map((profs || []).map((p: any) => [p.id, p]));
-    setRows(((ur || []) as any[]).map((r) => ({
-      ...r,
-      email: map.get(r.user_id)?.email,
-      full_name: map.get(r.user_id)?.full_name,
-    })));
-    setLoading(false);
-  };
+  // 1. Candado en memoria para validación sincrónica
+  const isMounted = useRef(true);
 
-  useEffect(() => { load(); }, []);
+  // 2. Remoción del falso booleano
+  const load = useCallback(async () => {
+    if (!user?.id) return;
+    if (isMounted.current) setLoading(true);
+
+    try {
+      // Obtener la jurisdicción (tenant) del administrador actual para blindaje BOLA
+      const { data: adminRole } = await supabase
+        .from("user_roles")
+        .select("municipality_id")
+        .eq("user_id", user.id)
+        .eq("active", true)
+        .maybeSingle();
+
+      const currentMuniId = adminRole?.municipality_id;
+
+      let q = supabase
+        .from("user_roles")
+        .select("*")
+        .in("role", ROLES_VISIBLE);
+
+      // Aplicar el filtro de inquilino de forma estricta
+      if (currentMuniId) {
+        q = q.eq("municipality_id", currentMuniId);
+      }
+
+      const { data: ur } = await q;
+      
+      // Tipado estricto para extraer user_ids
+      const safeUr = (ur || []) as Row[];
+      const ids = Array.from(new Set(safeUr.map((r) => r.user_id)));
+      
+      // Obtener perfiles
+      const { data: profs } = ids.length
+        ? await supabase.from("profiles").select("id, email, full_name").in("id", ids)
+        : { data: [] as { id: string; email: string | null; full_name: string | null }[] };
+        
+      // Tipado del mapa de perfiles
+      const map = new Map<string, { email: string | null; full_name: string | null }>(
+        (profs || []).map((p) => [p.id, p])
+      );
+      
+      // 3. Verificación de la referencia antes de setear variables de estado
+      if (isMounted.current) {
+        // Unir datos
+        setRows(safeUr.map((r) => ({
+          ...r,
+          email: map.get(r.user_id)?.email,
+          full_name: map.get(r.user_id)?.full_name,
+        })));
+        setLoading(false);
+      }
+    } catch (err) {
+      console.error("Error al cargar usuarios municipales:", err);
+      if (isMounted.current) setLoading(false);
+    }
+  }, [user?.id]);
+
+  useEffect(() => { 
+    isMounted.current = true;
+    load();
+    
+    return () => { 
+      // 4. Apagar la referencia si el usuario sale de la pantalla
+      isMounted.current = false; 
+    };
+  }, [load]);
 
   const toggleActive = async (r: Row) => {
-    const { error } = await supabase.from("user_roles").update({ active: !r.active } as any).eq("id", r.id);
+    const { error } = await supabase
+      .from("user_roles")
+      .update({ active: !r.active })
+      .eq("id", r.id);
+      
     if (error) { toast.error("No se pudo actualizar"); return; }
+    
     toast.success(r.active ? "Acceso desactivado" : "Acceso reactivado");
     logActivity(r.active ? "Desactivar acceso funcionario" : "Reactivar acceso funcionario", { entity: "user_roles", entity_id: r.id, meta: { email: r.email } });
     load();
@@ -63,7 +120,6 @@ export default function AdminUsuariosMunicipales() {
     return <div className="bg-white border rounded-[16px] p-6 text-center text-sm text-muted-foreground">Acceso reservado al Intendente.</div>;
   }
 
-  // Group: chiefs vs collaborators
   const chiefs = rows.filter((r) => ["area_manager", "tourism_chief", "mayor", "admin"].includes(r.role));
   const collaborators = rows.filter((r) => r.role === "resident");
 
@@ -104,7 +160,7 @@ export default function AdminUsuariosMunicipales() {
 function EditDialog({ row, onClose, onSaved }: { row: Row; onClose: () => void; onSaved: () => void }) {
   const [area, setArea] = useState(row.area || "Intendencia");
   const save = async () => {
-    const { error } = await supabase.from("user_roles").update({ area } as any).eq("id", row.id);
+    const { error } = await supabase.from("user_roles").update({ area }).eq("id", row.id);
     if (error) { toast.error("Error al guardar"); return; }
     logActivity("Editar área de funcionario", { entity: "user_roles", entity_id: row.id, meta: { area, email: row.email } });
     toast.success("Área actualizada");
@@ -146,7 +202,7 @@ function CreateDialog({ onClose, onCreated }: { onClose: () => void; onCreated: 
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
   const [dni, setDni] = useState("");
-  const [role, setRole] = useState<"area_manager" | "tourism_chief" | "mayor" | "resident">("area_manager");
+  const [role, setRole] = useState<AppRoleType>("area_manager");
   const [area, setArea] = useState("Intendencia");
   const [busy, setBusy] = useState(false);
   const [credentials, setCredentials] = useState<{ email: string; password: string } | null>(null);
@@ -155,15 +211,24 @@ function CreateDialog({ onClose, onCreated }: { onClose: () => void; onCreated: 
     if (fullName.trim().length < 2) { toast.error("Ingresá el nombre completo"); return; }
     if (!email.includes("@")) { toast.error("Email inválido"); return; }
     if (!/^\d{7,9}$/.test(dni.replace(/\D/g, ""))) { toast.error("DNI inválido (7-9 dígitos)"); return; }
+    
     setBusy(true);
+    
     const { data, error } = await supabase.functions.invoke("invite-staff", {
       body: { full_name: fullName.trim(), email: email.trim().toLowerCase(), dni, role, area },
     });
+    
     setBusy(false);
-    if (error || (data as any)?.error) {
-      toast.error("No se pudo crear: " + (error?.message || (data as any)?.error));
+    
+    // Tipado de error customizado
+    type EdgeFunctionResponse = { error?: string };
+    const funcError = error || (data as EdgeFunctionResponse)?.error;
+    
+    if (funcError) {
+      toast.error("No se pudo crear: " + (error?.message || funcError));
       return;
     }
+    
     logActivity("Crear integrante de gabinete", { entity: "user_roles", meta: { email, role, area } });
     setCredentials({ email: email.trim().toLowerCase(), password: dni });
     toast.success("Integrante habilitado");
@@ -207,7 +272,7 @@ function CreateDialog({ onClose, onCreated }: { onClose: () => void; onCreated: 
       <input value={dni} onChange={(e) => setDni(e.target.value)} inputMode="numeric" placeholder="30123456" className="mt-1 mb-3 w-full px-3 py-2.5 rounded-xl border bg-background text-sm min-h-[44px]" />
 
       <label className="text-xs font-bold text-muted-foreground">Rol</label>
-      <select value={role} onChange={(e) => setRole(e.target.value as any)} className="mt-1 mb-3 w-full px-3 py-2.5 rounded-xl border bg-background text-sm min-h-[44px]">
+      <select value={role} onChange={(e) => setRole(e.target.value as AppRoleType)} className="mt-1 mb-3 w-full px-3 py-2.5 rounded-xl border bg-background text-sm min-h-[44px]">
         <option value="area_manager">Jefe de Área</option>
         <option value="tourism_chief">Jefe de Turismo</option>
         <option value="mayor">Intendente</option>
@@ -226,7 +291,14 @@ function CreateDialog({ onClose, onCreated }: { onClose: () => void; onCreated: 
   );
 }
 
-function Modal({ title, onClose, children }: any) {
+// Tipado estricto para las Props del Modal
+interface ModalProps {
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+}
+
+function Modal({ title, onClose, children }: ModalProps) {
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
       <div className="bg-white rounded-[16px] p-5 max-w-md w-full">

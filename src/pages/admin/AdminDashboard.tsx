@@ -1,13 +1,21 @@
 import { useEffect, useState } from "react";
 import { Link, Navigate } from "react-router-dom";
-import { AlertTriangle, Store, CalendarDays, FileText, ArrowRight, Sparkles, Bell, Pencil, Save, X, Palette, Trophy, HardHat, Wallet, CheckCircle2, Users, ListTodo, FileEdit, Lock, BarChart3, UserPlus } from "lucide-react";
+import { AlertTriangle, Store, CalendarDays, FileText, ArrowRight, Sparkles, Bell, Pencil, Save, X, Palette, Trophy, HardHat, Wallet, CheckCircle2, ListTodo, FileEdit, Lock, BarChart3, UserPlus } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
-import { admin_commerces, my_claims } from "@/data/mock";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
 import StaffNewsWidget from "@/components/admin/StaffNewsWidget";
 
-const Card = ({ icon: Icon, label, value, hint, color }: any) => (
+// SOLUCIÓN TS: Interfaz para las propiedades de la tarjeta
+interface CardProps {
+  icon: React.ElementType;
+  label: string;
+  value: string | number;
+  hint?: string;
+  color: string;
+}
+
+const Card = ({ icon: Icon, label, value, hint, color }: CardProps) => (
   <div className="bg-white rounded-[16px] p-5 border border-border/60 hover:shadow-md transition-shadow">
     <div className="flex items-center justify-between">
       <div className="text-[10px] uppercase tracking-[0.18em] font-bold text-muted-foreground">{label}</div>
@@ -20,23 +28,33 @@ const Card = ({ icon: Icon, label, value, hint, color }: any) => (
   </div>
 );
 
+// SOLUCIÓN TS: Interfaz para anuncios
+interface DBAnnouncement {
+  id: string;
+  message: string;
+  updated_at: string;
+  updated_by: string;
+}
+
 function InternalAnnouncement() {
   const { user, roles } = useAuth();
   const isAdmin = roles.includes("admin");
-  const [row, setRow] = useState<any>(null);
+  const [row, setRow] = useState<DBAnnouncement | null>(null);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
 
   const load = async () => {
     const { data } = await supabase
-      .from("internal_announcements" as any)
+      .from("internal_announcements")
       .select("*")
       .order("updated_at", { ascending: false })
       .limit(1)
       .maybeSingle();
-    setRow(data);
-    setDraft((data as any)?.message || "");
+      
+    const safeData = data as DBAnnouncement | null;
+    setRow(safeData);
+    setDraft(safeData?.message || "");
   };
 
   useEffect(() => {
@@ -54,11 +72,15 @@ function InternalAnnouncement() {
       return;
     }
     setSaving(true);
-    const payload: any = { message, updated_by: user?.id };
+    
+    const payload = { message, updated_by: user?.id };
+    
     const res = row?.id
-      ? await supabase.from("internal_announcements" as any).update(payload).eq("id", row.id)
-      : await supabase.from("internal_announcements" as any).insert(payload);
+      ? await supabase.from("internal_announcements").update(payload).eq("id", row.id)
+      : await supabase.from("internal_announcements").insert(payload);
+      
     setSaving(false);
+    
     if (res.error) {
       toast.error("No se pudo guardar");
       return;
@@ -142,27 +164,101 @@ function InternalAnnouncement() {
   );
 }
 
-export default function AdminDashboard() {
-  const { roles } = useAuth();
-  const [latest, setLatest] = useState<any>(null);
-  const [unread, setUnread] = useState(false);
+// SOLUCIÓN TS: Interfaz para el reporte ISA
+interface DBAnalyticsReport {
+  id: string;
+  title: string;
+  created_at: string;
+}
 
+export default function AdminDashboard() {
+  const { user, roles } = useAuth();
+  const [latest, setLatest] = useState<DBAnalyticsReport | null>(null);
+  const [unread, setUnread] = useState(false);
+  
+  // SOLUCIÓN M-03: Contadores dinámicos optimizados
+  const [counts, setCounts] = useState({
+    activeClaims: 0,
+    enabledBusinesses: 0,
+    pendingBusinesses: 0,
+    monthlyEvents: 0
+  });
+  const [loadingCounts, setLoadingCounts] = useState(true);
+
+  // SOLUCIÓN L-05: Validación por ID inteligente
   useEffect(() => {
-    const u = localStorage.getItem("muno.isa.report.unread") === "1";
-    setUnread(u);
-    if (u) toast("📊 Nuevo informe ISA disponible", { description: "Auditoría publicada por ISA Business Analyst." });
-    supabase.from("analytics_reports").select("*").order("created_at", { ascending: false }).limit(1)
-      .then(({ data }) => setLatest(data?.[0] || null));
+    let isMounted = true;
+    supabase
+      .from("analytics_reports")
+      .select("id, title, created_at")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle()
+      .then(({ data }) => {
+        if (!data || !isMounted) return;
+        setLatest(data as unknown as DBAnalyticsReport);
+
+        const lastReadId = localStorage.getItem("muno.isa.report.last_read_id");
+        if (lastReadId !== data.id) {
+          setUnread(true);
+          toast("📊 Nuevo informe ISA disponible", {
+            description: `Auditoría publicada: "${data.title}"`,
+          });
+        }
+      });
+      
+      return () => { isMounted = false; };
   }, []);
+
+  // SOLUCIÓN M-03: Carga paralela de KPIs
+  useEffect(() => {
+    let isMounted = true;
+    if (!user?.id) return;
+
+    const fetchRealCounts = async () => {
+      try {
+        const { data: profile } = await supabase
+          .from("profiles")
+          .select("municipality_id")
+          .eq("id", user.id)
+          .maybeSingle();
+
+        const muniId = profile?.municipality_id;
+        if (!muniId) return;
+
+        const [claimsRes, enabledRes, pendingRes, eventsRes] = await Promise.all([
+          supabase.from("claims").select("id", { count: "exact", head: true })
+            .eq("municipality_id", muniId).neq("status", "Cerrado"),
+          supabase.from("businesses").select("id", { count: "exact", head: true })
+            .eq("municipality_id", muniId).eq("enabled", true),
+          supabase.from("businesses").select("id", { count: "exact", head: true })
+            .eq("municipality_id", muniId).eq("enabled", false),
+          supabase.from("content_items").select("id", { count: "exact", head: true })
+            .eq("municipality_id", muniId).eq("kind", "Evento")
+        ]);
+
+        if (isMounted) {
+          setCounts({
+            activeClaims: claimsRes.count || 0,
+            enabledBusinesses: enabledRes.count || 0,
+            pendingBusinesses: pendingRes.count || 0,
+            monthlyEvents: eventsRes.count || 0
+          });
+          setLoadingCounts(false);
+        }
+      } catch (err) {
+        console.error("Error al cargar contadores dinámicos del dashboard:", err);
+      }
+    };
+
+    fetchRealCounts();
+    return () => { isMounted = false; };
+  }, [user?.id]);
 
   // Jefe de Turismo: dashboard exclusivo es la Guía Turista
   if (roles.includes("tourism_chief") && !roles.includes("admin") && !roles.includes("mayor")) {
     return <Navigate to="/admin/guia-turista" replace />;
   }
-
-  const activos = my_claims.filter((c) => c.status !== "Cerrado").length + 4;
-  const enabled = admin_commerces.filter((c) => c.enabled).length;
-  const eventos = 12;
 
   return (
     <div className="space-y-8">
@@ -187,10 +283,34 @@ export default function AdminDashboard() {
       <StaffNewsWidget />
 
       <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-        <Card icon={AlertTriangle} label="Reclamos activos" value={activos} hint="+3 vs ayer" color="#EF4444" />
-        <Card icon={Store} label="Comercios habilitados" value={enabled} hint={`${admin_commerces.length - enabled} pendientes`} color="#00B89C" />
-        <Card icon={CalendarDays} label="Eventos del mes" value={eventos} hint="3 esta semana" color="#1A56F0" />
-        <Card icon={FileText} label="Último informe ISA" value={latest ? "Disponible" : "—"} hint={latest ? new Date(latest.created_at).toLocaleDateString() : "Pendiente"} color="#242E44" />
+        <Card 
+          icon={AlertTriangle} 
+          label="Reclamos activos" 
+          value={loadingCounts ? "..." : counts.activeClaims} 
+          hint="Reclamos sin cerrar" 
+          color="#EF4444" 
+        />
+        <Card 
+          icon={Store} 
+          label="Comercios habilitados" 
+          value={loadingCounts ? "..." : counts.enabledBusinesses} 
+          hint={`${counts.pendingBusinesses} pendientes`} 
+          color="#00B89C" 
+        />
+        <Card 
+          icon={CalendarDays} 
+          label="Eventos del mes" 
+          value={loadingCounts ? "..." : counts.monthlyEvents} 
+          hint="Agenda de eventos activa" 
+          color="#1A56F0" 
+        />
+        <Card 
+          icon={FileText} 
+          label="Último informe ISA" 
+          value={latest ? "Disponible" : "—"} 
+          hint={latest ? new Date(latest.created_at).toLocaleDateString() : "Pendiente"} 
+          color="#242E44" 
+        />
       </section>
 
       <section className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -230,10 +350,10 @@ export default function AdminDashboard() {
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
           {[
-            { name: "Cultura", icon: Palette, color: "#8B5CF6", to: "/admin/cultura", hint: "12 inscripciones nuevas" },
-            { name: "Deportes", icon: Trophy, color: "#00B89C", to: "/admin/deporte", hint: "5 actividades activas" },
-            { name: "Infraestructura", icon: HardHat, color: "#F59E0B", to: "/admin/reclamos", hint: "8 reclamos en curso" },
-            { name: "Hacienda", icon: Wallet, color: "#1A56F0", to: "/admin/comercios", hint: "Habilitaciones al día" },
+            { name: "Cultura", icon: Palette, color: "#8B5CF6", to: "/admin/cultura", hint: "Área operativa" },
+            { name: "Deportes", icon: Trophy, color: "#00B89C", to: "/admin/deporte", hint: "Área operativa" },
+            { name: "Infraestructura", icon: HardHat, color: "#F59E0B", to: "/admin/reclamos", hint: "Área operativa" },
+            { name: "Hacienda", icon: Wallet, color: "#1A56F0", to: "/admin/comercios", hint: "Área operativa" },
           ].map((a) => (
             <div key={a.name} className="bg-white rounded-[16px] p-5 border border-border/60 hover:shadow-md transition-shadow flex flex-col">
               <div className="flex items-center justify-between">

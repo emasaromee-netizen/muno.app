@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { claim_categories, CLAIM_AREAS } from "@/data/mock";
 import * as Icons from "lucide-react";
@@ -7,31 +7,75 @@ import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
 
+// Interfaz estricta para eliminar los errores 'any' de categoría
+interface ClaimCategory {
+  id: string;
+  label: string;
+  icon: string;
+  area?: string;
+}
+
+// Interfaz para el payload de inserción de Supabase
+interface ClaimPayload {
+  user_id: string;
+  category: string;
+  area: string;
+  address: string;
+  description: string;
+  evidence_photos: string[];
+  status: "Pendiente" | "En curso" | "Cerrado"; // SOLUCIÓN TS: Tipado literal exacto de Supabase
+}
+
 const STEPS = ["Categoría", "Fotos", "Ubicación", "Resumen"] as const;
 
 export default function Reclamos() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const [step, setStep] = useState(0);
-  const [category, setCategory] = useState<any>(null);
+  const [category, setCategory] = useState<ClaimCategory | null>(null);
   const [area, setArea] = useState<string>("");
   const [photos, setPhotos] = useState<string[]>([]);
+  const [photoFiles, setPhotoFiles] = useState<File[]>([]); 
   const [progress, setProgress] = useState(0);
   const [location, setLocation] = useState("");
   const [description, setDescription] = useState("");
   const [ticket, setTicket] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  
   const fileRef = useRef<HTMLInputElement>(null);
+  
+  // SOLUCIÓN: Referencias para atrapar y limpiar timers y evitar Memory Leaks
+  const progressIntervalRef = useRef<number | null>(null);
+  const progressTimeoutRef = useRef<number | null>(null);
+  const resetTimeoutRef = useRef<number | null>(null);
+
+  // Escoba de memoria: limpia los intervalos si el usuario abandona la pantalla
+  useEffect(() => {
+    return () => {
+      if (progressIntervalRef.current) window.clearInterval(progressIntervalRef.current);
+      if (progressTimeoutRef.current) window.clearTimeout(progressTimeoutRef.current);
+      if (resetTimeoutRef.current) window.clearTimeout(resetTimeoutRef.current);
+    };
+  }, []);
 
   const addPhoto = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []).slice(0, 3 - photos.length);
     setProgress(0);
-    const interval = setInterval(() => setProgress((p) => Math.min(100, p + 12)), 60);
-    setTimeout(() => {
-      clearInterval(interval); setProgress(100);
+    
+    // Limpiamos intervalos previos por si el usuario sube fotos muy rápido
+    if (progressIntervalRef.current) window.clearInterval(progressIntervalRef.current);
+    if (progressTimeoutRef.current) window.clearTimeout(progressTimeoutRef.current);
+
+    progressIntervalRef.current = window.setInterval(() => setProgress((p) => Math.min(100, p + 12)), 60);
+    
+    progressTimeoutRef.current = window.setTimeout(() => {
+      if (progressIntervalRef.current) window.clearInterval(progressIntervalRef.current);
+      setProgress(100);
       const urls = files.map((f) => URL.createObjectURL(f));
       setPhotos((prev) => [...prev, ...urls].slice(0, 3));
-      setTimeout(() => setProgress(0), 400);
+      setPhotoFiles((prev) => [...prev, ...files].slice(0, 3)); 
+      
+      resetTimeoutRef.current = window.setTimeout(() => setProgress(0), 400);
     }, 600);
   };
 
@@ -42,23 +86,49 @@ export default function Reclamos() {
       return;
     }
     setSaving(true);
-    const finalArea = area || (category as any)?.area || "";
+
+    const uploadedUrls: string[] = [];
+    for (let i = 0; i < photoFiles.length; i++) {
+      const file = photoFiles[i];
+      const fileExt = file.name.split(".").pop() || "jpg";
+      const filePath = `claims/${user.id}/${Date.now()}-${i}.${fileExt}`;
+      
+      const { error: uploadError } = await supabase.storage
+        .from("avatars") 
+        .upload(filePath, file, { contentType: file.type });
+
+      if (uploadError) {
+        setSaving(false);
+        toast.error(`Error de conexión al subir la imagen ${i + 1}`);
+        return;
+      }
+
+      const { data: urlData } = supabase.storage.from("avatars").getPublicUrl(filePath);
+      uploadedUrls.push(urlData.publicUrl);
+    }
+
+    const finalArea = area || category?.area || "";
     const isOtro = category?.id === "otro";
     const finalLocation = location || (isOtro ? "Ubicación automática (GPS del dispositivo)" : "");
+    
+    const payload: ClaimPayload = {
+      user_id: user.id,
+      category: category?.label || category?.id || "General",
+      area: finalArea,
+      address: finalLocation,
+      description: description || `${category?.label} - ${finalLocation}`,
+      evidence_photos: uploadedUrls, 
+      status: "Pendiente",
+    };
+
     const { data, error } = await supabase
       .from("claims")
-      .insert({
-        user_id: user.id,
-        category: category.label || category.id,
-        area: finalArea,
-        address: finalLocation,
-        description: description || `${category.label} - ${finalLocation}`,
-        evidence_photos: photos,
-        status: "Pendiente",
-      } as any)
+      .insert(payload)
       .select("id")
       .single();
+      
     setSaving(false);
+    
     if (error || !data) {
       toast.error("No se pudo enviar", { description: error?.message });
       return;
@@ -69,7 +139,7 @@ export default function Reclamos() {
   };
 
   const reset = () => {
-    setStep(0); setCategory(null); setArea(""); setPhotos([]); setLocation(""); setDescription(""); setTicket(null);
+    setStep(0); setCategory(null); setArea(""); setPhotos([]); setPhotoFiles([]); setLocation(""); setDescription(""); setTicket(null);
   };
 
   if (ticket) {
@@ -112,13 +182,15 @@ export default function Reclamos() {
             <div>
               <div className="text-sm font-bold text-isa-navy mb-2">Tipo de incidente</div>
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-                {claim_categories.map((c) => {
-                  const Icon = (Icons as any)[c.icon] || Icons.Circle;
+                {claim_categories.map((cRaw) => {
+                  const c = cRaw as ClaimCategory;
+                  // SOLUCIÓN TS: Extracción segura de la key del módulo Icons
+                  const Icon = (Icons[c.icon as keyof typeof Icons] as React.ElementType) || Icons.Circle;
                   const active = category?.id === c.id;
                   return (
                     <button
                       key={c.id}
-                      onClick={() => { setCategory(c); if (!area) setArea((c as any).area || ""); }}
+                      onClick={() => { setCategory(c); if (!area) setArea(c.area || ""); }}
                       className={`p-5 rounded-2xl border-2 flex flex-col items-center gap-2 transition-all ${
                         active ? "border-isa-navy bg-accent" : "border-border hover:border-isa-dusty"
                       }`}
@@ -160,7 +232,7 @@ export default function Reclamos() {
             )}
             {category && category.id !== "otro" && (
               <div className="text-xs text-muted-foreground p-3 rounded-xl bg-muted/40">
-                Área asignada automáticamente: <strong className="text-isa-navy">{area || (category as any).area}</strong>
+                Área asignada automáticamente: <strong className="text-isa-navy">{area || category.area}</strong>
               </div>
             )}
           </div>
@@ -172,11 +244,17 @@ export default function Reclamos() {
               {[0, 1, 2].map((i) => {
                 const url = photos[i];
                 return (
-                  <div key={i} className="aspect-square rounded-2xl border-2 border-dashed bg-muted overflow-hidden relative">
+                  <div key={`photo-slot-${i}`} className="aspect-square rounded-2xl border-2 border-dashed bg-muted overflow-hidden relative">
                     {url ? (
                       <>
-                        <img src={url} className="w-full h-full object-cover" />
-                        <button onClick={() => setPhotos(photos.filter((_, j) => j !== i))} className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/60 text-white grid place-items-center">
+                        <img src={url} className="w-full h-full object-cover" alt="Evidencia" />
+                        <button 
+                          onClick={() => {
+                            setPhotos(photos.filter((_, j) => j !== i));
+                            setPhotoFiles(photoFiles.filter((_, j) => j !== i));
+                          }} 
+                          className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/60 text-white grid place-items-center"
+                        >
                           <X className="w-4 h-4" />
                         </button>
                       </>
@@ -257,7 +335,7 @@ export default function Reclamos() {
               const next = category?.id === "otro" && step === 0 ? 3 : step + 1;
               setStep(next);
             }}
-            disabled={(step === 0 && (!category || (category.id === "otro" ? (!area || !description.trim()) : !((category as any).area || area)))) || (step === 2 && !location)}
+            disabled={(step === 0 && (!category || (category.id === "otro" ? (!area || !description.trim()) : !(category.area || area)))) || (step === 2 && !location)}
             className="px-5 py-2.5 rounded-[20px] font-bold bg-isa-navy text-isa-white disabled:opacity-40 flex items-center gap-2"
           >
             Siguiente <ArrowRight className="w-4 h-4" />

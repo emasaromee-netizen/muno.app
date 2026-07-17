@@ -9,122 +9,81 @@ import {
   BarChart3,
   Wifi,
   PhoneCall,
+  CalendarDays,
 } from "lucide-react";
 
 import type { LucideIcon } from "lucide-react";
 
 import { useAuth } from "@/context/AuthContext";
+import { can } from "@/security/can";
+import { PERMISSIONS } from "@/security/permissions";
+
+type AppRoles = Parameters<typeof can>[0];
 
 export default function BottomNav() {
-  const { roles } = useAuth();
+  const { roles, area } = useAuth();
+  
+  // Casteo seguro para el motor de permisos
+  const safeRoles = roles as AppRoles;
 
   let items: {
-  to: string;
-  label: string;
-  icon: LucideIcon;
-}[];
+    to: string;
+    label: string;
+    icon: LucideIcon;
+  }[] = [];
 
-  // ISA
-  if (roles.includes("isa_super_admin")) {
-  items = [
-    {
-      to: "/isa/global",
-      label: "Panel",
-      icon: LayoutDashboard,
-    },
-    {
-      to: "/mi-cuenta",
-      label: "Perfil",
-      icon: Settings,
-    },
-  ];
-}
+  // 1. ISA Consultant / Super Admin
+  if (roles.includes("isa_super_admin") || roles.includes("isa_consultant")) {
+    items = [
+      { to: "/isa/global", label: "Panel Global", icon: LayoutDashboard },
+      { to: "/mi-cuenta", label: "Perfil", icon: Settings },
+    ];
+  }
 
-else if (roles.includes("isa_consultant")) {
-  items = [
-    {
-      to: "/isa/panel",
-      label: "Panel",
-      icon: LayoutDashboard,
-    },
-    {
-      to: "/mi-cuenta",
-      label: "Perfil",
-      icon: Settings,
-    },
-  ];
-}
-
-  // Municipalidad
+  // 2. Personal del Gabinete Municipal (Admins, Intendente, Jefes)
   else if (
     roles.includes("admin") ||
     roles.includes("mayor") ||
     roles.includes("tourism_chief") ||
     roles.includes("area_manager")
   ) {
-    items = [
-      {
-        to: "/admin",
-        label: "Inicio",
-        icon: LayoutDashboard,
-      },
-      {
-        to: "/admin/metricas",
-        label: "Métricas",
-        icon: BarChart3,
-      },
-      {
-        to: "/admin/comercios",
-        label: "Comercios",
-        icon: Store,
-      },
-      {
-        to: "/mi-cuenta",
-        label: "Perfil",
-        icon: Settings,
-      },
-    ];
+    // Todos ven el inicio
+    items.push({ to: "/admin", label: "Inicio", icon: LayoutDashboard });
+
+    // Solo quienes tienen acceso analítico ven Métricas (Admin e Intendente)
+    if (can(safeRoles, area, PERMISSIONS.ANALYTICS_VIEW)) {
+      items.push({ to: "/admin/metricas", label: "Métricas", icon: BarChart3 });
+    }
+
+    // Solo Admins, Hacienda, Intendencia o Turismo ven Comercios
+    if (can(safeRoles, area, PERMISSIONS.SYSTEM_ADMIN) || area === "Hacienda" || area === "Turismo" || area === "Intendencia") {
+      items.push({ to: "/admin/comercios", label: "Comercios", icon: Store });
+    }
+
+    // Jefes de Cultura o Deportes ven directamente la Agenda en su panel móvil en lugar de Comercios
+    if (area === "Cultura" || area === "Deporte") {
+      items.push({ to: "/admin/contenido", label: "Agenda", icon: CalendarDays });
+    }
+
+    // Todos ven el perfil
+    items.push({ to: "/mi-cuenta", label: "Perfil", icon: Settings });
   }
 
-  // Vecino
+  // 3. Vecino Registrado
   else if (roles.includes("resident")) {
     items = [
-      {
-        to: "/",
-        label: "Inicio",
-        icon: Home,
-      },
-      {
-        to: "/reclamos",
-        label: "Reclamos",
-        icon: AlertTriangle,
-      },
-      {
-        to: "/mi-cuenta",
-        label: "Perfil",
-        icon: Settings,
-      },
+      { to: "/", label: "Inicio", icon: Home },
+      { to: "/reclamos", label: "Reclamos", icon: AlertTriangle },
+      { to: "/mi-cuenta", label: "Perfil", icon: Settings },
     ];
   }
 
-  // Turista
+  // 4. Turista (Navegación Pública)
   else {
     items = [
-      {
-        to: "/",
-        label: "Explorar",
-        icon: Compass,
-      },
-      {
-        to: "/wifi-access",
-        label: "WiFi",
-        icon: Wifi,
-      },
-      {
-        to: "/emergencias",
-        label: "Emergencias",
-        icon: PhoneCall,
-      },
+      { to: "/", label: "Explorar", icon: Compass },
+      { to: "/wifi-access", label: "WiFi", icon: Wifi },
+      { to: "/emergencias", label: "Emergencias", icon: PhoneCall },
     ];
   }
 

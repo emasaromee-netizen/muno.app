@@ -32,6 +32,7 @@ const TITLES: Record<string, string> = {
   "/admin/tareas": "Tareas internas",
   "/admin/banners": "Banners del Home",
 };
+
 const matchTitle = (path: string) => {
   if (TITLES[path]) return TITLES[path];
   if (path.startsWith("/admin/area/")) return `Área · ${decodeURIComponent(path.split("/").pop() || "")}`;
@@ -40,27 +41,25 @@ const matchTitle = (path: string) => {
   return "MUNO+";
 };
 
+// Roles que tienen acceso al panel interno
+const STAFF_ROLES = ["admin", "mayor", "tourism_chief", "area_manager", "isa_super_admin", "isa_consultant"];
+
 export default function AppLayout() {
   const { pathname } = useLocation();
   const navigate = useNavigate();
   const { roles, area } = useAuth();
 
-const title = matchTitle(pathname);
-const showBack = pathname !== "/" && pathname !== "/admin";
+  const title = matchTitle(pathname);
+  const showBack = pathname !== "/" && pathname !== "/admin";
 
-const isAdmin =
-  roles.includes("admin") ||
-  roles.includes("mayor") ||
-  roles.includes("tourism_chief") ||
-  roles.includes("area_manager") ||
-  roles.includes("isa_super_admin") ||
-  roles.includes("isa_consultant");
+  // Verificamos si el usuario es parte del personal municipal cruzando arrays
+  const isStaff = roles.some((role) => STAFF_ROLES.includes(role));
 
-const [mobile, setMobile] = useState(false);
+  const [mobile, setMobile] = useState(false);
 
   return (
     <div className="min-h-screen w-full bg-isa-light">
-      {isAdmin && (
+      {isStaff && (
         <div className="fixed top-3 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2">
           <div className="bg-card border rounded-full p-1 flex shadow-md text-xs font-bold">
             <button onClick={() => setMobile(false)} className={`px-3 py-1 rounded-full ${!mobile ? "bg-isa-navy text-isa-white" : "text-isa-navy"}`}>🖥️ Web</button>
@@ -68,7 +67,7 @@ const [mobile, setMobile] = useState(false);
           </div>
         </div>
       )}
-      <div className={isAdmin && !mobile ? "w-full max-w-7xl mx-auto flex flex-col min-h-screen pt-14" : "phone-frame flex flex-col"}>
+      <div className={isStaff && !mobile ? "w-full max-w-7xl mx-auto flex flex-col min-h-screen pt-14" : "phone-frame flex flex-col"}>
         <header className="h-14 px-4 flex items-center justify-between border-b bg-card shrink-0">
           <div className="flex items-center gap-2 min-w-0">
             {showBack ? (
@@ -87,24 +86,24 @@ const [mobile, setMobile] = useState(false);
           </div>
           <div className="flex items-center gap-2">
             <FullscreenToggle />
-            {!isAdmin && <NotificationsBell />}
+            {!isStaff && <NotificationsBell />}
             <span className="isa-chip bg-accent text-isa-navy">
-  {roles.includes("isa_super_admin")
-    ? "ISA Super Admin"
-    : roles.includes("isa_consultant")
-    ? "Consultor ISA"
-    : roles.includes("admin")
-    ? "Administrador"
-    : roles.includes("mayor")
-    ? "Intendente"
-    : roles.includes("tourism_chief")
-    ? "Jefe de Turismo"
-    : roles.includes("area_manager")
-    ? area ?? "Jefe de Área"
-    : roles.includes("resident")
-    ? "Vecino"
-    : "Turista"}
-</span>
+              {roles.includes("isa_super_admin")
+                ? "ISA Super Admin"
+                : roles.includes("isa_consultant")
+                ? "Consultor ISA"
+                : roles.includes("admin")
+                ? "Administrador"
+                : roles.includes("mayor")
+                ? "Intendente"
+                : roles.includes("tourism_chief")
+                ? "Jefe de Turismo"
+                : roles.includes("area_manager")
+                ? area ?? "Jefe de Área"
+                : roles.includes("resident")
+                ? "Vecino"
+                : "Turista"}
+            </span>
           </div>
         </header>
         <main className="flex-1 overflow-y-auto p-4 animate-fade-in">
@@ -112,7 +111,6 @@ const [mobile, setMobile] = useState(false);
         </main>
         <BottomNav />
       </div>
-      
     </div>
   );
 }

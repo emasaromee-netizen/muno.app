@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, ElementType } from "react";
+import { useState, useMemo, useEffect, ElementType, ReactNode } from "react";
 import { places } from "@/data/mock";
 import { MapPin, Trees, Landmark, Clock, Tag, Info } from "lucide-react";
 import { formatARS } from "@/lib/format";
@@ -25,7 +25,6 @@ interface PlaceItem {
   requirements?: string;
 }
 
-// Interfaz estricta para la respuesta de la base de datos (Elimina el error de la Línea 92)
 interface DBContentItem {
   id: string;
   title: string;
@@ -41,8 +40,7 @@ interface DBContentItem {
 const NATURE_TYPES = ["Naturaleza", "Salto", "Parque Nacional", "Río", "Dique"];
 const CULTURE_TYPES = ["Museo", "Cultural", "Monumento", "Cultura"];
 
-// Tipado estricto con ElementType (Elimina el error de la Línea 32)
-const InfoLine = ({ icon: Icon, children }: { icon: ElementType; children: React.ReactNode }) => (
+const InfoLine = ({ icon: Icon, children }: { icon: ElementType; children: ReactNode }) => (
   <div className="flex items-start gap-1.5 text-[11px] text-muted-foreground">
     <Icon strokeWidth={1.5} className="w-3 h-3 mt-0.5 shrink-0" /><span>{children}</span>
   </div>
@@ -72,6 +70,36 @@ const PlaceCard = ({ item }: { item: PlaceItem }) => (
   </article>
 );
 
+// 2. Extraemos el componente fuera del render principal
+const CategoryBtn = ({ 
+  value, 
+  icon: Icon, 
+  label, 
+  isActive, 
+  onClick 
+}: { 
+  value: Cat; 
+  icon: ElementType; 
+  label: string; 
+  isActive: boolean; 
+  onClick: (val: Cat) => void;
+}) => {
+  return (
+    <button
+      onClick={() => { onClick(value); track({ kind: "category_click", category: `Lugares:${value}`, userType: "turista" }); }}
+      className="flex-1 min-h-[88px] rounded-[16px] flex flex-col items-center justify-center gap-1.5 font-extrabold text-sm transition-all"
+      style={{
+        background: isActive ? "#242E44" : "#F5EFE6",
+        color: isActive ? "#FFFFFF" : "#242E44",
+        border: isActive ? "none" : "1px solid rgba(36,46,68,0.12)",
+      }}
+    >
+      <Icon strokeWidth={1.5} className="w-7 h-7" />
+      {label}
+    </button>
+  );
+};
+
 export default function Lugares() {
   const [cat, setCat] = useState<Cat>("Naturaleza");
   const { user } = useAuth();
@@ -100,9 +128,9 @@ export default function Lugares() {
       const { data } = await q;
 
       if (isMounted) {
+        const safeData = (data as unknown as DBContentItem[]) || [];
         setDbPlaces(
-          // Aplicamos la interfaz DBContentItem aquí
-          (data || []).map((it: DBContentItem) => ({
+          safeData.map((it) => ({
             id: it.id,
             name: it.title,
             type: it.category || it.type || "Naturaleza",
@@ -134,25 +162,6 @@ export default function Lugares() {
     return [...dbFiltered, ...mockFiltered];
   }, [cat, dbPlaces]);
 
-  // Tipado estricto con ElementType (Elimina el error de la Línea 126)
-  const Btn = ({ value, icon: Icon, label }: { value: Cat; icon: ElementType; label: string }) => {
-    const active = cat === value;
-    return (
-      <button
-        onClick={() => { setCat(value); track({ kind: "category_click", category: `Lugares:${value}`, userType: "turista" }); }}
-        className="flex-1 min-h-[88px] rounded-[16px] flex flex-col items-center justify-center gap-1.5 font-extrabold text-sm transition-all"
-        style={{
-          background: active ? "#242E44" : "#F5EFE6",
-          color: active ? "#FFFFFF" : "#242E44",
-          border: active ? "none" : "1px solid rgba(36,46,68,0.12)",
-        }}
-      >
-        <Icon strokeWidth={1.5} className="w-7 h-7" />
-        {label}
-      </button>
-    );
-  };
-
   return (
     <div className="space-y-5">
       <header>
@@ -160,8 +169,8 @@ export default function Lugares() {
         <p className="text-sm text-muted-foreground">Naturaleza y cultura de la región.</p>
       </header>
       <div className="flex gap-3">
-        <Btn value="Naturaleza" icon={Trees} label="NATURALEZA" />
-        <Btn value="Cultura" icon={Landmark} label="CULTURA" />
+        <CategoryBtn value="Naturaleza" icon={Trees} label="NATURALEZA" isActive={cat === "Naturaleza"} onClick={setCat} />
+        <CategoryBtn value="Cultura" icon={Landmark} label="CULTURA" isActive={cat === "Cultura"} onClick={setCat} />
       </div>
       {filtered.length === 0 ? (
         <p className="text-sm text-muted-foreground text-center py-6">Sin resultados.</p>

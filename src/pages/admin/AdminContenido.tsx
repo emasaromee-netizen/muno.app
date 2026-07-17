@@ -48,29 +48,56 @@ export default function AdminContenido() {
   const [myMunId, setMyMunId] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
+  // Efecto 1: Resolver el ID del municipio del usuario
   useEffect(() => {
+    let isMounted = true;
     if (!user?.id) return;
+
     supabase.from("profiles").select("municipality_id").eq("id", user.id).maybeSingle()
-      .then(({ data }: any) => setMyMunId(data?.municipality_id ?? null));
+      .then(({ data }) => {
+        if (isMounted) setMyMunId(data?.municipality_id ?? null);
+      });
+
+    return () => { isMounted = false; };
   }, [user?.id]);
 
-  const load = async () => {
-    setLoading(true);
-    let q = supabase.from("content_items").select("*").order("created_at", { ascending: false });
-    if (!canEditAllAreas) {
-    q = q.eq("area", area);
-    }
-    if (myMunId) q = q.eq("municipality_id", myMunId);
-    const { data } = await q;
-    setItems((data as Item[]) || []);
-    setLoading(false);
-  };
-
+  // Efecto 2: Cargar el contenido en base a los permisos y el área
   useEffect(() => {
-  load();
-  /* eslint-disable-next-line */
+    let isMounted = true;
+
+    const fetchContent = async () => {
+      setLoading(true);
+      let q = supabase.from("content_items").select("*").order("created_at", { ascending: false });
+      if (!canEditAllAreas) {
+        q = q.eq("area", area);
+      }
+      if (myMunId) q = q.eq("municipality_id", myMunId);
+
+      try {
+        const { data } = await q;
+        if (isMounted) {
+          setItems((data as Item[]) || []);
+          setLoading(false);
+        }
+      } catch (error) {
+        console.error("Error cargando contenido", error);
+        if (isMounted) setLoading(false);
+      }
+    };
+
+    fetchContent();
+
+    return () => { isMounted = false; };
   }, [area, canEditAllAreas, myMunId]);
 
+  // Exponemos una función load simplificada solo para recargar después de Guardar/Borrar
+  const load = async () => {
+      let q = supabase.from("content_items").select("*").order("created_at", { ascending: false });
+      if (!canEditAllAreas) q = q.eq("area", area);
+      if (myMunId) q = q.eq("municipality_id", myMunId);
+      const { data } = await q;
+      setItems((data as Item[]) || []);
+  };
 
   const onUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
@@ -138,20 +165,29 @@ export default function AdminContenido() {
 
   const submit = async () => {
     if (!canCreateContent && !editingId) {
-    toast.error("No tenés permisos.");
-    return;
+      toast.error("No tenés permisos.");
+      return;
     }
 
-if (!canEditContent && editingId) {
-    toast.error("No tenés permisos.");
-    return;
+    if (!canEditContent && editingId) {
+      toast.error("No tenés permisos.");
+      return;
     }
     if (!form.title.trim()) {
       toast.error("Falta el título");
       return;
     }
+    
     setBusy(true);
     const photo_url = await uploadPhoto();
+    
+    // Corrección quirúrgica P1: Detener proceso si la nueva subida falló debido a problemas de red móvil
+    if (photoFile && !photo_url) {
+      toast.error("Error al subir la imagen. Por favor, verificá tu conexión móvil e intentalo de nuevo.");
+      setBusy(false);
+      return;
+    }
+
     // Vincular al municipio del jefe logueado
     let municipality_id: string | null = null;
     if (user?.id) {
@@ -162,7 +198,8 @@ if (!canEditContent && editingId) {
         .maybeSingle();
       municipality_id = prof?.municipality_id ?? null;
     }
-    const payload: any = {
+    
+    const payload = {
       area,
       kind,
       title: form.title.trim(),
@@ -174,26 +211,30 @@ if (!canEditContent && editingId) {
       created_by: user?.id,
       ...(municipality_id ? { municipality_id } : {}),
     };
+    
     let error;
     if (editingId) {
       ({ error } = await supabase.from("content_items").update(payload).eq("id", editingId));
     } else {
       ({ error } = await supabase.from("content_items").insert(payload));
     }
+    
     setBusy(false);
+    
     if (error) {
       toast.error(editingId ? "No se pudo actualizar" : "No se pudo publicar", { description: error.message });
       return;
     }
+    
     toast.success(editingId ? "Cambios guardados" : "Publicado correctamente");
     reset();
     load();
   };
 
   const startEdit = (it: Item) => {
-  if (!canEditContent) {
-    toast.error("No tenés permisos.");
-    return;
+    if (!canEditContent) {
+      toast.error("No tenés permisos.");
+      return;
     }
     setEditingId(it.id);
     setKind(it.kind as Kind);
@@ -211,8 +252,8 @@ if (!canEditContent && editingId) {
 
   const remove = async (id: string) => {
     if (!canDeleteContent) {
-    toast.error("No tenés permisos.");
-    return;
+      toast.error("No tenés permisos.");
+      return;
     }
     if (!confirm("¿Eliminar esta publicación?")) return;
     const { error } = await supabase.from("content_items").delete().eq("id", id);
@@ -243,74 +284,72 @@ if (!canEditContent && editingId) {
 
       {(canCreateContent || canEditContent) && (
         <div className="isa-card p-5 space-y-3">
-        <h3>{editingId ? `Editar ${kind.toLowerCase()}` : `Nuevo ${kind.toLowerCase()}`} · {area}</h3>
+          <h3>{editingId ? `Editar ${kind.toLowerCase()}` : `Nuevo ${kind.toLowerCase()}`} · {area}</h3>
 
-        {photo ? (
-          <div className="space-y-2">
-            <div className="relative w-full overflow-hidden rounded-xl bg-muted" style={{ aspectRatio: "2 / 1" }}>
-              <img
-                src={photo}
-                className="absolute inset-0 w-full h-full object-cover"
-                style={{ objectPosition: `center ${posY}%` }}
-                alt="preview"
-              />
-              <button onClick={() => { setPhoto(null); setPhotoFile(null); }} className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/60 text-white grid place-items-center"><X className="w-4 h-4" /></button>
-            </div>
-            {photoFile && (
-              <div className="space-y-1">
-                <label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">Reencuadrar (vertical)</label>
-                <input
-                  type="range"
-                  min={0}
-                  max={100}
-                  value={posY}
-                  onChange={(e) => setPosY(parseInt(e.target.value, 10))}
-                  className="w-full"
+          {photo ? (
+            <div className="space-y-2">
+              <div className="relative w-full overflow-hidden rounded-xl bg-muted" style={{ aspectRatio: "2 / 1" }}>
+                <img
+                  src={photo}
+                  className="absolute inset-0 w-full h-full object-cover"
+                  style={{ objectPosition: `center ${posY}%` }}
+                  alt="preview"
                 />
+                <button onClick={() => { setPhoto(null); setPhotoFile(null); }} className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/60 text-white grid place-items-center"><X className="w-4 h-4" /></button>
               </div>
-            )}
-            <p className="text-[11px] text-muted-foreground">Tamaño recomendado: 1200x600px (2:1)</p>
-          </div>
-        ) : (
-          <div className="space-y-1">
-            <button onClick={() => fileRef.current?.click()} className="w-full rounded-xl border-2 border-dashed grid place-items-center text-muted-foreground" style={{ aspectRatio: "2 / 1" }}>
-              <div className="text-center"><Camera className="w-6 h-6 mx-auto" /><div className="text-xs mt-1">Subir foto del evento</div></div>
-            </button>
-            <p className="text-[11px] text-muted-foreground">Tamaño recomendado: 1200x600px (2:1)</p>
-          </div>
-        )}
-        <input ref={fileRef} type="file" accept="image/*" hidden onChange={onUpload} />
-
-        <input placeholder="Título" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm" />
-        <textarea placeholder="Descripción" value={form.desc} onChange={(e) => setForm({ ...form, desc: e.target.value })} rows={3} className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm resize-none" />
-        <div className="grid grid-cols-2 gap-2">
-          <input placeholder="Precio (ej 5000)" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} className="px-3 py-2.5 rounded-xl border bg-background text-sm" />
-          <input placeholder="Días" value={form.days} onChange={(e) => setForm({ ...form, days: e.target.value })} className="px-3 py-2.5 rounded-xl border bg-background text-sm" />
-        </div>
-        <input placeholder="Horario" value={form.schedule} onChange={(e) => setForm({ ...form, schedule: e.target.value })} className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm" />
-
-        <div className="flex gap-2">
-          {((canCreateContent && !editingId) ||
-  (canEditContent && editingId)) && (
-  <button
-    onClick={submit}
-    disabled={!form.title || busy}
-    className="flex-1 bg-isa-navy text-isa-white rounded-[20px] py-3 font-bold disabled:opacity-40 flex items-center justify-center gap-2"
-  >
-    {busy ? (
-      <Loader2 className="w-4 h-4 animate-spin" />
-    ) : (
-      <CheckCircle2 className="w-4 h-4" />
-    )}
-
-    {editingId ? "Guardar cambios" : "Publicar"}
-  </button>
-)}
-          {editingId && (
-            <button onClick={reset} className="px-4 rounded-[20px] border-2 border-isa-navy text-isa-navy font-bold text-sm">Cancelar</button>
+              {photoFile && (
+                <div className="space-y-1">
+                  <label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">Reencuadrar (vertical)</label>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={posY}
+                    onChange={(e) => setPosY(parseInt(e.target.value, 10))}
+                    className="w-full"
+                  />
+                </div>
+              )}
+              <p className="text-[11px] text-muted-foreground">Tamaño recomendado: 1200x600px (2:1)</p>
+            </div>
+          ) : (
+            <div className="space-y-1">
+              <button onClick={() => fileRef.current?.click()} className="w-full rounded-xl border-2 border-dashed grid place-items-center text-muted-foreground" style={{ aspectRatio: "2 / 1" }}>
+                <div className="text-center"><Camera className="w-6 h-6 mx-auto" /><div className="text-xs mt-1">Subir foto del evento</div></div>
+              </button>
+              <p className="text-[11px] text-muted-foreground">Tamaño recomendado: 1200x600px (2:1)</p>
+            </div>
           )}
+          <input ref={fileRef} type="file" accept="image/*" hidden onChange={onUpload} />
+
+          <input placeholder="Título" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm" />
+          <textarea placeholder="Descripción" value={form.desc} onChange={(e) => setForm({ ...form, desc: e.target.value })} rows={3} className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm resize-none" />
+          <div className="grid grid-cols-2 gap-2">
+            <input placeholder="Precio (ej 5000)" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} className="px-3 py-2.5 rounded-xl border bg-background text-sm" />
+            <input placeholder="Días" value={form.days} onChange={(e) => setForm({ ...form, days: e.target.value })} className="px-3 py-2.5 rounded-xl border bg-background text-sm" />
+          </div>
+          <input placeholder="Horario" value={form.schedule} onChange={(e) => setForm({ ...form, schedule: e.target.value })} className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm" />
+
+          <div className="flex gap-2">
+            {((canCreateContent && !editingId) || (canEditContent && editingId)) && (
+              <button
+                onClick={submit}
+                disabled={!form.title || busy}
+                className="flex-1 bg-isa-navy text-isa-white rounded-[20px] py-3 font-bold disabled:opacity-40 flex items-center justify-center gap-2"
+              >
+                {busy ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <CheckCircle2 className="w-4 h-4" />
+                )}
+                {editingId ? "Guardar cambios" : "Publicar"}
+              </button>
+            )}
+            {editingId && (
+              <button onClick={reset} className="px-4 rounded-[20px] border-2 border-isa-navy text-isa-navy font-bold text-sm">Cancelar</button>
+            )}
+          </div>
         </div>
-      </div>
       )}
 
       <section>
@@ -338,17 +377,19 @@ if (!canEditContent && editingId) {
                   </div>
                 </div>
                 {canEditContent && (
-                <button
+                  <button
                     onClick={() => startEdit(it)}
                     className="w-9 h-9 grid place-items-center rounded-lg hover:bg-isa-light text-isa-navy" >
                     <Pencil className="w-4 h-4" />
-               </button>)}
-               {canDeleteContent && (
-               <button
+                  </button>
+                )}
+                {canDeleteContent && (
+                  <button
                     onClick={() => remove(it.id)}
                     className="w-9 h-9 grid place-items-center rounded-lg hover:bg-muno-red/10 text-muno-red" >
                     <Trash2 className="w-4 h-4" />
-              </button>)}
+                  </button>
+                )}
               </li>
             ))}
           </ul>

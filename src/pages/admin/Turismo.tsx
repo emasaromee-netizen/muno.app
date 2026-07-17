@@ -1,10 +1,21 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
 import { Camera, Loader2, Plus, Star, Upload, Wallet } from "lucide-react";
 
 type Category = "gastronomy" | "event" | "lodging" | "nature" | "commerce";
+
+interface DBBusiness {
+  id: string;
+  name: string;
+  zone: string | null;
+  photo_url: string | null;
+  address: string | null;
+  enabled: boolean;
+  tax_expires_at: string | null;
+  municipality_id: string | null;
+}
 
 const CATS: { id: Category; label: string }[] = [
   { id: "gastronomy", label: "Gastronomía" },
@@ -56,14 +67,24 @@ function FormularioCarga() {
       return;
     }
     setSaving(true);
-    const { error } = await supabase.from("tourism_items" as any).insert({
+    
+    // Blindaje Multi-Tenant
+    let municipality_id = null;
+    if (user?.id) {
+      const { data: prof } = await supabase.from("profiles").select("municipality_id").eq("id", user.id).maybeSingle();
+      municipality_id = prof?.municipality_id;
+    }
+
+    const { error } = await supabase.from("tourism_items").insert({
       category,
       title: title.trim(),
       description: description.trim() || null,
       photo_url: photo,
       published: true,
       created_by: user?.id,
+      ...(municipality_id ? { municipality_id } : {})
     });
+    
     setSaving(false);
     if (error) {
       toast.error("Error: " + error.message);
@@ -163,42 +184,81 @@ function FormularioCarga() {
 
 function TablaComerciosHacienda() {
   const { user } = useAuth();
-  const [rows, setRows] = useState<any[]>([]);
+  const [rows, setRows] = useState<DBBusiness[]>([]);
   const [featuredIds, setFeaturedIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
 
-  const load = async () => {
-    setLoading(true);
-    const { data: biz } = await supabase
-      .from("businesses")
-      .select("id,name,zone,address,enabled,tax_expires_at,photo_url")
-      .order("name");
-    setRows(biz || []);
-    const { data: feats } = await supabase
-      .from("tourism_items" as any)
-      .select("business_id,featured")
-      .eq("featured", true);
-    setFeaturedIds(new Set(((feats as any[]) || []).map((f) => f.business_id).filter(Boolean)));
-    setLoading(false);
-  };
+  // 1. Candado en memoria para validación sincrónica
+  const isMounted = useRef(true);
+
+  // 2. Remoción del falso booleano
+  const load = useCallback(async () => {
+    if (!user?.id) return;
+    if (isMounted.current) setLoading(true);
+
+    try {
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("municipality_id")
+        .eq("id", user.id)
+        .maybeSingle();
+
+      const muniId = profile?.municipality_id;
+
+      let bq = supabase
+        .from("businesses")
+        .select("id,name,zone,address,enabled,tax_expires_at,photo_url,municipality_id")
+        .order("name");
+
+      if (muniId) bq = bq.eq("municipality_id", muniId);
+
+      const { data: biz } = await bq;
+
+      let tq = supabase
+        .from("tourism_items")
+        .select("business_id,featured")
+        .eq("featured", true);
+
+      if (muniId) tq = tq.eq("municipality_id", muniId);
+
+      const { data: feats } = await tq;
+
+      // 3. Verificamos el .current antes de setear variables de estado
+      if (isMounted.current) {
+        setRows((biz as DBBusiness[]) || []);
+        const featArray = (feats || []) as { business_id: string | null }[];
+        setFeaturedIds(new Set(featArray.map((f) => f.business_id).filter(Boolean) as string[]));
+        setLoading(false);
+      }
+    } catch (error) {
+      console.error("Error al cargar comercios para turismo:", error);
+      if (isMounted.current) setLoading(false);
+    }
+  }, [user?.id]);
 
   useEffect(() => {
+    isMounted.current = true;
     load();
-  }, []);
+    return () => { 
+      // 4. Apagamos la referencia si el componente se desmonta
+      isMounted.current = false; 
+    };
+  }, [load]);
 
-  const featurar = async (b: any) => {
+  const featurar = async (b: DBBusiness) => {
     if (featuredIds.has(b.id)) {
       const { data: existing } = await supabase
-        .from("tourism_items" as any)
+        .from("tourism_items")
         .select("id")
         .eq("business_id", b.id)
         .maybeSingle();
-      if ((existing as any)?.id) {
-        await supabase.from("tourism_items" as any).update({ featured: false }).eq("id", (existing as any).id);
+        
+      if (existing?.id) {
+        await supabase.from("tourism_items").update({ featured: false }).eq("id", existing.id);
       }
       toast.success("Quitado de destacados");
     } else {
-      const { error } = await supabase.from("tourism_items" as any).insert({
+      const { error } = await supabase.from("tourism_items").insert({
         category: "commerce",
         title: b.name,
         description: b.address || "",
@@ -208,7 +268,9 @@ function TablaComerciosHacienda() {
         featured: true,
         published: true,
         created_by: user?.id,
+        municipality_id: b.municipality_id
       });
+      
       if (error) {
         toast.error("No se pudo destacar: " + error.message);
         return;

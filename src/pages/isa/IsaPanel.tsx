@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/integrations/supabase/client";
+import type { Json } from "@/integrations/supabase/types";
 import { toast } from "sonner";
-import { Plus, Trash2, FileText, Send, Download } from "lucide-react";
+import { Plus, Trash2, FileText, Send } from "lucide-react";
 import { buildIsaReportPDF, type IsaKPI } from "@/lib/isaReport";
 
 type Bucket = "searches" | "origins" | "revenue";
@@ -12,6 +13,12 @@ const LABELS: Record<Bucket, string> = {
   origins: "Origen geográfico",
   revenue: "Recaudación",
 };
+
+// 1. Interfaz estricta para eliminar el último 'any' de los componentes
+interface FieldProps {
+  label: string;
+  children: ReactNode;
+}
 
 export default function IsaPanel() {
   const { signOut, user } = useAuth();
@@ -53,17 +60,22 @@ export default function IsaPanel() {
     }
     setBusy(true);
     const payload = buildPayload();
+    
+    // Casteo seguro usando el tipo nativo Json de Supabase
     const { error } = await supabase.from("analytics_reports").insert({
       title,
       period,
-      body: payload as any,
+      body: payload as unknown as Json,
       created_by: user?.id ?? null,
     });
+    
     setBusy(false);
+    
     if (error) {
       toast.error("No se pudo publicar el informe.");
       return;
     }
+    
     localStorage.setItem("muno.isa.report.unread", "1");
     toast.success("Informe publicado. El Intendente fue notificado.", {
       description: "Badge dorado activado sobre Analítica.",
@@ -105,7 +117,7 @@ export default function IsaPanel() {
             </div>
             <div className="space-y-2">
               {data[b].map((k, i) => (
-                <div key={i} className="flex gap-2">
+                <div key={`${b}-row-${i}`} className="flex gap-2">
                   <input
                     placeholder="Concepto"
                     value={k.label}
@@ -170,7 +182,7 @@ export default function IsaPanel() {
   );
 }
 
-function Field({ label, children }: any) {
+function Field({ label, children }: FieldProps) {
   return (
     <label className="block">
       <span className="block text-[11px] uppercase tracking-wider text-muted-foreground font-bold mb-1">{label}</span>

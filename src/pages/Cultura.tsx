@@ -3,7 +3,28 @@ import { workshops, cultural_events } from "@/data/mock";
 import { CheckCircle2, X, Calendar, MapPin, Clock, Tag, Info } from "lucide-react";
 import { formatARS } from "@/lib/format";
 
-function SuccessModal({ open, onClose, message }: any) {
+// 1. Interfaces estrictas para erradicar los 'any'
+interface EnrollableItem {
+  name: string;
+  capacity: number;
+  enrolled: number;
+}
+
+interface SuccessModalProps {
+  open: boolean;
+  onClose: () => void;
+  message: string | null;
+}
+
+interface EnrollDialogProps {
+  workshop: EnrollableItem;
+  onClose: () => void;
+  onSuccess: (msg: string) => void;
+}
+
+type TabType = "talleres" | "eventos";
+
+function SuccessModal({ open, onClose, message }: SuccessModalProps) {
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 animate-fade-in p-4">
@@ -19,10 +40,11 @@ function SuccessModal({ open, onClose, message }: any) {
   );
 }
 
-function EnrollDialog({ workshop, onClose, onSuccess }: any) {
+function EnrollDialog({ workshop, onClose, onSuccess }: EnrollDialogProps) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const full = workshop.enrolled >= workshop.capacity;
+  
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 animate-fade-in p-4">
       <div className="isa-card p-6 max-w-md w-full animate-scale-in">
@@ -50,20 +72,22 @@ function EnrollDialog({ workshop, onClose, onSuccess }: any) {
 }
 
 export default function Cultura() {
-  const [tab, setTab] = useState<"talleres" | "eventos">("talleres");
-  const [enrollItem, setEnrollItem] = useState<any>(null);
+  const [tab, setTab] = useState<TabType>("talleres");
+  const [enrollItem, setEnrollItem] = useState<EnrollableItem | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+
+  const TABS: { k: TabType; label: string }[] = [
+    { k: "talleres", label: "Talleres" },
+    { k: "eventos", label: "Eventos" },
+  ];
 
   return (
     <div className="space-y-6">
       <div className="flex gap-2">
-        {[
-          { k: "talleres", label: "Talleres" },
-          { k: "eventos", label: "Eventos" },
-        ].map((t) => (
+        {TABS.map((t) => (
           <button
             key={t.k}
-            onClick={() => setTab(t.k as any)}
+            onClick={() => setTab(t.k)}
             className={`px-4 py-2 rounded-[20px] text-sm font-bold ${tab === t.k ? "bg-isa-navy text-isa-white" : "bg-card border"}`}
           >
             {t.label}
@@ -99,7 +123,7 @@ export default function Cultura() {
                     </div>
                   </div>
                   <button
-                    onClick={() => setEnrollItem(w)}
+                    onClick={() => setEnrollItem({ name: w.name, capacity: w.capacity, enrolled: w.enrolled })}
                     className="w-full bg-isa-navy text-isa-white rounded-[20px] py-2.5 font-bold text-sm"
                   >
                     {full ? "Lista de espera" : "Inscribirme"}
@@ -124,7 +148,10 @@ export default function Cultura() {
                   <span className="flex items-center gap-1.5"><Tag strokeWidth={1.5} className="w-4 h-4" />{formatARS(e.price)}</span>
                 </div>
                 {e.requirements && <p className="text-xs text-muted-foreground flex items-start gap-1.5"><Info strokeWidth={1.5} className="w-3.5 h-3.5 mt-0.5" />{e.requirements}</p>}
-                <button onClick={() => setEnrollItem({ name: e.title, capacity: e.capacity, enrolled: e.reserved })} className="w-full bg-isa-navy text-isa-white rounded-[20px] py-3 font-bold">
+                <button 
+                  onClick={() => setEnrollItem({ name: e.title, capacity: e.capacity, enrolled: e.reserved })} 
+                  className="w-full bg-isa-navy text-isa-white rounded-[20px] py-3 font-bold"
+                >
                   Reservar
                 </button>
               </div>

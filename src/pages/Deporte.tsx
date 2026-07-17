@@ -11,20 +11,39 @@ const STATUS: Record<SportStatus, { label: string; cls: string }> = {
 
 const AGES = ["Todos", "Infantil", "Jóvenes", "Adultos"] as const;
 
+// 1. Interfaces estrictas para eliminar 'any'
+interface EnrollableItem {
+  id: string;
+  name: string;
+}
+
+type TabType = "eventos" | "oferta";
+
 export default function Deporte() {
-  const [tab, setTab] = useState<"eventos" | "oferta">("eventos");
+  const [tab, setTab] = useState<TabType>("eventos");
   const [age, setAge] = useState<(typeof AGES)[number]>("Todos");
-  const [enroll, setEnroll] = useState<any>(null);
+  const [enroll, setEnroll] = useState<EnrollableItem | null>(null);
   const [success, setSuccess] = useState(false);
   const [hasCert, setHasCert] = useState(false);
 
   const filtered = age === "Todos" ? sport_activities : sport_activities.filter((a) => a.age_range === age);
 
+  const TABS: { k: TabType; l: string }[] = [
+    { k: "eventos", l: "Eventos" },
+    { k: "oferta", l: "Oferta Municipal" }
+  ];
+
   return (
     <div className="space-y-6">
       <div className="flex gap-2">
-        {[{ k: "eventos", l: "Eventos" }, { k: "oferta", l: "Oferta Municipal" }].map((t) => (
-          <button key={t.k} onClick={() => setTab(t.k as any)} className={`px-4 py-2 rounded-[20px] text-sm font-bold ${tab === t.k ? "bg-isa-navy text-isa-white" : "bg-card border"}`}>{t.l}</button>
+        {TABS.map((t) => (
+          <button 
+            key={t.k} 
+            onClick={() => setTab(t.k)} 
+            className={`px-4 py-2 rounded-[20px] text-sm font-bold ${tab === t.k ? "bg-isa-navy text-isa-white" : "bg-card border"}`}
+          >
+            {t.l}
+          </button>
         ))}
       </div>
 
@@ -43,7 +62,7 @@ export default function Deporte() {
               </div>
               <button
                 disabled={e.status === "full"}
-                onClick={() => setEnroll(e)}
+                onClick={() => setEnroll({ id: e.id, name: e.name })}
                 className="w-full bg-isa-navy text-isa-white rounded-[20px] py-2.5 font-bold text-sm disabled:opacity-40"
               >
                 {e.status === "full" ? "Sin cupo" : "Inscribirme"}
@@ -80,7 +99,7 @@ export default function Deporte() {
                       <div className="h-full bg-muno-teal" style={{ width: `${pct}%` }} />
                     </div>
                   </div>
-                  <button onClick={() => setEnroll(a)} className="w-full bg-isa-navy text-isa-white rounded-[20px] py-2.5 font-bold text-sm">Inscribirme</button>
+                  <button onClick={() => setEnroll({ id: a.id, name: a.name })} className="w-full bg-isa-navy text-isa-white rounded-[20px] py-2.5 font-bold text-sm">Inscribirme</button>
                 </article>
               );
             })}

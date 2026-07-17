@@ -4,6 +4,10 @@ import { listInscripciones, cancelInscripcion, type Inscripcion } from "@/lib/in
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
+import type { RealtimeChannel } from "@supabase/supabase-js";
+import type { Database } from "@/integrations/supabase/types";
+
+type RegistrationRow = Database["public"]["Tables"]["registrations"]["Row"];
 
 type Item = {
   id: string;
@@ -19,44 +23,61 @@ export default function MisInscripciones() {
   const { user } = useAuth();
   const [items, setItems] = useState<Item[]>([]);
 
-  const refresh = async () => {
-    const local: Item[] = listInscripciones().map((i: Inscripcion) => ({
-      id: i.id,
-      titulo: i.titulo,
-      fecha: i.fecha,
-      tipo: i.tipo,
-      lugar: i.lugar,
-      acompanantes: i.acompanantes,
-      source: "local",
-    }));
-    if (!user) {
-      setItems(local);
-      return;
-    }
-    const { data } = await supabase
-      .from("registrations")
-      .select("id,event_title,event_date,event_type,event_place,companions")
-      .eq("user_id", user.id)
-      .order("created_at", { ascending: false });
-    const db: Item[] = (data || []).map((r: any) => ({
-      id: r.id,
-      titulo: r.event_title,
-      fecha: r.event_date || "",
-      tipo: r.event_type || "",
-      lugar: r.event_place,
-      acompanantes: r.companions || [],
-      source: "db",
-    }));
-    // DB primero, luego locales no duplicados
-    const seen = new Set(db.map((d) => d.titulo + d.fecha));
-    setItems([...db, ...local.filter((l) => !seen.has(l.titulo + l.fecha))]);
-  };
-
   useEffect(() => {
+    let isMounted = true; // Control de Memory Leak en dispositivos móviles
+    let channel: RealtimeChannel | null = null; // Tipado estricto
+
+    const refresh = async () => {
+      const local: Item[] = listInscripciones().map((i: Inscripcion) => ({
+        id: i.id,
+        titulo: i.titulo,
+        fecha: i.fecha,
+        tipo: i.tipo,
+        lugar: i.lugar,
+        acompanantes: i.acompanantes,
+        source: "local",
+      }));
+
+      if (!user) {
+        if (isMounted) setItems(local);
+        return;
+      }
+
+      try {
+        const { data } = await supabase
+          .from("registrations")
+          .select("id,event_title,event_date,event_type,event_place,companions")
+          .eq("user_id", user.id)
+          .order("created_at", { ascending: false });
+
+        // Eliminamos el any, utilizando inferencia segura
+        const db: Item[] = (data || []).map((r) => ({
+          id: r.id,
+          titulo: r.event_title,
+          fecha: r.event_date || "",
+          tipo: r.event_type || "",
+          lugar: r.event_place,
+          // Asegurar que es un array de strings si viene de Supabase (Json)
+          acompanantes: Array.isArray(r.companions) ? r.companions.map(String) : [],
+          source: "db",
+        }));
+
+        if (isMounted) {
+          const seen = new Set(db.map((d) => d.titulo + d.fecha));
+          setItems([...db, ...local.filter((l) => !seen.has(l.titulo + l.fecha))]);
+        }
+      } catch (error) {
+        console.error("Error al obtener inscripciones", error);
+      }
+    };
+
     refresh();
-    const h = () => refresh();
-    window.addEventListener("muno:inscripciones", h);
-    let channel: any;
+    
+    // Escuchar eventos locales (ej. al abrir el diálogo de inscripción en otra pestaña)
+    const handleLocalEvent = () => refresh();
+    window.addEventListener("muno:inscripciones", handleLocalEvent);
+
+    // Conexión segura a Sockets de Supabase
     if (user) {
       channel = supabase
         .channel(`registrations-${user.id}`)
@@ -67,12 +88,16 @@ export default function MisInscripciones() {
         )
         .subscribe();
     }
+
+    // Cleanup: Desmontaje del componente
     return () => {
-      window.removeEventListener("muno:inscripciones", h);
-      if (channel) supabase.removeChannel(channel);
+      isMounted = false;
+      window.removeEventListener("muno:inscripciones", handleLocalEvent);
+      if (channel) {
+        supabase.removeChannel(channel);
+      }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id]);
+  }, [user]); // El array de dependencias correcto
 
   const cancel = async (it: Item) => {
     if (it.source === "db") {
@@ -85,7 +110,8 @@ export default function MisInscripciones() {
       cancelInscripcion(it.id);
     }
     toast.success("Inscripción cancelada");
-    refresh();
+    // Emitimos el evento para forzar recarga local
+    window.dispatchEvent(new Event("muno:inscripciones"));
   };
 
   return (

@@ -1,109 +1,71 @@
-## Configuración integral: Turismo, Hacienda, Intendente
+# Arquitectura y Estado del Sistema: MUNO App
+**Última actualización:** Finalización Hito 2 (Estabilización, Seguridad y Multi-Tenant)
+**Estado:** Producción (Release Candidate)
 
-Este pedido toca jerarquías de roles, nuevas tablas, paneles nuevos y vínculos entre módulos. Lo divido en fases para ejecutarlo de forma ordenada y poder validar cada parte antes de seguir.
-
----
-
-### Fase 1 — Roles y permisos (DB)
-
-Ampliar el enum `app_role` con dos roles nuevos:
-
-- `tourism_chief` — Jefe de Turismo
-- `mayor` — Intendente
-
-Actualizar `routeForRoles` y `ProtectedRoute` para reconocerlos. Crear funciones `has_role` checks en RLS de las tablas afectadas.
+Este documento detalla la estructura actual de jerarquías de roles, flujos de datos y módulos consolidados tras la estabilización de seguridad y refactorización técnica.
 
 ---
 
-### Fase 2 — Módulo Turismo (Jefe de Turismo)
+## 1. Seguridad, Roles y Permisos (Matriz Dinámica)
+El sistema ha abandonado las verificaciones *hardcodeadas* de roles en los componentes. Todo el control de acceso se rige por un motor de permisos estricto (`can()`) definido en `src/security/permissions.ts`.
 
-Nueva tabla `tourism_items` con columnas:
+**Roles Activos (`AppRole`):**
+- `admin`: Administrador técnico (acceso total a su municipio).
+- `mayor`: Intendente (Supervisión global *read-only* de analíticas y métricas, capacidad de publicar en tablero de novedades).
+- `area_manager`: Jefe de Área (Acceso de escritura exclusivo a los módulos de su incumbencia, ej: Cultura, Deporte, Infraestructura).
+- `tourism_chief`: Jefe de Turismo (Manejo exclusivo de la guía turística y eventos destacados).
+- `isa_consultant` / `isa_super_admin`: Analistas externos (Acceso a carga de métricas y cross-tenant global de informes).
+- `resident`: Vecino/Ciudadano.
 
-- `category` (`commerce` | `gastronomy` | `lodging` | `nature` | `event`)
-- `title`, `description`, `photo_url`, `location` (texto), `lat`, `lng`
-- `featured` (bool), `business_id` (FK opcional a `businesses` para destacar comercios de Hacienda)
-- `municipality_id`, `published`, timestamps
-
-RLS:
-- SELECT público si `published`
-- INSERT/UPDATE/DELETE: `admin`, `tourism_chief`, `mayor` (mayor sólo SELECT — ver Fase 4)
-
-Panel `/admin/turismo` con tabs por categoría + buscador. Para "Comercios" carga desde `businesses` (solo `enabled=true`) y permite marcar `featured` (lo persiste en `tourism_items`).
-
----
-
-### Fase 3 — Conexión Turismo ↔ Hacienda
-
-En el tab Comercios del panel de Turismo:
-- Lista los `businesses` con `enabled=true` y tasa al día
-- Switch "Destacar en guía turística" → crea/elimina fila `tourism_items` con `business_id`, `category='commerce'`, copia foto/datos
-- En la guía pública (`/turismo` o `/lugares`) los destacados aparecen primero
+**Aislamiento RLS (Row Level Security):**
+Todas las tablas PostgreSQL utilizan la columna `municipality_id` forzada con cláusulas `WITH CHECK` para aislar datos. Un usuario jamás puede ver ni interactuar con registros fuera de su jurisdicción.
 
 ---
 
-### Fase 4 — Rol Intendente
-
-**Supervisión read-only:**
-- RLS: SELECT permitido en `claims`, `content_items`, `tourism_items`, `businesses`, `isa_metrics`, `registrations` para `mayor`
-- UI: AdminShell muestra todos los paneles pero oculta botones de edición cuando `roles.includes('mayor')` y NO incluye admin
-
-**Banners con audiencia:**
-- Nueva columna `audience` en `announcements` (`residents` | `tourists` | `both`, default `residents`)
-- Admin puede editar; `mayor` también
-- Home de turistas (`Turismo.tsx`) filtra `audience in ('tourists','both')`; home vecino filtra `('residents','both')`
-
-**Novedades para Jefes:**
-- Tabla `staff_announcements` (`title`, `body`, `created_by`, `municipality_id`, timestamps)
-- INSERT/UPDATE/DELETE: `mayor` y `admin`
-- SELECT: cualquier rol interno (`admin`, `area_manager`, `tourism_chief`, `mayor`)
-- Componente en AdminDashboard mostrando últimas 5
+## 2. Módulo Turismo y Eventos
+El Jefe de Turismo (`tourism_chief`) administra la "Guía Turista".
+- El contenido turístico y los eventos ya no viven en estructuras aisladas temporales, sino que se apoyan en la tabla unificada `content_items` (filtrada por `kind`) y en el catálogo `businesses` verificado.
+- **Categorización visible:** La tabla `businesses` posee categorías con segmentación de audiencia (`vecino+turista`, `solo turista`, `solo vecino`). Por ejemplo, *Hospedaje* solo es visible en la app del turista, mientras que *Gastronomía* es visible para ambos perfiles.
 
 ---
 
-### Fase 5 — Vista comerciante en Mi Cuenta
-
-En `MiCuenta.tsx`:
-- Agregar campo `cuit` al `profiles`
-- Si `profile.cuit` matchea con `businesses.cuit` → mostrar tarjeta "Estado de tasas" con `tax_expires_at`, monto y estado (al día / vencida / por vencer)
-- Solo lectura (sin pago)
-
-Requiere agregar columna `cuit` a `profiles` y a `businesses`.
+## 3. Módulo de Comercios e Intendencia (Hacienda)
+- **Persistencia Directa:** La vinculación del comercio con el ciudadano se realiza de forma segura mediante la columna `owner_id` (vinculada al `user.id` de autenticación), reemplazando el frágil emparejamiento por CUIT.
+- **`MiComercio.tsx`:** Vista ciudadana del comerciante con soporte integral de Pestañas: *Datos, Habilitaciones, Pagos, Fotos (Subida real a Storage) y Reservas*.
+- **Reservas:** Sistema de agendamiento sincronizado y persistido asíncronamente en PostgreSQL (`business_reservations`).
 
 ---
 
-### Fase 6 — Persistencia
-
-Auditar formularios que aún usan `localStorage` o estado en memoria y migrarlos a Supabase. Foco:
-
-- `AdminContenido` (ya migrado en pedido anterior — verificar)
-- Banners de turismo (Fase 2)
-- Novedades internas (Fase 4)
+## 4. Analíticas ISA y Tablero de Intendente
+El rol `mayor` posee un *dashboard* ejecutivo sin capacidades de mutación accidental de operativas diarias.
+- **Novedades Internas:** Funcionalidad implementada en `InternalAnnouncement` apoyada sobre la tabla `internal_announcements`. Notifica a los Jefes de Área directamente en el *Dashboard*.
+- **Notificación ISA:** Alerta cruzada inteligente basada en base de datos (`analytics_reports.id`). La plataforma avisa a los funcionarios cuando ISA publica un reporte y lo marca como leído asíncronamente para evitar cruces en *localStorage*.
+- **RPC Optimizado:** El cálculo de contadores globales se extrae en paralelo mediante la función PostgreSQL `get_municipality_counts` y conteos `{ head: true }` para reducir drásticamente el consumo de red móvil.
 
 ---
 
-### Archivos principales a crear/editar
+## 5. Observabilidad y Resiliencia (Producción)
+- **Cero `any`:** El proyecto completo está tipado de forma estricta. Las interfaces rechazan excesos de propiedades interactuando con el cliente estricto de Supabase.
+- **Telemetría de Crashes:** Toda la app está envuelta en un `ErrorBoundary`. Excepciones no controladas (`FRONTEND_CRASH`) se persisten asíncronamente en la tabla `activity_logs` con su *stack trace*, silenciando fallos de red hacia el usuario y permitiendo depuración proactiva de dispositivos antiguos.
+- **Hardening Vercel:** Cabeceras HTTP inyectadas (`vercel.json`) implementando Content Security Policy (CSP) y bloqueo anti-XSS y Clickjacking.
+
+---
+
+## 6. Pipeline de Calidad (Testing)
+El proyecto implementa pruebas de regresión unitarias configuradas bajo Vitest.
+- **`permissions.test.ts`:** Garantiza la inviolabilidad de la matriz de autorización. Una falla en las reglas de `can()` (ej: un Vecino obteniendo acceso a funciones de Intendente) detendrá inmediatamente el flujo de integración continua.
+
+---
+
+## 7. Archivos de Referencia Arquitectónica
 
 ```text
-supabase/migrations/<ts>_tourism_mayor.sql   # roles, tablas, RLS
-src/context/AuthContext.tsx                  # nuevos roles en tipos
-src/components/ProtectedRoute.tsx            # allowed[]
-src/App.tsx                                  # rutas /admin/turismo, /admin/novedades
-src/pages/admin/AdminTurismo.tsx             # NUEVO
-src/pages/admin/AdminNovedadesJefes.tsx      # NUEVO
-src/components/admin/AdminShell.tsx          # menú según rol + read-only para mayor
-src/pages/admin/AdminBanners.tsx             # selector audiencia
-src/pages/MiCuenta.tsx                       # tarjeta comercio
-src/pages/Turismo.tsx                        # consumir tourism_items destacados
-```
-
----
-
-### Confirmación
-
-Antes de ejecutar quiero confirmar 3 cosas:
-
-1. ¿Te alcanza con que **Turismo** y **Mayor** sean roles asignados manualmente desde `/admin/usuarios` (igual que area_manager hoy), o querés también un flujo de invitación por email?
-2. Para el matching comerciante↔vecino, ¿usamos **CUIT** (hay que agregar la columna a `profiles` y `businesses`) o preferís usar **email del owner**?
-3. Las "Novedades para Jefes" del Intendente, ¿las publica solo el Intendente, o también el `admin`?
-
-Con esas respuestas arranco con la migración (Fase 1) y avanzo en orden.
+src/security/permissions.ts                  # Matriz de acceso RLS del Frontend
+src/security/can.ts                          # Motor evaluador de roles vs área
+src/lib/audit.ts                             # Trazabilidad multi-tenant legal
+src/App.tsx                                  # Enrutador, ProtectedRoute y ErrorBoundary
+src/pages/MiComercio.tsx                     # Motor de autogestión comercial
+src/pages/admin/AdminDashboard.tsx           # Hub gerencial y alertas asíncronas
+src/integrations/supabase/types.ts           # Diccionario de base de datos estricto
+vercel.json                                  # Escudo de seguridad perimetral
+src/test/permissions.test.ts                 # Automatización de Regresión de Roles

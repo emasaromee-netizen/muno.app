@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, ReactNode, ElementType } from "react";
 import { commerces, gastronomy } from "@/data/mock";
 import { MapPin, Search, Clock, Tag, Info, Phone, Store, UtensilsCrossed, Cross } from "lucide-react";
 import { formatARS } from "@/lib/format";
@@ -11,20 +11,49 @@ const TABS = [
 
 type TabKey = (typeof TABS)[number]["key"];
 
-const FARMACIAS_TURNO = [
+// 1. Interfaces estrictas para eliminar 'any'
+interface GuideItem {
+  id: string;
+  name: string;
+  photo_url?: string | null;
+  type?: string;
+  address?: string | null;
+  zone?: string | null;
+  schedule?: string | null;
+  price?: number | null;
+  requirements?: string | null;
+  phone?: string | null;
+}
+
+interface InfoLineProps {
+  icon: ElementType;
+  children: ReactNode;
+}
+
+interface CardProps {
+  item: GuideItem;
+  cta?: ReactNode;
+}
+
+interface GridProps {
+  items: GuideItem[];
+  render: (item: GuideItem) => ReactNode;
+}
+
+const FARMACIAS_TURNO: GuideItem[] = [
   { id: "f1", name: "Farmacia del Centro", address: "San Martín 245", schedule: "Hoy 08:00 - 08:00 (24hs)", phone: "+542665470123", zone: "San Francisco del Monte de Oro" },
   { id: "f2", name: "Farmacia Monte de Oro", address: "Belgrano 112", schedule: "Mañana 08:00 - 22:00", phone: "+542665470456", zone: "San Francisco del Monte de Oro" },
   { id: "f3", name: "Farmacia La Posta", address: "Ruta 20 Km 2", schedule: "Sábado y Domingo", phone: "+542665470789", zone: "San Francisco del Monte de Oro" },
 ];
 
-const InfoLine = ({ icon: Icon, children }: any) => (
+const InfoLine = ({ icon: Icon, children }: InfoLineProps) => (
   <div className="flex items-start gap-1.5 text-[12px] text-muted-foreground">
     <Icon strokeWidth={1.5} className="w-3.5 h-3.5 mt-0.5 shrink-0" />
     <span>{children}</span>
   </div>
 );
 
-const Card = ({ item, cta }: any) => (
+const Card = ({ item, cta }: CardProps) => (
   <article className="isa-card overflow-hidden hover:-translate-y-0.5 hover:shadow-md transition-all">
     {item.photo_url && <img src={item.photo_url} alt={item.name} loading="lazy" className="w-full h-[120px] object-cover" />}
     <div className="p-4 space-y-2">
@@ -34,7 +63,9 @@ const Card = ({ item, cta }: any) => (
       </div>
       <InfoLine icon={MapPin}>{item.address}{item.zone && ` · ${item.zone}`}</InfoLine>
       {item.schedule && <InfoLine icon={Clock}>{item.schedule}</InfoLine>}
-      {typeof item.price === "number" && <InfoLine icon={Tag}>{item.price === 0 ? "Sin cargo" : formatARS(item.price)}</InfoLine>}
+      {typeof item.price === "number" && item.price !== null && (
+        <InfoLine icon={Tag}>{item.price === 0 ? "Sin cargo" : formatARS(item.price)}</InfoLine>
+      )}
       {item.requirements && item.requirements !== "—" && <InfoLine icon={Info}>{item.requirements}</InfoLine>}
       {cta}
     </div>
@@ -45,16 +76,22 @@ export default function GuiaVecinal() {
   const [tab, setTab] = useState<TabKey>("Comercios");
   const [q, setQ] = useState("");
 
-  const filterFn = (i: { name: string }) =>
-    i.name.toLowerCase().includes(q.toLowerCase());
-
   // Orden alfabético + sin filtro de zona
   const sortByName = <T extends { name: string }>(arr: T[]) =>
     [...arr].sort((a, b) => a.name.localeCompare(b.name, "es"));
 
-  const com = useMemo(() => sortByName(commerces.filter(filterFn)), [q]);
-  const gastro = useMemo(() => sortByName(gastronomy.filter(filterFn)), [q]);
-  const farma = useMemo(() => sortByName(FARMACIAS_TURNO.filter(filterFn)), [q]);
+  // 2. Filtro integrado para limpiar las advertencias de dependencias en useMemo
+  const com = useMemo(() => 
+    sortByName(commerces.filter((i) => i.name.toLowerCase().includes(q.toLowerCase())) as GuideItem[]), 
+  [q]);
+  
+  const gastro = useMemo(() => 
+    sortByName(gastronomy.filter((i) => i.name.toLowerCase().includes(q.toLowerCase())) as GuideItem[]), 
+  [q]);
+  
+  const farma = useMemo(() => 
+    sortByName(FARMACIAS_TURNO.filter((i) => i.name.toLowerCase().includes(q.toLowerCase()))), 
+  [q]);
 
   return (
     <div className="space-y-5">
@@ -95,12 +132,12 @@ export default function GuiaVecinal() {
         })}
       </div>
 
-      {tab === "Comercios" && <Grid items={com} render={(p: any) => <Card key={p.id} item={p} />} />}
-      {tab === "Delivery" && <Grid items={gastro} render={(p: any) => <Card key={p.id} item={p} />} />}
+      {tab === "Comercios" && <Grid items={com} render={(p: GuideItem) => <Card key={p.id} item={p} />} />}
+      {tab === "Delivery" && <Grid items={gastro} render={(p: GuideItem) => <Card key={p.id} item={p} />} />}
       {tab === "Farmacias" && (
         <Grid
           items={farma}
-          render={(p: any) => (
+          render={(p: GuideItem) => (
             <Card
               key={p.id}
               item={p}
@@ -120,7 +157,7 @@ export default function GuiaVecinal() {
   );
 }
 
-function Grid({ items, render }: any) {
+function Grid({ items, render }: GridProps) {
   if (!items.length) return <p className="text-sm text-muted-foreground text-center py-6">Sin resultados.</p>;
   return <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">{items.map(render)}</div>;
 }

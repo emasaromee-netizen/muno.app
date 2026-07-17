@@ -10,9 +10,10 @@ export default function RatingStars({ id, name }: { id: string; name: string }) 
   const { roles } = useAuth();
 
   const canRateDirectly =
-  roles.includes("resident") ||
-  roles.includes("admin") ||
-  roles.includes("isa_super_admin");
+    roles.includes("resident") ||
+    roles.includes("admin") ||
+    roles.includes("isa_super_admin");
+    
   const [ratings, setRatings] = useState<number[]>(initial_ratings[id] || []);
   const [askEmail, setAskEmail] = useState<number | null>(null);
   const [hover, setHover] = useState(0);
@@ -20,14 +21,14 @@ export default function RatingStars({ id, name }: { id: string; name: string }) 
   const avg = ratings.length ? (ratings.reduce((a, b) => a + b, 0) / ratings.length) : 0;
 
   const handleClick = (n: number) => {
-  if (canRateDirectly) {
-    apply(n);
-  } else {
-    setAskEmail(n);
-  }
-};
+    if (canRateDirectly) {
+      apply(n);
+    } else {
+      setAskEmail(n);
+    }
+  };
 
-  const apply = (n: number, meta?: any) => {
+  const apply = (n: number, meta?: Record<string, unknown>) => {
     setRatings((r) => [...r, n]);
     track({ kind: "rating", meta: { id, name, value: n, ...meta } });
     toast.success("¡Gracias por tu valoración!");

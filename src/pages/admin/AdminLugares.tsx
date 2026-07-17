@@ -3,13 +3,26 @@ import { places as initial } from "@/data/mock";
 import { Plus, Trash2, Pencil, X } from "lucide-react";
 import EmptyState from "@/components/EmptyState";
 
-export default function AdminLugares() {
-  const [items, setItems] = useState(initial);
-  const [editing, setEditing] = useState<any>(null);
+// 1. Tipado Estricto de la Entidad Local
+export interface PlaceDraft {
+  id?: string;
+  name: string;
+  type: string;
+  photo_url: string;
+  address: string;
+  how_to_get: string;
+}
 
-  const save = (data: any) => {
-    if (data.id) setItems((p) => p.map((x) => x.id === data.id ? data : x));
-    else setItems((p) => [...p, { ...data, id: String(Date.now()) }]);
+export default function AdminLugares() {
+  const [items, setItems] = useState<PlaceDraft[]>(initial as PlaceDraft[]);
+  const [editing, setEditing] = useState<PlaceDraft | null>(null);
+
+  const save = (data: PlaceDraft) => {
+    if (data.id) {
+      setItems((p) => p.map((x) => x.id === data.id ? data : x));
+    } else {
+      setItems((p) => [...p, { ...data, id: String(Date.now()) }]);
+    }
     setEditing(null);
   };
 
@@ -50,8 +63,10 @@ export default function AdminLugares() {
   );
 }
 
-function EditModal({ item, onClose, onSave }: any) {
-  const [form, setForm] = useState(item);
+// 2. Tipos explícitos para los Props del Modal (eliminando el último 'any')
+function EditModal({ item, onClose, onSave }: { item: PlaceDraft; onClose: () => void; onSave: (d: PlaceDraft) => void }) {
+  const [form, setForm] = useState<PlaceDraft>(item);
+
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4 animate-fade-in">
       <div className="isa-card p-6 max-w-lg w-full animate-scale-in">
@@ -60,8 +75,14 @@ function EditModal({ item, onClose, onSave }: any) {
           <button onClick={onClose} className="w-8 h-8 grid place-items-center rounded-lg hover:bg-muted"><X className="w-4 h-4" /></button>
         </div>
         <div className="space-y-3">
-          {["name", "type", "address", "photo_url", "how_to_get"].map((k) => (
-            <input key={k} placeholder={k} value={form[k] || ""} onChange={(e) => setForm({ ...form, [k]: e.target.value })} className="w-full px-4 py-3 rounded-xl border bg-background outline-none focus:ring-2 focus:ring-isa-navy" />
+          {(["name", "type", "address", "photo_url", "how_to_get"] as const).map((k) => (
+            <input 
+              key={k} 
+              placeholder={k} 
+              value={form[k]} 
+              onChange={(e) => setForm({ ...form, [k]: e.target.value })} 
+              className="w-full px-4 py-3 rounded-xl border bg-background outline-none focus:ring-2 focus:ring-isa-navy" 
+            />
           ))}
         </div>
         <button onClick={() => onSave(form)} className="mt-5 w-full bg-isa-navy text-isa-white rounded-[20px] py-3 font-bold">Guardar</button>

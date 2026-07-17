@@ -1,7 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useMemo } from "react";
 import { useAuth } from "@/context/AuthContext";
 import { useNavigate } from "react-router-dom";
-import { useMemo } from "react";
 import { Mail, Phone, User, Store, LogOut, Camera, Loader2 } from "lucide-react";
 import MisInscripciones from "@/components/MisInscripciones";
 import RatePueblo from "@/components/RatePueblo";
@@ -9,54 +8,119 @@ import MisFavoritos from "@/components/MisFavoritos";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 
+// 1. Interfaces Estrictas para limpiar los 'any'
+interface UserProfile {
+  full_name?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  avatar_url?: string | null;
+  cuit?: string | null;
+}
+
+interface BusinessProfile {
+  id: string;
+  name: string;
+  tax_expires_at: string | null;
+  tax_amount: number | null;
+  enabled: boolean;
+}
+
 export default function MiCuenta() {
-const { user, roles, signOut } = useAuth();
-const navigate = useNavigate();
+  const { user, roles, signOut } = useAuth();
+  const navigate = useNavigate();
 
-const profileLabel = useMemo(() => {
-  if (roles.includes("isa_super_admin")) return "ISA Super Admin";
-  if (roles.includes("isa_consultant")) return "Consultor ISA";
-  if (roles.includes("admin")) return "Administrador";
-  if (roles.includes("mayor")) return "Intendente";
-  if (roles.includes("tourism_chief")) return "Jefe de Turismo";
-  if (roles.includes("area_manager")) return "Jefe de Área";
-  if (roles.includes("resident")) return "Vecino";
+  const profileLabel = useMemo(() => {
+    if (roles.includes("isa_super_admin")) return "ISA Super Admin";
+    if (roles.includes("isa_consultant")) return "Consultor ISA";
+    if (roles.includes("admin")) return "Administrador";
+    if (roles.includes("mayor")) return "Intendente";
+    if (roles.includes("tourism_chief")) return "Jefe de Turismo";
+    if (roles.includes("area_manager")) return "Jefe de Área";
+    if (roles.includes("resident")) return "Vecino";
 
-  return "Turista";
-}, [roles]);
+    return "Turista";
+  }, [roles]);
 
-const isTourist = roles.length === 0 || roles.includes("tourist");
+  const isTourist = roles.length === 0 || roles.includes("tourist");
 
-  const [profile, setProfile] = useState<{ full_name?: string | null; email?: string | null; phone?: string | null; avatar_url?: string | null; cuit?: string | null } | null>(null);
+  const [profile, setProfile] = useState<UserProfile | null>(null);
   const [uploading, setUploading] = useState(false);
   const [cuitDraft, setCuitDraft] = useState("");
   const [savingCuit, setSavingCuit] = useState(false);
-  const [business, setBusiness] = useState<any | null>(null);
+  const [business, setBusiness] = useState<BusinessProfile | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
+  // 2. Efecto blindado: Carga de Perfil
   useEffect(() => {
+    let isMounted = true;
     if (!user) return;
-    supabase.from("profiles").select("full_name,email,phone,avatar_url,cuit" as any).eq("id", user.id).maybeSingle().then(({ data }) => {
-      setProfile(data as any);
-      setCuitDraft((data as any)?.cuit || "");
-    });
+
+    const fetchProfile = async () => {
+      try {
+        const { data } = await supabase
+          .from("profiles")
+          .select("full_name,email,phone,avatar_url,cuit")
+          .eq("id", user.id)
+          .maybeSingle();
+
+        if (isMounted && data) {
+          const p = data as UserProfile;
+          setProfile(p);
+          setCuitDraft(p.cuit || "");
+        }
+      } catch (err) {
+        console.error("Error cargando perfil", err);
+      }
+    };
+
+    fetchProfile();
+    return () => { isMounted = false; };
   }, [user]);
 
+  // 3. Efecto blindado: Carga de Comercio (Hacienda)
   useEffect(() => {
+    let isMounted = true;
     const cuit = profile?.cuit?.trim();
-    if (!cuit) { setBusiness(null); return; }
-    (supabase.from("businesses") as any).select("id,name,tax_expires_at,tax_amount,enabled").eq("cuit", cuit).maybeSingle().then(({ data }: any) => {
-      setBusiness(data);
-    });
+    
+    if (!cuit) {
+      setBusiness(null);
+      return;
+    }
+
+    const fetchBusiness = async () => {
+      try {
+        const { data } = await supabase
+          .from("businesses")
+          .select("id,name,tax_expires_at,tax_amount,enabled")
+          .eq("cuit", cuit)
+          .maybeSingle();
+
+        if (isMounted) {
+          setBusiness((data as BusinessProfile) || null);
+        }
+      } catch (err) {
+        console.error("Error cargando comercio", err);
+      }
+    };
+
+    fetchBusiness();
+    return () => { isMounted = false; };
   }, [profile?.cuit]);
 
   const saveCuit = async () => {
     if (!user) return;
     setSavingCuit(true);
-    const { error } = await supabase.from("profiles").update({ cuit: cuitDraft.trim() || null } as any).eq("id", user.id);
+    
+    const { error } = await supabase
+      .from("profiles")
+      .update({ cuit: cuitDraft.trim() || null })
+      .eq("id", user.id);
+      
     setSavingCuit(false);
-    if (error) toast.error("No se pudo guardar el CUIT");
-    else {
+    
+    if (error) {
+      toast.error("No se pudo guardar el CUIT");
+    } else {
       toast.success("CUIT guardado");
       setProfile((p) => ({ ...(p || {}), cuit: cuitDraft.trim() || null }));
     }
@@ -70,15 +134,20 @@ const isTourist = roles.length === 0 || roles.includes("tourist");
     setUploading(true);
     const ext = file.name.split(".").pop() || "jpg";
     const path = `${user.id}/avatar-${Date.now()}.${ext}`;
+    
     const { error: upErr } = await supabase.storage.from("profiles").upload(path, file, { upsert: true });
+    
     if (upErr) {
       toast.error("No se pudo subir la foto");
       setUploading(false);
       return;
     }
+    
     const { data: pub } = supabase.storage.from("profiles").getPublicUrl(path);
     const url = pub.publicUrl;
+    
     const { error: updErr } = await supabase.from("profiles").update({ avatar_url: url }).eq("id", user.id);
+    
     if (updErr) {
       toast.error("No se guardó la foto en tu perfil");
     } else {
@@ -136,12 +205,12 @@ const isTourist = roles.length === 0 || roles.includes("tourist");
             </div>
           </div>
           <button
-  disabled
-  className="relative w-12 h-7 rounded-full bg-muted shrink-0 opacity-60 cursor-not-allowed"
-  aria-label="Mi Comercio (próximamente)"
->
-  <span className="absolute top-1 left-1 w-5 h-5 bg-white rounded-full" />
-</button>
+            disabled
+            className="relative w-12 h-7 rounded-full bg-muted shrink-0 opacity-60 cursor-not-allowed"
+            aria-label="Mi Comercio (próximamente)"
+          >
+            <span className="absolute top-1 left-1 w-5 h-5 bg-white rounded-full" />
+          </button>
         </div>
       </div>
 
@@ -207,11 +276,11 @@ const isTourist = roles.length === 0 || roles.includes("tourist");
       )}
 
       {isTourist && (
-  <>
-    <MisFavoritos />
-    <RatePueblo />
-  </>
-)}
+        <>
+          <MisFavoritos />
+          <RatePueblo />
+        </>
+      )}
 
       <MisInscripciones />
 

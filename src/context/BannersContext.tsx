@@ -1,8 +1,13 @@
+/* eslint-disable react-refresh/only-export-components */
 import { createContext, useContext, useEffect, useState, ReactNode, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import type { Database } from "@/integrations/supabase/types";
+
+// Extraemos los tipos estandarizados de Supabase
+type AnnouncementRow = Database["public"]["Tables"]["announcements"]["Row"];
+type AnnouncementUpdate = Database["public"]["Tables"]["announcements"]["Update"];
 
 export type BannerColor = "navy" | "red" | "emerald";
-
 export type BannerAudience = "residents" | "tourists" | "both";
 
 export interface CustomBanner {
@@ -34,17 +39,18 @@ interface BannersCtx {
 
 const Ctx = createContext<BannersCtx | null>(null);
 
-const mapRow = (r: any): CustomBanner => ({
+// Adiós al 'any'. Usamos el tipo exacto que nos da la base de datos.
+const mapRow = (r: AnnouncementRow): CustomBanner => ({
   id: r.id,
   title: r.title,
-  description: r.description,
+  description: r.description || "",
   image: r.image_url || undefined,
-  color: r.color,
+  color: (r.color as BannerColor) || "navy",
   cta: r.cta_label || undefined,
   ctaTo: r.cta_to || undefined,
-  enabled: r.enabled,
-  order_index: r.order_index,
-  tags: Array.isArray(r.tags) ? r.tags : [],
+  enabled: r.enabled ?? true,
+  order_index: r.order_index ?? 0,
+  tags: Array.isArray(r.tags) ? (r.tags as string[]) : [],
   audience: (r.audience as BannerAudience) || "residents",
 });
 
@@ -57,6 +63,8 @@ export function BannersProvider({ children }: { children: ReactNode }) {
       .from("announcements")
       .select("*")
       .order("order_index", { ascending: true });
+    
+    // Inferencia automática. Ya no es necesario castear.
     setBanners((data || []).map(mapRow));
     setLoading(false);
   }, []);
@@ -70,18 +78,22 @@ export function BannersProvider({ children }: { children: ReactNode }) {
   const serviceAlertEnabled = serviceAlert?.enabled ?? true;
 
   const updateBanner = async (b: CustomBanner) => {
+    // Creamos un payload de actualización que respeta el tipo de Supabase, 0 'any'
+    const payload: AnnouncementUpdate = {
+      title: b.title,
+      description: b.description,
+      image_url: b.image || null,
+      color: b.color,
+      cta_label: b.cta || null,
+      cta_to: b.ctaTo || null,
+      ...(b.audience ? { audience: b.audience } : {}),
+    };
+
     await supabase
       .from("announcements")
-      .update({
-        title: b.title,
-        description: b.description,
-        image_url: b.image || null,
-        color: b.color,
-        cta_label: b.cta || null,
-        cta_to: b.ctaTo || null,
-        ...(b.audience ? { audience: b.audience } : {}),
-      } as any)
+      .update(payload)
       .eq("id", b.id);
+      
     await reload();
   };
 

@@ -3,41 +3,45 @@ import { Heart, MapPin, Trash2 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
+import type { Database } from "@/integrations/supabase/types";
 
-type Fav = {
-  id: string;
-  place_id: string;
-  place_name: string;
-  place_type: string | null;
-  place_photo_url: string | null;
-  place_zone: string | null;
-  created_at: string;
-};
+type Fav = Database["public"]["Tables"]["tourist_favorites"]["Row"];
 
 export default function MisFavoritos() {
   const { user } = useAuth();
   const [items, setItems] = useState<Fav[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const load = async () => {
-    if (!user) return;
-    setLoading(true);
-    const { data } = await (supabase.from("tourist_favorites") as any)
-      .select("*")
-      .eq("user_id", user.id)
-      .order("created_at", { ascending: false });
-    setItems(data || []);
-    setLoading(false);
-  };
-
   useEffect(() => {
+    let isMounted = true; // Prevención de Memory Leak
+
+    const load = async () => {
+      if (!user) return;
+      setLoading(true);
+      const { data } = await supabase
+        .from("tourist_favorites")
+        .select("*")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: false });
+
+      if (isMounted) {
+        setItems(data || []);
+        setLoading(false);
+      }
+    };
+
     load();
-  }, [user?.id]);
+
+    return () => {
+      isMounted = false;
+    };
+  }, [user]); // Quitamos "load" del array de dependencias moviéndolo adentro
 
   const remove = async (id: string) => {
-    const { error } = await (supabase.from("tourist_favorites") as any).delete().eq("id", id);
-    if (error) toast.error("No se pudo eliminar");
-    else {
+    const { error } = await supabase.from("tourist_favorites").delete().eq("id", id);
+    if (error) {
+      toast.error("No se pudo eliminar");
+    } else {
       setItems((prev) => prev.filter((i) => i.id !== id));
       toast.success("Eliminado");
     }
@@ -69,7 +73,7 @@ export default function MisFavoritos() {
           {items.map((f) => (
             <div key={f.id} className="flex items-center gap-3 p-2 rounded-xl border bg-background">
               {f.place_photo_url ? (
-                <img src={f.place_photo_url} alt={f.place_name} className="w-14 h-14 rounded-lg object-cover" />
+                <img src={f.place_photo_url} alt={f.place_name || "Lugar"} className="w-14 h-14 rounded-lg object-cover" />
               ) : (
                 <div className="w-14 h-14 rounded-lg bg-accent grid place-items-center text-isa-navy">
                   <MapPin className="w-5 h-5" />

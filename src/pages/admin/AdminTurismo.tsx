@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
@@ -57,8 +57,12 @@ export default function AdminTurismo() {
   const [loading, setLoading] = useState(true);
   const [myMunId, setMyMunId] = useState<string | null>(null);
 
+  // 1. Candado de montaje por referencia (Previene Condiciones de Carrera)
+  const isMounted = useRef(true);
+
+  // Este efecto es seguro porque la función asíncrona está definida internamente
   useEffect(() => {
-    let isMounted = true;
+    let effectMounted = true;
     if (!user?.id) return;
 
     const fetchProfile = async () => {
@@ -69,7 +73,7 @@ export default function AdminTurismo() {
           .eq("id", user.id)
           .maybeSingle();
 
-        if (isMounted && !error) {
+        if (effectMounted && !error) {
           const profile = data as { municipality_id?: string | null } | null;
           setMyMunId(profile?.municipality_id ?? null);
         }
@@ -79,11 +83,12 @@ export default function AdminTurismo() {
     };
 
     fetchProfile();
-    return () => { isMounted = false; };
+    return () => { effectMounted = false; };
   }, [user?.id]);
 
-  const load = useCallback(async (isMounted: boolean = true) => {
-    if (isMounted) setLoading(true);
+  // 2. Función load protegida que lee la referencia actual
+  const load = useCallback(async () => {
+    if (isMounted.current) setLoading(true);
     
     try {
       let q = supabase
@@ -98,7 +103,7 @@ export default function AdminTurismo() {
       const { data, error } = await q;
       if (error) throw error;
       
-      if (isMounted) setItems((data as TItem[]) || []);
+      if (isMounted.current) setItems((data as TItem[]) || []);
 
       if (tab === "commerce") {
         let bq = supabase
@@ -111,19 +116,19 @@ export default function AdminTurismo() {
         const { data: biz, error: bizError } = await bq;
         if (bizError) throw bizError;
         
-        if (isMounted) setBusinesses((biz as DBBusiness[]) || []);
+        if (isMounted.current) setBusinesses((biz as DBBusiness[]) || []);
       }
     } catch (err) {
       console.error("Error cargando panel de turismo:", err);
       toast.error("Error al cargar los datos");
     } finally {
-      if (isMounted) setLoading(false);
+      if (isMounted.current) setLoading(false);
     }
   }, [tab, myMunId]);
 
   useEffect(() => {
-    let isMounted = true;
-    load(isMounted);
+    isMounted.current = true;
+    load();
 
     const channel = supabase
       .channel("tourism_items_admin_changes")
@@ -143,16 +148,16 @@ export default function AdminTurismo() {
           const isRelevantMuni = !myMunId || newMuni === myMunId || oldMuni === myMunId;
           const isRelevantCat = newCat === tab || oldCat === tab || !newCat;
 
-          // Solo recargamos si el cambio afecta al municipio actual Y a la pestaña actual
-          if (isRelevantMuni && isRelevantCat && isMounted) {
-            load(isMounted);
+          // Solo recargamos si el cambio afecta al municipio, a la pestaña, Y la pantalla sigue activa
+          if (isRelevantMuni && isRelevantCat && isMounted.current) {
+            load();
           }
         }
       )
       .subscribe();
       
     return () => {
-      isMounted = false;
+      isMounted.current = false;
       supabase.removeChannel(channel);
     };
   }, [load, myMunId, tab]);
@@ -340,7 +345,7 @@ export default function AdminTurismo() {
           onSaved={() => {
             setCreating(false);
             setEditing(null);
-            load(true);
+            load();
           }}
         />
       )}

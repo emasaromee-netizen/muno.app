@@ -29,10 +29,26 @@ import MisInscripciones from "@/components/MisInscripciones";
 import { ZONES } from "@/data/mock";
 import { track } from "@/lib/analytics";
 
-const Tile = ({ to, icon: Icon, title, sub, color, onClick }: any) => {
-  const isHash = typeof to === "string" && to.startsWith("#");
+// 1. Interfaces estrictas para eliminar los 'any'
+interface TileProps {
+  to: string;
+  icon: React.ElementType;
+  title: string;
+  sub: string;
+  color: string;
+  onClick?: (e: React.MouseEvent<HTMLAnchorElement>) => void;
+}
 
-  const handleClick = (e: any) => {
+interface MetricProps {
+  label: string;
+  value: string | number;
+  hint?: string;
+}
+
+const Tile = ({ to, icon: Icon, title, sub, color, onClick }: TileProps) => {
+  const isHash = to.startsWith("#");
+
+  const handleClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
     if (isHash) {
       e.preventDefault();
       const el = document.getElementById(to.slice(1));
@@ -73,7 +89,7 @@ const Tile = ({ to, icon: Icon, title, sub, color, onClick }: any) => {
   );
 };
 
-const Metric = ({ label, value, hint }: any) => (
+const Metric = ({ label, value, hint }: MetricProps) => (
   <div className="isa-card p-4">
     <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-bold">
       {label}
@@ -93,14 +109,10 @@ const Metric = ({ label, value, hint }: any) => (
 
 export default function Home() {
   const { user, roles, area } = useAuth();
-
   const { municipality, setMunicipality } = useMunicipality();
-
   const [zone, setZone] = useState(municipality || "");
 
-  const isISA =
-    roles.includes("isa_super_admin") ||
-    roles.includes("isa_consultant");
+  const isISA = roles.includes("isa_super_admin") || roles.includes("isa_consultant");
 
   const isMunicipality =
     roles.includes("admin") ||
@@ -109,11 +121,9 @@ export default function Home() {
     roles.includes("area_manager");
 
   const isResident = roles.includes("resident");
-
   const isTourist = roles.length === 0;
 
-  const adminArea =
-  isISA
+  const adminArea = isISA
     ? "ISA"
     : area ??
       (roles.includes("mayor")
@@ -128,20 +138,20 @@ export default function Home() {
       {
         to: string;
         label: string;
-        icon: any;
+        icon: React.ElementType;
         color: string;
         sub: string;
       }[]
     > = {
       ISA: [
-  {
-    to: "/isa/panel",
-    label: "Panel ISA",
-    icon: BarChart3,
-    color: "hsl(var(--isa-navy))",
-    sub: "Municipios",
-  },
-],
+        {
+          to: "/isa/panel",
+          label: "Panel ISA",
+          icon: BarChart3,
+          color: "hsl(var(--isa-navy))",
+          sub: "Municipios",
+        },
+      ],
       Intendencia: [
         {
           to: "/admin/banners",
@@ -301,62 +311,37 @@ export default function Home() {
       ],
     };
 
-    const tiles =
-      SHORTCUTS[adminArea] ??
-      SHORTCUTS.Intendencia;
+    const tiles = SHORTCUTS[adminArea] ?? SHORTCUTS.Intendencia;
 
-          return (
+    return (
       <div className="space-y-6">
         <InternalAnnouncement />
 
         <section>
           <h2 className="mb-3">
-  {isISA ? "Panel ISA" : `Resumen del día · ${adminArea}`}
-</h2>
+            {isISA ? "Panel ISA" : `Resumen del día · ${adminArea}`}
+          </h2>
 
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-            <Metric
-              label="Reclamos activos"
-              value="12"
-              hint="+3 vs ayer"
-            />
-
-            <Metric
-              label="Talleres llenos"
-              value="85%"
-              hint="2 de 4"
-            />
-
-            <Metric
-              label="Inscriptos deporte"
-              value="42"
-              hint="esta semana"
-            />
-
-            <Metric
-              label="Usuarios MUNO+"
-              value="1.284"
-              hint="+24 hoy"
-            />
+            <Metric label="Reclamos activos" value="12" hint="+3 vs ayer" />
+            <Metric label="Talleres llenos" value="85%" hint="2 de 4" />
+            <Metric label="Inscriptos deporte" value="42" hint="esta semana" />
+            <Metric label="Usuarios MUNO+" value="1.284" hint="+24 hoy" />
           </div>
         </section>
 
         <section>
           <h2 className="mb-3">
-  {isISA
-    ? "Municipios conectados"
-    : adminArea === "Intendencia"
-      ? "Tu municipio"
-      : `Área ${adminArea}`}
-</h2>
+            {isISA
+              ? "Municipios conectados"
+              : adminArea === "Intendencia"
+              ? "Tu municipio"
+              : `Área ${adminArea}`}
+          </h2>
 
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
             {tiles.map((t) => (
-              <Tile
-                key={t.to + t.label}
-                {...t}
-                title={t.label}
-              />
+              <Tile key={t.to + t.label} {...t} title={t.label} />
             ))}
           </div>
         </section>
@@ -395,15 +380,16 @@ export default function Home() {
     </section>
   );
 
-    return (
+  return (
     <div className="space-y-6">
+      {/* 2. Solución a los tipos literales estrictos (tourists y residents) y roles corregidos (merchant) */}
       {isTourist ? (
-  <HomeBanners audience="turista" />
-) : isResident || roles.includes("business") ? (
-  <VecinoHomeBlocks />
-) : (
-  <HomeBanners audience="resident" />
-)}
+        <HomeBanners audience="turista" />
+      ) : isResident || roles.includes("merchant") ? (
+        <VecinoHomeBlocks />
+      ) : (
+        <HomeBanners audience="vecino" />
+      )}
 
       {isTourist && (
         <section className="isa-card p-5">
@@ -416,21 +402,15 @@ export default function Home() {
           </h2>
 
           <div className="mt-3 bg-isa-light rounded-[16px] p-3 flex items-center gap-2">
-            <MapPin
-              strokeWidth={1.5}
-              className="w-4 h-4 text-isa-navy shrink-0"
-            />
+            <MapPin strokeWidth={1.5} className="w-4 h-4 text-isa-navy shrink-0" />
 
             <select
               value={zone}
               onChange={(e) => {
                 const v = e.target.value;
-
                 setZone(v);
-
                 if (v) {
                   setMunicipality(v);
-
                   track({
                     kind: "search_zone",
                     zone: v,
@@ -441,7 +421,6 @@ export default function Home() {
               className="flex-1 bg-transparent text-sm font-bold text-isa-navy outline-none"
             >
               <option value="">Buscar municipio</option>
-
               {ZONES.filter((z) => z !== "Todas").map((z) => (
                 <option key={z} value={z}>
                   {z}
@@ -453,95 +432,27 @@ export default function Home() {
       )}
 
       <section>
-        <h2 className="mb-3">
-          ¿Qué querés hacer hoy?
-        </h2>
+        <h2 className="mb-3">¿Qué querés hacer hoy?</h2>
 
         <div className="grid grid-cols-2 gap-3">
           {isTourist ? (
             <>
-              <Tile
-                to="/turismo"
-                icon={Compass}
-                title="Turismo"
-                sub="Comercio · Gastronomía · Hospedaje"
-                color="hsl(var(--muno-blue))"
-              />
-
-              <Tile
-                to="/lugares"
-                icon={MapPin}
-                title="Lugares"
-                sub="Naturaleza y Cultura"
-                color="hsl(var(--isa-navy))"
-              />
-
-              <Tile
-                to="/eventos"
-                icon={Music2}
-                title="Eventos"
-                sub="Agenda del mes"
-                color="hsl(var(--muno-amber))"
-              />
-
-              <Tile
-                to="/wifi-access"
-                icon={Wifi}
-                title="WiFi"
-                sub="Conectate gratis"
-                color="hsl(var(--muno-teal))"
-              />
+              <Tile to="/turismo" icon={Compass} title="Turismo" sub="Comercio · Gastronomía · Hospedaje" color="hsl(var(--muno-blue))" />
+              <Tile to="/lugares" icon={MapPin} title="Lugares" sub="Naturaleza y Cultura" color="hsl(var(--isa-navy))" />
+              <Tile to="/eventos" icon={Music2} title="Eventos" sub="Agenda del mes" color="hsl(var(--muno-amber))" />
+              <Tile to="/wifi-access" icon={Wifi} title="WiFi" sub="Conectate gratis" color="hsl(var(--muno-teal))" />
             </>
           ) : (
             <>
-              <Tile
-                to="/reclamos"
-                icon={AlertTriangle}
-                title="Reportar incidencia"
-                sub="En 4 pasos"
-                color="hsl(var(--muno-red))"
-              />
+              <Tile to="/reclamos" icon={AlertTriangle} title="Reportar incidencia" sub="En 4 pasos" color="hsl(var(--muno-red))" />
+              <Tile to="/guia-vecinal" icon={Compass} title="Guía Útil Vecinal" sub="Comercios, Delivery y Farmacias" color="hsl(var(--muno-blue))" />
+              <Tile to="/cultura" icon={Music2} title="Cultura" sub="Talleres y eventos" color="hsl(var(--isa-navy))" />
+              <Tile to="/deporte" icon={Trophy} title="Deporte" sub="Inscribirme" color="hsl(var(--muno-teal))" />
+              <Tile to="#mis-inscripciones" icon={CalendarCheck} title="Mis Inscripciones" sub="Talleres y eventos" color="hsl(var(--muno-amber))" />
 
-              <Tile
-                to="/guia-vecinal"
-                icon={Compass}
-                title="Guía Útil Vecinal"
-                sub="Comercios, Delivery y Farmacias"
-                color="hsl(var(--muno-blue))"
-              />
-
-              <Tile
-                to="/cultura"
-                icon={Music2}
-                title="Cultura"
-                sub="Talleres y eventos"
-                color="hsl(var(--isa-navy))"
-              />
-
-              <Tile
-                to="/deporte"
-                icon={Trophy}
-                title="Deporte"
-                sub="Inscribirme"
-                color="hsl(var(--muno-teal))"
-              />
-
-              <Tile
-                to="#mis-inscripciones"
-                icon={CalendarCheck}
-                title="Mis Inscripciones"
-                sub="Talleres y eventos"
-                color="hsl(var(--muno-amber))"
-              />
-
-              {roles.includes("business") && (
-                <Tile
-                  to="/mi-comercio"
-                  icon={Store}
-                  title="Mi Comercio"
-                  sub="Estado y reservas"
-                  color="hsl(var(--muno-blue))"
-                />
+              {/* 3. Ajuste al rol 'merchant' correcto */}
+              {roles.includes("merchant") && (
+                <Tile to="/mi-comercio" icon={Store} title="Mi Comercio" sub="Estado y reservas" color="hsl(var(--muno-blue))" />
               )}
             </>
           )}
@@ -551,11 +462,7 @@ export default function Home() {
       {(isResident || user) && (
         <>
           <MisReclamos />
-
-          <div
-            id="mis-inscripciones"
-            className="scroll-mt-20"
-          >
+          <div id="mis-inscripciones" className="scroll-mt-20">
             <MisInscripciones />
           </div>
         </>

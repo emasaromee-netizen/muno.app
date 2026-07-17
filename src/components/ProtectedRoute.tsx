@@ -1,5 +1,10 @@
 import { Navigate, useLocation } from "react-router-dom";
 import { useAuth, routeForRoles } from "@/context/AuthContext";
+import { can } from "@/security/can";
+import { PERMISSIONS } from "@/security/permissions";
+
+// Extraemos los roles oficiales del motor 'can' para que el prop 'allowed' sea estricto
+type AppRole = Parameters<typeof can>[0][number];
 
 export default function ProtectedRoute({
   children,
@@ -7,11 +12,14 @@ export default function ProtectedRoute({
   allowedAreas,
 }: {
   children: React.ReactNode;
-  allowed?: (| "resident" | "tourist" | "merchant" | "admin" | "area_manager" | "isa_consultant" | "isa_super_admin" | "tourism_chief" | "mayor")[];
+  allowed?: AppRole[];
   allowedAreas?: string[];
 }) {
   const { user, roles, area, loading } = useAuth();
   const location = useLocation();
+
+  // Mapeamos los roles del string array genérico al AppRole estricto
+  const safeRoles = roles as AppRole[];
 
   if (loading) {
     return (
@@ -25,22 +33,28 @@ export default function ProtectedRoute({
     return <Navigate to="/auth/login" replace state={{ from: location }} />;
   }
 
-  // MODO PRUEBA: admin puede navegar libremente por todas las rutas /admin/*
-  const isAdminRole = roles.includes("admin") || roles.includes("isa_super_admin");
-  if (isAdminRole) return <>{children}</>;
+  // Si el usuario es SysAdmin (SuperAdmin / ISA), pasa directo por cualquier ruta
+  if (can(safeRoles, area, PERMISSIONS.SYSTEM_ADMIN)) {
+    return <>{children}</>;
+  }
 
-  if (allowed && !allowed.some((r) => roles.includes(r))) {
+  // Bloqueo 1: Por Rol
+  if (allowed && !allowed.some((r) => safeRoles.includes(r))) {
     return <Navigate to={routeForRoles(roles)} replace />;
   }
 
-  // Area-based gate: only restricts when user is exclusively area_manager (not admin/mayor/tourism_chief)
+  // Bloqueo 2: Por Área de incumbencia
+  // Solo se aplica si la ruta define 'allowedAreas' y si el usuario no tiene permisos para ver TODO el sistema.
   if (allowedAreas && allowedAreas.length > 0) {
-    const isPrivileged = roles.includes("mayor") || roles.includes("tourism_chief");
-    if (!isPrivileged && roles.includes("area_manager") && area && !allowedAreas.includes(area)) {
+    const canBypassAreas = 
+      roles.includes("mayor") || 
+      roles.includes("tourism_chief") || 
+      can(safeRoles, area, PERMISSIONS.SYSTEM_ADMIN);
+
+    if (!canBypassAreas && roles.includes("area_manager") && area && !allowedAreas.includes(area)) {
       return <Navigate to="/admin" replace />;
     }
   }
 
   return <>{children}</>;
 }
-

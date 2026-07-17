@@ -1,4 +1,4 @@
-import { useEffect, useState, ReactNode, useCallback } from "react";
+import { useEffect, useState, ReactNode, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
 import { logActivity } from "@/lib/audit";
@@ -57,14 +57,17 @@ export default function AdminColaboradores() {
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
 
-  // 3. Refactorización de 'load' con useCallback para arreglar las dependencias del useEffect
-  const load = useCallback(async (isMounted: boolean = true) => {
+  // 1. SOLUCIÓN: Usamos useRef para mantener la referencia viva en memoria
+  const isMounted = useRef(true);
+
+  // 2. Quitamos el parámetro booleano tramposo del useCallback
+  const load = useCallback(async () => {
     if (!myArea) { 
-      if (isMounted) setLoading(false); 
+      if (isMounted.current) setLoading(false); 
       return; 
     }
     
-    if (isMounted) setLoading(true);
+    if (isMounted.current) setLoading(true);
     
     try {
       const q = supabase.from("user_roles").select("*").eq("role", "resident");
@@ -80,7 +83,8 @@ export default function AdminColaboradores() {
       const profs = (profsData || []) as DBProfile[];
       const map = new Map(profs.map((p) => [p.id, p]));
       
-      if (isMounted) {
+      // 3. Chequeamos la referencia (.current) antes de actualizar la pantalla
+      if (isMounted.current) {
         setRows(ur.map((r) => ({
           ...r,
           email: map.get(r.user_id)?.email || undefined,
@@ -91,17 +95,17 @@ export default function AdminColaboradores() {
       console.error("Error al cargar colaboradores:", error);
       toast.error("Error al cargar colaboradores");
     } finally {
-      if (isMounted) setLoading(false);
+      if (isMounted.current) setLoading(false);
     }
   }, [myArea, isAdmin, isMayor]);
 
-  // Efecto limpio sin eslint-disable y seguro para memoria en móviles
   useEffect(() => { 
-    let isMounted = true;
-    load(isMounted); 
+    isMounted.current = true;
+    load(); 
     
     return () => {
-      isMounted = false;
+      // 4. Cuando el componente muere, apagamos la referencia
+      isMounted.current = false;
     };
   }, [load]);
 

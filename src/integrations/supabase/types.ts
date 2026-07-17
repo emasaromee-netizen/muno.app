@@ -58,6 +58,36 @@ export type Database = {
           },
         ]
       }
+      analytics_events: {
+        Row: {
+          category: string | null
+          created_at: string
+          id: string
+          kind: string
+          meta: Json | null
+          user_type: string | null
+          zone: string | null
+        }
+        Insert: {
+          category?: string | null
+          created_at?: string
+          id?: string
+          kind: string
+          meta?: Json | null
+          user_type?: string | null
+          zone?: string | null
+        }
+        Update: {
+          category?: string | null
+          created_at?: string
+          id?: string
+          kind?: string
+          meta?: Json | null
+          user_type?: string | null
+          zone?: string | null
+        }
+        Relationships: []
+      }
       analytics_reports: {
         Row: {
           body: Json
@@ -223,6 +253,44 @@ export type Database = {
           },
         ]
       }
+      business_reservations: {
+        Row: {
+          business_id: string
+          created_at: string
+          guest_name: string
+          id: string
+          nights: number
+          reservation_date: string
+          status: string
+        }
+        Insert: {
+          business_id: string
+          created_at?: string
+          guest_name: string
+          id?: string
+          nights?: number
+          reservation_date: string
+          status?: string
+        }
+        Update: {
+          business_id?: string
+          created_at?: string
+          guest_name?: string
+          id?: string
+          nights?: number
+          reservation_date?: string
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "business_reservations_business_id_fkey"
+            columns: ["business_id"]
+            isOneToOne: false
+            referencedRelation: "businesses"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       claim_canned_responses: {
         Row: {
           body: string
@@ -230,6 +298,7 @@ export type Database = {
           enabled: boolean
           id: string
           label: string
+          municipality_id: string | null
         }
         Insert: {
           body: string
@@ -237,6 +306,7 @@ export type Database = {
           enabled?: boolean
           id?: string
           label: string
+          municipality_id?: string | null
         }
         Update: {
           body?: string
@@ -244,8 +314,17 @@ export type Database = {
           enabled?: boolean
           id?: string
           label?: string
+          municipality_id?: string | null
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "claim_canned_responses_municipality_id_fkey"
+            columns: ["municipality_id"]
+            isOneToOne: false
+            referencedRelation: "municipalities"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       claims: {
         Row: {
@@ -1007,6 +1086,16 @@ export type Database = {
     Functions: {
       current_user_area: { Args: never; Returns: string }
       default_municipality_id: { Args: never; Returns: string }
+      get_municipality_counts: {
+        Args: never
+        Returns: {
+          muni_id: string
+          users_count: number
+          businesses_count: number
+          claims_count: number
+          banners_count: number
+        }[]
+      }
       has_role: {
         Args: {
           _role: Database["public"]["Enums"]["app_role"]

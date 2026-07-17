@@ -30,7 +30,7 @@ export default function NewsCarousel() {
           style={{ transform: `translateX(-${i * 100}%)` }}
         >
           {NEWS.map((n, idx) => (
-            <div key={idx} className="w-full shrink-0 p-4 text-white" style={{ background: n.color }}>
+            <div key={`news-slide-${idx}`} className="w-full shrink-0 p-4 text-white" style={{ background: n.color }}>
               <div className="text-[10px] uppercase tracking-widest font-bold opacity-80">{n.tag}</div>
               <div className="text-base font-extrabold mt-1">{n.title}</div>
               <p className="text-[13px] opacity-90 mt-0.5">{n.body}</p>
@@ -41,7 +41,7 @@ export default function NewsCarousel() {
       <div className="flex justify-center gap-1.5">
         {NEWS.map((_, idx) => (
           <button
-            key={idx}
+            key={`news-dot-${idx}`}
             onClick={() => setI(idx)}
             className={`h-1.5 rounded-full transition-all ${i === idx ? "w-6 bg-isa-navy" : "w-1.5 bg-isa-navy/30"}`}
             aria-label={`Ir a noticia ${idx + 1}`}

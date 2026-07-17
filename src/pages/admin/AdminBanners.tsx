@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useBanners, type BannerColor, type CustomBanner } from "@/context/BannersContext";
 import { Switch } from "@/components/ui/switch";
 import { toast } from "@/hooks/use-toast";
-import { AlertTriangle, Sparkles, Send } from "lucide-react";
+import { AlertTriangle, Sparkles, Send, type LucideIcon } from "lucide-react";
 
 const COLORS: { id: BannerColor; label: string; hex: string }[] = [
   { id: "navy", label: "Navy", hex: "#242E44" },
@@ -21,7 +21,7 @@ function BannerForm({
   value: CustomBanner | null;
   onChange: (b: CustomBanner) => Promise<void> | void;
   lockedColor?: BannerColor;
-  icon: any;
+  icon: LucideIcon;
 }) {
   const [draft, setDraft] = useState<CustomBanner | null>(value);
   const [saving, setSaving] = useState(false);

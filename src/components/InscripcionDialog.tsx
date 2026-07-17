@@ -15,8 +15,26 @@ interface Props {
     fecha: string;
     tipo: "Cultura" | "Deportes" | "Taller";
     lugar?: string;
+    municipality_id?: string | null; // Corrección quirúrgica P1: Propagar el tenant
   } | null;
 }
+
+// Tipo estricto para eliminar el 'any'
+type RegistrationPayload = {
+  event_id: string;
+  event_title: string;
+  event_date: string;
+  event_type: string;
+  event_place: string | null;
+  people_count: number;
+  companions: string[];
+  municipality_id?: string | null;
+  user_id?: string | null;
+  guest_name?: string;
+  guest_email?: string;
+  guest_city?: string;
+  guest_country?: string;
+};
 
 export default function InscripcionDialog({ open, onClose, onSuccess, evento }: Props) {
   const { user } = useAuth();
@@ -32,23 +50,43 @@ export default function InscripcionDialog({ open, onClose, onSuccess, evento }: 
     if (!open) return;
     setDone(false);
     setSubmitting(false);
-    if (user) {
-      supabase
-        .from("profiles")
-        .select("full_name,email,municipality_id")
-        .eq("id", user.id)
-        .maybeSingle()
-        .then(({ data }) => {
-          setNombre(data?.full_name || "");
-          setEmail(data?.email || user.email || "");
-        });
-    } else {
-      setNombre("");
-      setEmail("");
-      setCity("");
-      setCountry("Argentina");
-    }
+    
+    let isMounted = true; // Control de Memory Leak
+
+    const fetchProfile = async () => {
+      if (user) {
+        try {
+          const { data, error } = await supabase
+            .from("profiles")
+            .select("full_name,email,municipality_id")
+            .eq("id", user.id)
+            .maybeSingle();
+            
+          if (error) throw error;
+
+          if (isMounted) {
+            setNombre(data?.full_name || "");
+            setEmail(data?.email || user.email || "");
+          }
+        } catch (err) {
+          console.error("Error cargando perfil:", err);
+        }
+      } else {
+        if (isMounted) {
+          setNombre("");
+          setEmail("");
+          setCity("");
+          setCountry("Argentina");
+        }
+      }
+    };
+
+    fetchProfile();
     setPeople("1");
+
+    return () => {
+      isMounted = false;
+    };
   }, [open, user]);
 
   if (!open || !evento) return null;
@@ -59,6 +97,7 @@ export default function InscripcionDialog({ open, onClose, onSuccess, evento }: 
     const c = city.trim();
     const co = country.trim();
     const p = parseInt(people, 10);
+    
     if (!n) return toast.error("Ingresá tu nombre completo");
     if (!e || !/^\S+@\S+\.\S+$/.test(e)) return toast.error("Ingresá un email válido");
     if (!user && !c) return toast.error("Ingresá tu ciudad");
@@ -76,7 +115,7 @@ export default function InscripcionDialog({ open, onClose, onSuccess, evento }: 
       acompanantes: Array.from({ length: Math.max(0, p - 1) }, (_, i) => `Acompañante ${i + 1}`),
     });
 
-    const payload: any = {
+    const payload: RegistrationPayload = {
       event_id: evento.id,
       event_title: evento.titulo,
       event_date: evento.fecha,
@@ -84,10 +123,12 @@ export default function InscripcionDialog({ open, onClose, onSuccess, evento }: 
       event_place: evento.lugar ?? null,
       people_count: p,
       companions: [],
+      municipality_id: evento.municipality_id ?? null, // Corrección quirúrgica P1: Previene contaminación
     };
+    
     if (user) {
       payload.user_id = user.id;
-      // Asegurar municipality_id explícito desde el perfil
+      // Asegurar municipality_id explícito desde el perfil si existe, sino usa el del evento
       const { data: prof } = await supabase
         .from("profiles")
         .select("municipality_id")
@@ -103,11 +144,14 @@ export default function InscripcionDialog({ open, onClose, onSuccess, evento }: 
     }
 
     const { error } = await supabase.from("registrations").insert(payload);
+    
     setSubmitting(false);
+    
     if (error) {
       toast.error("Error al registrar", { description: error.message });
       return;
     }
+    
     toast.success("¡Inscripción exitosa!");
     setDone(true);
     window.dispatchEvent(new Event("muno:inscripciones"));

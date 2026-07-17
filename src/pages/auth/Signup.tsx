@@ -62,7 +62,6 @@ export default function Signup() {
       if (inviteToken) navigate(`/invitacion/${inviteToken}`, { replace: true });
       else navigate(routeForRoles(roles), { replace: true });
     }
-    // Linter corregido: Se eliminó el 'roles' duplicado
   }, [user, roles, loading, navigate, inviteToken]);
 
   const strength = useMemo(() => passwordStrength(password), [password]);
@@ -131,9 +130,10 @@ export default function Signup() {
           console.error("Error al actualizar perfil:", updateError.message);
         }
       } else {
-        // Si requiere confirmación de email (session es null), el trigger ya guardó el DNI.
-        // Lo respaldamos en localStorage por prevención.
-        localStorage.setItem("muno.pending.dni", parsed.data.dni);
+        // Si requiere confirmación de email, el backend ya guardó el DNI 
+        // de forma segura mediante el raw_user_meta_data.
+        // Nunca guardamos PII (Datos Personales) en el localStorage.
+        console.log("Esperando confirmación de email del usuario.");
       }
     }
 
@@ -237,7 +237,7 @@ export default function Signup() {
             <div className="flex gap-1 mt-2">
               {[0, 1, 2, 3].map((i) => (
                 <div
-                  key={i}
+                  key={`strength-bar-${i}`}
                   className="h-1 flex-1 rounded-full transition-colors"
                   style={{ background: i < strength ? strengthColor : "hsl(var(--border))" }}
                 />

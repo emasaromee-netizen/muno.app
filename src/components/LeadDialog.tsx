@@ -4,6 +4,7 @@ import { ORIGINS } from "@/data/mock";
 import { track } from "@/lib/analytics";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
+import type { Json } from "@/integrations/supabase/types";
 
 interface Props {
   open: boolean;
@@ -11,7 +12,7 @@ interface Props {
   description: string;
   fields: ("name" | "email" | "origin")[];
   kind: "wifi_lead" | "reserva_lead" | "rating";
-  meta?: Record<string, any>;
+  meta?: { [key: string]: Json }; // Tipado estricto que acepta Supabase
   onClose: () => void;
   onSuccess?: (data: { name?: string; email?: string; origin?: string }) => void;
 }

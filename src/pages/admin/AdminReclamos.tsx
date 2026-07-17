@@ -1,9 +1,10 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { Camera, X, CheckCircle2, Clock, AlertCircle, MapPin, Users, MessageSquare, Plus, Trash2, Pencil, Save, FileText, Loader2 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 import { logActivity } from "@/lib/audit";
+import { useAuth } from "@/context/AuthContext";
 
 import { CLAIM_AREAS } from "@/data/mock";
 
@@ -50,6 +51,31 @@ type Claim = {
 
 type Canned = { id: string; label: string; body: string; enabled: boolean };
 
+// Interfaces estrictas para eliminar 'any'
+interface ClaimUpdate {
+  status: ClaimStatus;
+  resolution_note?: string;
+  resolution_photos?: string[];
+  resolved_at?: string;
+}
+
+interface NotificationPayload {
+  title: string;
+  body: string;
+  link: string;
+  audience: string;
+  source_type: string;
+  source_id: string;
+  user_id: string;
+}
+
+interface CannedPayload {
+  label: string;
+  body: string;
+  enabled: boolean;
+  municipality_id?: string;
+}
+
 export default function AdminReclamos() {
   const [items, setItems] = useState<Claim[]>([]);
   const [active, setActive] = useState<Claim | null>(null);
@@ -58,20 +84,30 @@ export default function AdminReclamos() {
   const [areaFilter, setAreaFilter] = useState<string>("");
   const [statusFilter, setStatusFilter] = useState<string>("");
 
-  const reload = () => {
+  const loadClaims = useCallback(async (isMounted = true) => {
     setLoading(true);
-    supabase
-      .from("claims")
-      .select("*")
-      .order("created_at", { ascending: false })
-      .limit(200)
-      .then(({ data }) => {
+    try {
+      const { data } = await supabase
+        .from("claims")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(200);
+        
+      if (isMounted) {
         setItems((data as Claim[]) || []);
         setLoading(false);
-      });
-  };
+      }
+    } catch (err) {
+      console.error("Error al cargar reclamos:", err);
+      if (isMounted) setLoading(false);
+    }
+  }, []);
 
-  useEffect(reload, []);
+  useEffect(() => {
+    let isMounted = true;
+    loadClaims(isMounted);
+    return () => { isMounted = false; };
+  }, [loadClaims]);
 
   const update = (c: Claim) => setItems((p) => p.map((x) => x.id === c.id ? c : x));
 
@@ -210,8 +246,13 @@ function ManageDialog({ claim, onClose, onSaved }: { claim: Claim; onClose: () =
   const photos = claim.evidence_photos || [];
 
   useEffect(() => {
-    supabase.from("claim_canned_responses").select("id,label,body,enabled").eq("enabled", true)
-      .then(({ data }) => setCanned((data as Canned[]) || []));
+    let isMounted = true;
+    const fetchCanned = async () => {
+      const { data } = await supabase.from("claim_canned_responses").select("id,label,body,enabled").eq("enabled", true);
+      if (isMounted) setCanned((data as Canned[]) || []);
+    };
+    fetchCanned();
+    return () => { isMounted = false; };
   }, []);
 
   const onUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -225,21 +266,23 @@ function ManageDialog({ claim, onClose, onSaved }: { claim: Claim; onClose: () =
       return;
     }
     setSaving(true);
-    const update: any = { status };
+    
+    const updatePayload: ClaimUpdate = { status };
     if (status === "Cerrado") {
-      update.resolution_note = response.trim();
-      if (photo) update.resolution_photos = [photo];
-      update.resolved_at = new Date().toISOString();
+      updatePayload.resolution_note = response.trim();
+      if (photo) updatePayload.resolution_photos = [photo];
+      updatePayload.resolved_at = new Date().toISOString();
     } else if (response.trim()) {
-      update.resolution_note = response.trim();
+      updatePayload.resolution_note = response.trim();
     }
-    const { data, error } = await supabase.from("claims").update(update).eq("id", claim.id).select("*").single();
+    
+    const { data, error } = await supabase.from("claims").update(updatePayload).eq("id", claim.id).select("*").single();
     if (error || !data) {
       setSaving(false);
       toast.error("No se pudo guardar", { description: error?.message });
       return;
     }
-    // Disparar notificación al vecino creador del reclamo
+    
     if (response.trim() || status !== claim.status) {
       const areaLabel = claim.area || "tu área";
       const body =
@@ -248,7 +291,8 @@ function ManageDialog({ claim, onClose, onSaved }: { claim: Claim; onClose: () =
           : status === "En curso"
           ? `Tu reclamo en ${areaLabel} está en curso.`
           : `Tu reclamo en ${areaLabel} ha sido respondido.`;
-      await supabase.from("notifications").insert({
+          
+      const notifPayload: NotificationPayload = {
         title: `Reclamo #MUNO-${claim.id.slice(0, 4).toUpperCase()}`,
         body,
         link: `/reclamos/${claim.id}`,
@@ -256,7 +300,9 @@ function ManageDialog({ claim, onClose, onSaved }: { claim: Claim; onClose: () =
         source_type: "claim",
         source_id: claim.id,
         user_id: claim.user_id,
-      } as any);
+      };
+      
+      await supabase.from("notifications").insert(notifPayload);
     }
     setSaving(false);
     toast.success("Reclamo actualizado · Vecino notificado");
@@ -266,8 +312,6 @@ function ManageDialog({ claim, onClose, onSaved }: { claim: Claim; onClose: () =
     );
     onSaved(data as Claim);
   };
-
-  // status icon handled via colored dot in selector
 
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
@@ -361,6 +405,7 @@ function ManageDialog({ claim, onClose, onSaved }: { claim: Claim; onClose: () =
 }
 
 function TemplatesDialog({ onClose }: { onClose: () => void }) {
+  const { user } = useAuth();
   const [items, setItems] = useState<Canned[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<Canned | null>(null);
@@ -368,16 +413,28 @@ function TemplatesDialog({ onClose }: { onClose: () => void }) {
   const [body, setBody] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const load = () => {
+  const loadTpl = useCallback(async (isMounted = true) => {
     setLoading(true);
-    supabase.from("claim_canned_responses").select("*").order("created_at", { ascending: false })
-      .then(({ data }) => {
+    try {
+      const { data } = await supabase
+        .from("claim_canned_responses")
+        .select("*")
+        .order("created_at", { ascending: false });
+      if (isMounted) {
         setItems((data as Canned[]) || []);
         setLoading(false);
-      });
-  };
+      }
+    } catch (err) {
+      console.error("Error al cargar plantillas:", err);
+      if (isMounted) setLoading(false);
+    }
+  }, []);
 
-  useEffect(load, []);
+  useEffect(() => {
+    let isMounted = true;
+    loadTpl(isMounted);
+    return () => { isMounted = false; };
+  }, [loadTpl]);
 
   const startNew = () => {
     setEditing({ id: "", label: "", body: "", enabled: true });
@@ -396,22 +453,44 @@ function TemplatesDialog({ onClose }: { onClose: () => void }) {
       return;
     }
     setBusy(true);
-    const payload = { label: label.trim(), body: body.trim(), enabled: true };
+    
+    let municipality_id: string | null = null;
+    if (user?.id) {
+      const { data: prof } = await supabase
+        .from("profiles")
+        .select("municipality_id")
+        .eq("id", user.id)
+        .maybeSingle();
+      municipality_id = prof?.municipality_id || null;
+    }
+
+    const payload: CannedPayload = { 
+      label: label.trim(), 
+      body: body.trim(), 
+      enabled: true 
+    };
+    
+    if (municipality_id) {
+      payload.municipality_id = municipality_id;
+    }
+
     const res = editing && editing.id
       ? await supabase.from("claim_canned_responses").update(payload).eq("id", editing.id)
       : await supabase.from("claim_canned_responses").insert(payload);
+      
     setBusy(false);
+    
     if (res.error) {
       toast.error("No se pudo guardar", { description: res.error.message });
       return;
     }
     toast.success("Plantilla guardada");
     setEditing(null);
-    load();
+    loadTpl();
   };
 
   const remove = async (id: string) => {
-    if (!confirm("¿Eliminar esta plantilla?")) return;
+    if (!window.confirm("¿Eliminar esta plantilla?")) return;
     const { error } = await supabase.from("claim_canned_responses").delete().eq("id", id);
     if (error) {
       toast.error("No se pudo eliminar");

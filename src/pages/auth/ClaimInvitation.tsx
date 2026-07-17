@@ -1,9 +1,20 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
-import { useAuth } from "@/context/AuthContext";
-import { Loader2, ShieldCheck, AlertCircle, CheckCircle2 } from "lucide-react";
+import { useAuth, type AppRole } from "@/context/AuthContext";
+import { Loader2, ShieldCheck, AlertCircle } from "lucide-react";
 import { toast } from "sonner";
+
+// 1. Tipado Estricto para erradicar el 'any'
+interface MunicipalInvitation {
+  id: string;
+  email: string;
+  role: AppRole; // <-- Acá cambiamos 'string' por 'AppRole'
+  area: string | null;
+  status: string;
+  expires_at: string;
+  invited_by_email: string | null;
+}
 
 export default function ClaimInvitation() {
   const { token } = useParams();
@@ -11,31 +22,50 @@ export default function ClaimInvitation() {
   const { user } = useAuth();
   const [loading, setLoading] = useState(true);
   const [accepting, setAccepting] = useState(false);
-  const [invite, setInvite] = useState<any>(null);
+  const [invite, setInvite] = useState<MunicipalInvitation | null>(null);
   const [error, setError] = useState<string>("");
 
   useEffect(() => {
+    let isMounted = true; // 2. Prevención de Memory Leak
+
     if (!token) return;
-    (async () => {
-      const { data, error } = await supabase
-        .from("municipal_invitations")
-        .select("*")
-        .eq("token", token)
-        .maybeSingle();
-      if (error || !data) {
-        setError("Invitación no encontrada o no válida.");
-      } else if (data.status === "accepted") {
-        setError("Esta invitación ya fue aceptada.");
-      } else if (new Date(data.expires_at) < new Date()) {
-        setError("Esta invitación venció. Pedile al intendente que te envíe una nueva.");
-      } else {
-        setInvite(data);
+
+    const validateToken = async () => {
+      try {
+        const { data, error } = await supabase
+          .from("municipal_invitations")
+          .select("*")
+          .eq("token", token)
+          .maybeSingle();
+
+        if (!isMounted) return;
+
+        if (error || !data) {
+          setError("Invitación no encontrada o no válida.");
+        } else if (data.status === "accepted") {
+          setError("Esta invitación ya fue aceptada.");
+        } else if (new Date(data.expires_at) < new Date()) {
+          setError("Esta invitación venció. Pedile al intendente que te envíe una nueva.");
+        } else {
+          setInvite(data as MunicipalInvitation);
+        }
+      } catch (err) {
+        if (isMounted) setError("Error al validar la invitación.");
+      } finally {
+        if (isMounted) setLoading(false);
       }
-      setLoading(false);
-    })();
+    };
+
+    validateToken();
+
+    return () => {
+      isMounted = false;
+    };
   }, [token]);
 
   const accept = async () => {
+    if (!invite) return; // Salvaguarda de TypeScript
+
     if (!user) {
       toast.info("Iniciá sesión o registrate primero", {
         description: `Usá el email ${invite.email}.`,
@@ -49,22 +79,27 @@ export default function ClaimInvitation() {
       });
       return;
     }
+    
     setAccepting(true);
+    
     // Crear el rol
     const { error: roleErr } = await supabase.from("user_roles").insert({
       user_id: user.id,
       role: invite.role,
       area: invite.area,
     });
+    
     if (roleErr && !roleErr.message.includes("duplicate")) {
       setAccepting(false);
       toast.error("No se pudo asignar el rol", { description: roleErr.message });
       return;
     }
+    
     await supabase
       .from("municipal_invitations")
       .update({ status: "accepted", accepted_at: new Date().toISOString(), accepted_by: user.id })
       .eq("id", invite.id);
+      
     setAccepting(false);
     toast.success("¡Listo! Bienvenido al equipo municipal.");
     navigate("/admin/dashboard", { replace: true });

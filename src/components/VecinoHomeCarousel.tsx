@@ -36,22 +36,42 @@ export default function VecinoHomeCarousel() {
   const [selected, setSelected] = useState(0);
 
   useEffect(() => {
-    (async () => {
-      const { data } = await supabase
-        .from("announcements")
-        .select("id,title,description,image_url,cta_label,cta_to,tags,color,enabled,order_index")
-        .eq("enabled", true)
-        .order("order_index", { ascending: true });
+    let isMounted = true; // Prevenir memory leak en dispositivos móviles
 
-      const filtered = (data || []).filter((b: any) => {
-        const tags: string[] = b.tags || [];
-        if (tags.some((t) => EXCLUDED_TAGS.includes(t))) return false;
-        if (tags.length === 0) return true;
-        return tags.some((t) => ALLOWED_TAGS.includes(t));
-      });
-      setSlides(filtered as Banner[]);
-      setLoading(false);
-    })();
+    const fetchBanners = async () => {
+      try {
+        const { data } = await supabase
+          .from("announcements")
+          .select("id,title,description,image_url,cta_label,cta_to,tags,color,enabled,order_index")
+          .eq("enabled", true)
+          .order("order_index", { ascending: true });
+
+        // Utilizamos tipado seguro (unknown -> cast validado) en lugar de any
+        const filtered = (data || []).filter((item) => {
+          // Casteamos item como Partial<Banner> para que TS sepa qué propiedades esperar
+          const b = item as Partial<Banner>;
+          const tags: string[] = b.tags || [];
+          
+          if (tags.some((t) => EXCLUDED_TAGS.includes(t))) return false;
+          if (tags.length === 0) return true;
+          return tags.some((t) => ALLOWED_TAGS.includes(t));
+        });
+
+        if (isMounted) {
+          setSlides(filtered as Banner[]);
+          setLoading(false);
+        }
+      } catch (error) {
+        console.error("Error al cargar el carrusel", error);
+        if (isMounted) setLoading(false);
+      }
+    };
+
+    fetchBanners();
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   useEffect(() => {
@@ -64,8 +84,15 @@ export default function VecinoHomeCarousel() {
 
   const go = (b: Banner) => {
     if (!b.cta_to) return;
-    if (b.cta_to.startsWith("http") || b.cta_to.startsWith("tel:")) window.location.href = b.cta_to;
-    else navigate(b.cta_to);
+    
+    // SOLUCIÓN: Preservar SPA abriendo http en nueva pestaña
+    if (b.cta_to.startsWith("http")) {
+      window.open(b.cta_to, "_blank", "noopener,noreferrer");
+    } else if (b.cta_to.startsWith("tel:") || b.cta_to.startsWith("mailto:")) {
+      window.location.href = b.cta_to;
+    } else {
+      navigate(b.cta_to);
+    }
   };
 
   if (loading) return <div className="h-48 md:h-56 rounded-xl bg-isa-navy/5" />;
@@ -118,7 +145,7 @@ export default function VecinoHomeCarousel() {
           <div className="absolute inset-x-0 bottom-2 flex items-center justify-center gap-1.5 z-10">
             {slides.map((_, i) => (
               <button
-                key={i}
+                key={`slide-dot-${i}`}
                 onClick={() => emblaApi?.scrollTo(i)}
                 aria-label={`Slide ${i + 1}`}
                 className={`h-1.5 rounded-full transition-all ${i === selected ? "w-6" : "w-1.5"}`}

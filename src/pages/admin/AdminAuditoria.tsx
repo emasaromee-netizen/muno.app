@@ -1,31 +1,40 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { ScrollText } from "lucide-react";
+import type { Database, Json } from "@/integrations/supabase/types";
 
-type Log = {
-  id: string;
-  user_email: string | null;
-  action: string;
-  entity: string | null;
-  entity_id: string | null;
-  meta: any;
-  created_at: string;
-};
+type ActivityRow = Database["public"]["Tables"]["activity_logs"]["Row"];
 
 export default function AdminAuditoria() {
-  const [logs, setLogs] = useState<Log[]>([]);
+  const [logs, setLogs] = useState<ActivityRow[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    (async () => {
-      const { data } = await supabase
-        .from("activity_logs" as any)
-        .select("*")
-        .order("created_at", { ascending: false })
-        .limit(200);
-      setLogs((data as any) || []);
-      setLoading(false);
-    })();
+    let isMounted = true; // Prevención de Memory Leak
+
+    const fetchLogs = async () => {
+      try {
+        const { data } = await supabase
+          .from("activity_logs")
+          .select("*")
+          .order("created_at", { ascending: false })
+          .limit(200);
+          
+        if (isMounted) {
+          setLogs(data || []);
+          setLoading(false);
+        }
+      } catch (error) {
+        console.error("Error al cargar los logs:", error);
+        if (isMounted) setLoading(false);
+      }
+    };
+
+    fetchLogs();
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   return (

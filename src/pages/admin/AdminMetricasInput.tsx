@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import React, { useEffect, useState, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
 import { Save, Loader2, BarChart3, Users, AlertTriangle, Calendar } from "lucide-react";
 
-const FIELDS: { key: string; label: string; icon: any; group: string }[] = [
+// SOLUCIÓN TS: Tipado estricto para el icono y los campos
+const FIELDS: { key: string; label: string; icon: React.ElementType; group: string }[] = [
   { key: "poblacion",           label: "Población total",          icon: Users,         group: "Comunidad" },
   { key: "vecinos_activos",     label: "Vecinos activos en MUNO",  icon: Users,         group: "Comunidad" },
   { key: "reclamos_resueltos",  label: "Reclamos resueltos",       icon: AlertTriangle, group: "Reclamos" },
@@ -13,6 +14,17 @@ const FIELDS: { key: string; label: string; icon: any; group: string }[] = [
   { key: "eventos_deporte",     label: "Eventos de Deporte",       icon: Calendar,      group: "Eventos" },
   { key: "asistentes_eventos",  label: "Asistentes a eventos",     icon: Calendar,      group: "Eventos" },
 ];
+
+// SOLUCIÓN TS: Interfaz para el historial de métricas
+interface DBMetricHistory {
+  period: string;
+  vecinos_activos?: number | null;
+  reclamos_resueltos?: number | null;
+  reclamos_pendientes?: number | null;
+  eventos_cultura?: number | null;
+  eventos_deporte?: number | null;
+  updated_at?: string;
+}
 
 const currentPeriod = () => {
   const d = new Date();
@@ -26,19 +38,27 @@ export default function AdminMetricasInput() {
   const [notes, setNotes] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [history, setHistory] = useState<any[]>([]);
+  const [history, setHistory] = useState<DBMetricHistory[]>([]);
 
-  const load = async () => {
+  // SOLUCIÓN: Referencia mutable para prevenir condiciones de carrera
+  const isMounted = useRef(true);
+
+  const load = useCallback(async () => {
     setLoading(true);
     const { data } = await supabase
       .from("isa_metrics")
       .select("*")
       .eq("period", period)
       .maybeSingle();
+      
+    // Leemos el valor actual de la referencia en memoria
+    if (!isMounted.current) return;
+
     if (data) {
       const v: Record<string, string> = {};
       FIELDS.forEach((f) => {
-        v[f.key] = data[f.key] != null ? String(data[f.key]) : "";
+        const val = data[f.key as keyof typeof data];
+        v[f.key] = val != null ? String(val) : "";
       });
       setValues(v);
       setNotes(data.notes || "");
@@ -46,26 +66,48 @@ export default function AdminMetricasInput() {
       setValues({});
       setNotes("");
     }
+    
     const { data: hist } = await supabase
       .from("isa_metrics")
       .select("period, vecinos_activos, reclamos_resueltos, reclamos_pendientes, eventos_cultura, eventos_deporte, updated_at")
       .order("period", { ascending: false })
       .limit(12);
-    setHistory(hist || []);
+      
+    if (!isMounted.current) return;
+      
+    setHistory((hist as DBMetricHistory[]) || []);
     setLoading(false);
-  };
+  }, [period]);
 
-  useEffect(() => { load(); }, [period]);
+  useEffect(() => { 
+    isMounted.current = true;
+    load(); 
+    
+    return () => {
+      isMounted.current = false;
+    };
+  }, [load]);
 
   const save = async () => {
     setSaving(true);
-    const payload: any = { period, notes, updated_by: user?.id };
-    FIELDS.forEach((f) => {
-      payload[f.key] = values[f.key] === "" || values[f.key] == null ? null : Number(values[f.key]);
-    });
+    
+    // SOLUCIÓN TS: Construcción explícita del payload. 
+    // TypeScript validará perfectamente esto contra el tipo Insert de Supabase.
     const { error } = await supabase
       .from("isa_metrics")
-      .upsert(payload, { onConflict: "municipality_id,period" });
+      .upsert({
+        period,
+        notes: notes || null,
+        updated_by: user?.id || null,
+        poblacion: values["poblacion"] ? Number(values["poblacion"]) : null,
+        vecinos_activos: values["vecinos_activos"] ? Number(values["vecinos_activos"]) : null,
+        reclamos_resueltos: values["reclamos_resueltos"] ? Number(values["reclamos_resueltos"]) : null,
+        reclamos_pendientes: values["reclamos_pendientes"] ? Number(values["reclamos_pendientes"]) : null,
+        eventos_cultura: values["eventos_cultura"] ? Number(values["eventos_cultura"]) : null,
+        eventos_deporte: values["eventos_deporte"] ? Number(values["eventos_deporte"]) : null,
+        asistentes_eventos: values["asistentes_eventos"] ? Number(values["asistentes_eventos"]) : null,
+      }, { onConflict: "municipality_id,period" });
+      
     setSaving(false);
     if (error) {
       toast.error("No se pudo guardar", { description: error.message });

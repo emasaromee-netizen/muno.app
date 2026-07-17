@@ -1,9 +1,8 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
 import { Bell, Plus, Trash2, X } from "lucide-react";
-// 1. SOLUCIÓN QUIRÚRGICA: Seguridad centralizada
 import { can } from "@/security/can";
 import { PERMISSIONS } from "@/security/permissions";
 
@@ -13,79 +12,97 @@ type Row = {
   title: string; 
   body: string; 
   created_at: string; 
-  created_by: string | null 
+  created_by: string | null;
+  municipality_id?: string | null;
 };
 
-// 2. Interfaz para tipar las peticiones a Supabase y erradicar los 'any'
 interface DBStaffAnnouncement {
   id: string;
   title: string;
   body: string;
   created_at: string;
   created_by: string | null;
+  municipality_id?: string | null;
 }
 
 export default function AdminNovedadesJefes() {
   const { user, roles, area } = useAuth();
   
-  // SOLUCIÓN QUIRÚRGICA: Evaluación de seguridad oficial
   const canPublish = can(roles, area, PERMISSIONS.CONTENT_PUBLISH);
   
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
 
-  // 3. useCallback e isMounted para cuidar la memoria en móviles
-  const load = useCallback(async (isMounted: boolean = true) => {
-    if (isMounted) setLoading(true);
+  // 1. SOLUCIÓN: Referencia mutable para prevenir condiciones de carrera
+  const isMounted = useRef(true);
+
+  // 2. Quitamos el parámetro falso y usamos el objeto en memoria
+  const load = useCallback(async () => {
+    if (!user?.id) return;
+    if (isMounted.current) setLoading(true);
     
     try {
-      const { data, error } = await supabase
+      // Obtener jurisdicción del usuario para blindaje BOLA
+      const { data: userRole } = await supabase
+        .from("user_roles")
+        .select("municipality_id")
+        .eq("user_id", user.id)
+        .eq("active", true)
+        .maybeSingle();
+
+      const currentMuniId = userRole?.municipality_id;
+
+      let q = supabase
         .from("staff_announcements")
         .select("*")
         .order("created_at", { ascending: false });
 
+      // Aplicar filtro estricto por inquilino
+      if (currentMuniId) {
+        q = q.eq("municipality_id", currentMuniId);
+      }
+
+      const { data, error } = await q;
       if (error) throw error;
 
-      if (isMounted) {
-        // Aseguramos el tipado correcto de la respuesta
+      // 3. Leemos el `.current`
+      if (isMounted.current) {
         setRows((data as DBStaffAnnouncement[]) || []);
       }
     } catch (err) {
       console.error("Error al cargar novedades:", err);
       toast.error("Error al cargar las novedades");
     } finally {
-      if (isMounted) setLoading(false);
+      if (isMounted.current) setLoading(false);
     }
-  }, []);
+  }, [user?.id]);
 
   useEffect(() => {
-    let isMounted = true;
+    isMounted.current = true;
     
-    // Carga inicial
-    load(isMounted);
+    load();
     
-    // Suscripción en tiempo real segura
     const channel = supabase
-      .channel("staff_ann_changes") // Nombre único de canal sugerido por Supabase
+      .channel("staff_ann_changes")
       .on(
         "postgres_changes", 
         { event: "*", schema: "public", table: "staff_announcements" }, 
         () => {
-          // Solo recarga si el usuario sigue en esta pantalla
-          if (isMounted) load(isMounted);
+          if (isMounted.current) load();
         }
       )
       .subscribe();
       
     return () => {
-      isMounted = false;
+      // 4. Se apaga la referencia al desmontar
+      isMounted.current = false;
       supabase.removeChannel(channel);
     };
   }, [load]);
 
   const remove = async (id: string) => {
-    if (!window.confirm("¿Eliminar esta novedad?")) return; // window.confirm para complacer a TypeScript
+    if (!window.confirm("¿Eliminar esta novedad?")) return;
     
     try {
       const { error } = await supabase
@@ -96,7 +113,7 @@ export default function AdminNovedadesJefes() {
       if (error) throw error;
       
       toast.success("Eliminada");
-    } catch (err: unknown) { // Manejo seguro del error
+    } catch (err: unknown) {
       console.error(err);
       toast.error("No se pudo eliminar");
     }
@@ -147,7 +164,7 @@ export default function AdminNovedadesJefes() {
         ))}
       </div>
 
-      {creating && <CreateDialog onClose={() => setCreating(false)} onSaved={() => { setCreating(false); load(true); }} />}
+      {creating && <CreateDialog onClose={() => setCreating(false)} onSaved={() => { setCreating(false); load(); }} />}
     </div>
   );
 }
@@ -159,7 +176,7 @@ function CreateDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () =
   const [saving, setSaving] = useState(false);
 
   const save = async () => {
-    if (!title.trim() || !body.trim()) {
+    if (!title.trim() || !body.trim() || !user?.id) {
       toast.error("Completá título y mensaje");
       return;
     }
@@ -167,21 +184,30 @@ function CreateDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () =
     setSaving(true);
     
     try {
+      // 1. Averiguamos a qué municipio pertenece el usuario que publica
+      const { data: userRole } = await supabase
+        .from("user_roles")
+        .select("municipality_id")
+        .eq("user_id", user.id)
+        .eq("active", true)
+        .maybeSingle();
+
+      // 2. Insertamos la novedad anclada a ese municipio
       const { error } = await supabase
         .from("staff_announcements")
         .insert({ 
           title: title.trim(), 
           body: body.trim(), 
-          created_by: user?.id 
+          created_by: user.id,
+          municipality_id: userRole?.municipality_id
         });
         
       if (error) throw error;
       
       toast.success("Novedad publicada");
       onSaved();
-    } catch (err) { // ¡Adiós al 'any'! TS lo asume como 'unknown'
+    } catch (err: unknown) {
       console.error(err);
-      // Extraemos el mensaje de forma segura para TypeScript
       const errorMessage = err instanceof Error ? err.message : "No se pudo publicar";
       toast.error("Error: " + errorMessage);
     } finally {

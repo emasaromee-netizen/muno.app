@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Building2, Users, Store, AlertCircle, Megaphone, FileText, ChevronDown, LogOut, Pencil, Save, X, Plus, Mail, Copy } from "lucide-react";
@@ -8,59 +8,112 @@ import { toast } from "sonner";
 type Municipality = { id: string; slug: string; name: string; province: string | null; is_default: boolean };
 type Counts = { users: number; businesses: number; claims: number; banners: number };
 
+// --- INTERFACES ESTRICTAS (SOLUCIÓN ESLINT) ---
+interface DBCountsResponse {
+  muni_id: string;
+  users_count: number;
+  businesses_count: number;
+  claims_count: number;
+  banners_count: number;
+}
+
+interface DBInvitation {
+  id: string;
+  email: string;
+  role: string;
+  area: string | null;
+  status: string;
+  token: string;
+}
+
+interface DBAnnouncement {
+  id: string;
+  title: string;
+  description: string;
+  order_index: number;
+}
+
+interface DBInternalAnnouncement {
+  id: string;
+  message: string;
+}
+
 export default function IsaGlobalPanel() {
   const { signOut, user } = useAuth();
   const [munis, setMunis] = useState<Municipality[]>([]);
+  
   // Form: nuevo municipio
   const [newName, setNewName] = useState("");
   const [newProvince, setNewProvince] = useState("");
   const [newMayorEmail, setNewMayorEmail] = useState("");
   const [creating, setCreating] = useState(false);
+  
   // Form: colaborador municipio
   const [collabEmail, setCollabEmail] = useState("");
   const [collabRole, setCollabRole] = useState<"admin" | "area_manager">("area_manager");
   const [collabArea, setCollabArea] = useState("Cultura");
   const [collabBusy, setCollabBusy] = useState(false);
-  const [muniInvites, setMuniInvites] = useState<any[]>([]);
+  const [muniInvites, setMuniInvites] = useState<DBInvitation[]>([]);
   const [selected, setSelected] = useState<string>("ALL");
   const [counts, setCounts] = useState<Record<string, Counts>>({});
   const [loading, setLoading] = useState(true);
 
   // Banners / novedades del municipio seleccionado
-  const [banners, setBanners] = useState<any[]>([]);
-  const [internal, setInternal] = useState<any | null>(null);
+  const [banners, setBanners] = useState<DBAnnouncement[]>([]);
+  const [internal, setInternal] = useState<DBInternalAnnouncement | null>(null);
   const [editId, setEditId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
 
+  // SOLUCIÓN: Referencia maestra para todo el componente
+  const isMounted = useRef(true);
+
   useEffect(() => {
-    (async () => {
-      const { data } = await supabase.from("municipalities").select("*").order("name");
-      setMunis(data || []);
-    })();
+    isMounted.current = true;
+    return () => {
+      isMounted.current = false;
+    };
   }, []);
 
   useEffect(() => {
+    const fetchMunis = async () => {
+      const { data } = await supabase.from("municipalities").select("*").order("name");
+      if (isMounted.current) setMunis(data || []);
+    };
+    fetchMunis();
+  }, []);
+
+  // SOLUCIÓN M-07: Reducir peticiones N+1 HTTP a UNA sola llamada optimizada por RPC
+  useEffect(() => {
     if (munis.length === 0) return;
-    (async () => {
-      setLoading(true);
-      const out: Record<string, Counts> = {};
-      for (const m of munis) {
-        const [u, b, c, an] = await Promise.all([
-          supabase.from("profiles").select("id", { count: "exact", head: true }).eq("municipality_id", m.id),
-          supabase.from("businesses").select("id", { count: "exact", head: true }).eq("municipality_id", m.id),
-          supabase.from("claims").select("id", { count: "exact", head: true }).eq("municipality_id", m.id),
-          supabase.from("announcements").select("id", { count: "exact", head: true }).eq("municipality_id", m.id),
-        ]);
-        out[m.id] = {
-          users: u.count ?? 0,
-          businesses: b.count ?? 0,
-          claims: c.count ?? 0,
-          banners: an.count ?? 0,
-        };
+
+    const loadAllCounts = async () => {
+      if (isMounted.current) setLoading(true);
+      try {
+        const { data, error } = await supabase.rpc("get_municipality_counts");
+        if (error) throw error;
+
+        const safeData = (data as unknown as DBCountsResponse[]) || [];
+        const out: Record<string, Counts> = {};
+
+        safeData.forEach((row) => {
+          out[row.muni_id] = {
+            users: Number(row.users_count),
+            businesses: Number(row.businesses_count),
+            claims: Number(row.claims_count),
+            banners: Number(row.banners_count),
+          };
+        });
+
+        if (isMounted.current) setCounts(out);
+      } catch (err) {
+        console.error("Error cargando consolidados de métricas:", err);
+        toast.error("No se pudieron consolidar las métricas de red");
+      } finally {
+        if (isMounted.current) setLoading(false);
       }
-      setCounts(out);
-      setLoading(false);
-    })();
+    };
+
+    loadAllCounts();
   }, [munis]);
 
   const totals = useMemo<Counts>(() => {
@@ -74,14 +127,19 @@ export default function IsaGlobalPanel() {
   // Cargar banners del municipio seleccionado
   useEffect(() => {
     if (selected === "ALL") { setBanners([]); setInternal(null); return; }
-    (async () => {
+    
+    const fetchTenantData = async () => {
       const [{ data: bs }, { data: ia }] = await Promise.all([
         supabase.from("announcements").select("*").eq("municipality_id", selected).order("order_index"),
         supabase.from("internal_announcements").select("*").eq("municipality_id", selected).order("updated_at", { ascending: false }).limit(1).maybeSingle(),
       ]);
-      setBanners(bs || []);
-      setInternal(ia || null);
-    })();
+      if (isMounted.current) {
+        setBanners((bs as DBAnnouncement[]) || []);
+        setInternal((ia as DBInternalAnnouncement) || null);
+      }
+    };
+    
+    fetchTenantData();
   }, [selected]);
 
   const saveBanner = async (id: string) => {
@@ -98,7 +156,7 @@ export default function IsaGlobalPanel() {
       setInternal({ ...internal, message: draft });
     } else {
       const { data } = await supabase.from("internal_announcements").insert({ message: draft, municipality_id: selected }).select().single();
-      if (data) setInternal(data);
+      if (data) setInternal(data as DBInternalAnnouncement);
     }
     setEditId(null);
   };
@@ -124,6 +182,7 @@ export default function IsaGlobalPanel() {
       .insert({ name: newName.trim(), province: newProvince.trim() || null, slug, enabled: true })
       .select()
       .single();
+      
     if (muniErr || !muni) {
       setCreating(false);
       toast.error("No se pudo crear el municipio", { description: muniErr?.message });
@@ -145,23 +204,32 @@ export default function IsaGlobalPanel() {
     }
     setNewName(""); setNewProvince(""); setNewMayorEmail("");
     const { data } = await supabase.from("municipalities").select("*").order("name");
-    setMunis(data || []);
-    setSelected(muni.id);
+    if (isMounted.current) {
+      setMunis(data || []);
+      setSelected(muni.id);
+    }
   };
 
-  const loadMuniInvites = async (muniId: string) => {
+  // 1. Remoción del booleano falso y uso de isMounted.current
+  const loadMuniInvites = useCallback(async (muniId: string) => {
     const { data } = await supabase
       .from("municipal_invitations")
       .select("*")
       .eq("municipality_id", muniId)
       .order("created_at", { ascending: false });
-    setMuniInvites(data || []);
-  };
+      
+    if (isMounted.current) {
+      setMuniInvites((data as DBInvitation[]) || []);
+    }
+  }, []);
 
   useEffect(() => {
-    if (selected !== "ALL") loadMuniInvites(selected);
-    else setMuniInvites([]);
-  }, [selected]);
+    if (selected !== "ALL") {
+      loadMuniInvites(selected);
+    } else {
+      setMuniInvites([]);
+    }
+  }, [selected, loadMuniInvites]);
 
   const addCollaborator = async () => {
     if (selected === "ALL") return;
@@ -274,7 +342,7 @@ export default function IsaGlobalPanel() {
             <div className="grid grid-cols-1 md:grid-cols-12 gap-2">
               <input value={collabEmail} onChange={(e) => setCollabEmail(e.target.value)} placeholder="email@municipio.gob.ar" type="email"
                 className="md:col-span-5 px-3 py-2.5 rounded-xl border bg-background text-sm" />
-              <select value={collabRole} onChange={(e) => setCollabRole(e.target.value as any)}
+              <select value={collabRole} onChange={(e) => setCollabRole(e.target.value as "admin" | "area_manager")} // Solución TS
                 className="md:col-span-3 px-3 py-2.5 rounded-xl border bg-background text-sm">
                 <option value="admin">Intendente / Admin</option>
                 <option value="area_manager">Jefe de área</option>
@@ -424,7 +492,8 @@ export default function IsaGlobalPanel() {
   );
 }
 
-function Kpi({ icon: Icon, label, value, loading }: { icon: any; label: string; value: number; loading: boolean }) {
+// SOLUCIÓN TS: Tipado estricto del KPI
+function Kpi({ icon: Icon, label, value, loading }: { icon: React.ElementType; label: string; value: number; loading: boolean }) {
   return (
     <div className="bg-white border border-isa-navy/10 rounded-2xl p-5">
       <div className="flex items-center justify-between">

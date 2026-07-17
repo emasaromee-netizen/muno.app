@@ -16,7 +16,22 @@ type EventItem = {
   place: string;
   kind: "Cultura" | "Deportes";
   photo: string;
+  municipality_id?: string | null; // Tipado estricto
 };
+
+// Interface para limpiar el 'any' de Supabase
+interface DBContentItem {
+  id: string;
+  title: string;
+  description?: string;
+  kind?: string;
+  area?: string;
+  schedule?: string;
+  days?: string;
+  photo_url?: string;
+  municipality_id?: string | null;
+  published?: boolean;
+}
 
 const PHOTOS = [
   "https://images.unsplash.com/photo-1465847899084-d164df4dedc6?w=800",
@@ -74,37 +89,60 @@ export default function Eventos() {
   const [dbEvents, setDbEvents] = useState<EventItem[]>([]);
 
   useEffect(() => {
-    (async () => {
-      let munId: string | null = null;
-      if (user?.id) {
-        const { data: prof } = await supabase.from("profiles").select("municipality_id").eq("id", user.id).maybeSingle();
-        munId = (prof as any)?.municipality_id ?? null;
+    let isMounted = true; // Control de Memory Leak
+
+    const fetchEvents = async () => {
+      try {
+        let munId: string | null = null;
+        if (user?.id) {
+          const { data: prof } = await supabase.from("profiles").select("municipality_id").eq("id", user.id).maybeSingle();
+          munId = prof?.municipality_id ?? null;
+        }
+
+        if (!isMounted) return;
+
+        let q = supabase
+          .from("content_items")
+          .select("id,title,description,kind,area,schedule,days,photo_url,municipality_id,published")
+          .eq("published", true)
+          .in("kind", ["Evento", "Actividad", "Taller"])
+          .order("created_at", { ascending: false });
+          
+        if (munId) q = q.eq("municipality_id", munId);
+        
+        const { data } = await q;
+        if (!isMounted) return;
+        
+        const today = new Date().toISOString().slice(0, 10);
+        const safeData = (data as DBContentItem[]) || [];
+        
+        setDbEvents(safeData.map((r, i) => ({
+          id: `db-${r.id}`,
+          title: r.title,
+          date: today,
+          time: r.schedule || undefined,
+          place: r.area || "Municipio",
+          kind: (r.area === "Deporte" ? "Deportes" : "Cultura") as "Cultura" | "Deportes",
+          photo: r.photo_url || PHOTOS[i % PHOTOS.length],
+          municipality_id: r.municipality_id,
+        })));
+      } catch (err) {
+        console.error("Error cargando eventos:", err);
       }
-      let q = supabase
-        .from("content_items")
-        .select("id,title,description,kind,area,schedule,days,photo_url,municipality_id,published")
-        .eq("published", true)
-        .in("kind", ["Evento", "Actividad", "Taller"])
-        .order("created_at", { ascending: false });
-      if (munId) q = q.eq("municipality_id", munId);
-      const { data } = await q;
-      const today = new Date().toISOString().slice(0, 10);
-      setDbEvents(((data as any[]) || []).map((r, i) => ({
-        id: `db-${r.id}`,
-        title: r.title,
-        date: today,
-        time: r.schedule || undefined,
-        place: r.area || "Municipio",
-        kind: (r.area === "Deporte" ? "Deportes" : "Cultura") as "Cultura" | "Deportes",
-        photo: r.photo_url || PHOTOS[i % PHOTOS.length],
-      })));
-    })();
+    };
+
+    fetchEvents();
+
+    return () => {
+      isMounted = false;
+    };
   }, [user?.id]);
 
   const events = useMemo(() => {
     const merged = [...dbEvents, ...buildEvents()];
     return merged.sort((a, b) => a.date.localeCompare(b.date));
   }, [dbEvents]);
+
   const filtered = useMemo(() => {
     return events.filter((e) => {
       if (filter === "Hoy") return isToday(e.date);
@@ -234,7 +272,7 @@ export default function Eventos() {
                       style={{ minHeight: 44, borderColor: "hsl(var(--isa-navy) / 0.2)", color: "hsl(var(--isa-navy))" }}
                     >
                       <a
-                        href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(e.place + " San Francisco del Monte de Oro")}`}
+                        href={`https://maps.google.com/?q=${encodeURIComponent(e.place + " San Francisco del Monte de Oro")}`}
                         target="_blank"
                         rel="noreferrer"
                       >
@@ -261,6 +299,7 @@ export default function Eventos() {
                 fecha: inscOpen.date,
                 tipo: inscOpen.kind,
                 lugar: inscOpen.place,
+                municipality_id: inscOpen.municipality_id,
               }
             : null
         }

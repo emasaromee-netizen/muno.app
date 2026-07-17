@@ -2,335 +2,140 @@
 
 ---
 
-# Control del Documento
+## Control del Documento
 
 | Campo | Valor |
 |--------|--------|
 | Código | DOC-006 |
-| Documento | Arquitectura del Sistema |
+| Documento | Arquitectura de Software e Infraestructura |
 | Proyecto | MUNO |
-| Versión | 1.0 |
-| Estado | En desarrollo |
-| Fecha | 30/06/2026 |
+| Versión | 3.0 |
+| Estado | Estabilizado y Certificado (Hito 2) |
+| Fecha de Emisión | 13 de Julio de 2026 |
+| Responsable | Equipo de Arquitectura MUNO |
 
 ---
 
 # 1. Objetivo
 
-Este documento describe la arquitectura técnica completa de la plataforma MUNO.
+Este documento describe de manera exhaustiva la arquitectura técnica validada de la plataforma MUNO tras la conclusión del Hito 2 (Estabilización). 
 
-Su finalidad es proporcionar una visión integral del sistema, documentando los componentes que intervienen en el funcionamiento de la aplicación, las relaciones entre ellos y las decisiones arquitectónicas actualmente implementadas.
-
-Toda la información incluida en este documento se obtiene exclusivamente del análisis del código fuente y de la infraestructura asociada al proyecto.
+Su finalidad es proporcionar el mapa estructural definitivo del sistema, documentando los componentes de software, el esquema de base de datos, el aislamiento multi-inquilino (Multi-Tenant) y las defensas perimetrales implementadas para certificar su paso a producción.
 
 ---
 
-# 2. Visión General
+# 2. Visión General y Paradigma
 
-La plataforma MUNO está desarrollada como una Progressive Web App (PWA) basada en React y TypeScript.
+La plataforma MUNO es una **Progressive Web App (PWA) Empresarial** desarrollada en **React 18** y **TypeScript Estricto** (cero deuda técnica de tipado).
 
-La aplicación consume servicios Backend-as-a-Service proporcionados por Supabase, utilizando PostgreSQL como motor de base de datos, Supabase Auth para autenticación, Row Level Security (RLS) para autorización y Edge Functions para lógica de servidor.
+Adopta un paradigma **BaaS (Backend-as-a-Service) Serverless** apoyado sobre **Supabase**, utilizando:
+- **PostgreSQL:** Como motor de datos relacional y transaccional.
+- **Row Level Security (RLS):** Como núcleo duro de la seguridad multi-tenant.
+- **Edge Functions (Deno):** Para lógica de negocio aislada.
+- **Supabase Storage:** Para el almacenamiento de archivos y evidencias binarias.
+- **Supabase Auth:** Para la identidad criptográfica y validación de tokens JWT (OAuth).
 
-El frontend está organizado mediante componentes reutilizables, Context API y React Router, mientras que el backend se encuentra completamente desacoplado mediante la infraestructura de Supabase.
-
-La arquitectura sigue un modelo cliente-servidor con separación entre:
-
-- Presentación (React)
-- Gestión del estado (Context API + React Query)
-- Servicios (Supabase)
-- Persistencia (PostgreSQL)
+El despliegue del frontend se orquesta en **Vercel**, inyectando una capa de protección perimetral mediante cabeceras HTTP restrictivas (CSP).
 
 ---
 
-# 3. Arquitectura Frontend
+# 3. Arquitectura Frontend (React + Vite)
 
-El frontend de MUNO está desarrollado utilizando React 18 con TypeScript sobre Vite.
+El código fuente está modularizado en la carpeta `src/`, diseñado bajo patrones de Alta Cohesión y Bajo Acoplamiento:
 
-La aplicación adopta una arquitectura basada en componentes reutilizables, Context API para el estado global y React Router para la navegación.
-
-La organización principal del código fuente es la siguiente:
-
-```
+```text
 src/
-├── components/
-│   ├── admin/
-│   └── ui/
-├── context/
-├── data/
-├── hooks/
-├── integrations/
-├── lib/
-├── pages/
-│   ├── admin/
-│   ├── auth/
-│   ├── isa/
-│   └── legal/
-├── styles/
-└── main.tsx
+├── components/       # UI Reutilizable, Widgets y Layouts (AdminShell, AppLayout)
+├── context/          # Gestión de Estado Global (Auth, Municipality)
+├── hooks/            # Encapsulamiento de lógica y optimizaciones (useCallback/useQuery)
+├── integrations/     # Clientes de APIs, validación OAuth y esquemas de base de datos
+├── lib/              # Utilidades puras, métricas y trazabilidad (audit.ts)
+├── pages/            # Vistas enrutables (Mobile y Backoffice)
+├── security/         # Motor de Autorización RBAC/ABAC (can.ts, permissions.ts)
+├── styles/           # Tailwind globals
+├── test/             # Pipeline de Regresión Automatizada (permissions.test.ts)
+├── App.tsx           # Enrutador principal y Telemetría de Tolerancia a Fallos (ErrorBoundary)
+└── main.tsx          # Punto de anclaje de React DOM
 ```
 
-No se identificó una carpeta `services`, por lo que actualmente la lógica de acceso a datos se encuentra distribuida entre Context Providers, utilidades (`lib`) e integraciones con Supabase.
+---
+
+# 4. Motor de Autorización y Componentes Críticos
+
+A diferencia del prototipo inicial, la aplicación no utiliza verificaciones estáticas de roles en la UI. Toda decisión de renderizado y ruteo es evaluada por el motor de permisos cruzado.
+
+## 4.1. Módulo de Seguridad Central (`src/security/`)
+- `permissions.ts`: Diccionario de permisos atómicos (ej. `CONTENT_CREATE`, `USERS_MANAGE`).
+- `can.ts`: Función evaluadora que intersecta los roles del usuario (`admin`, `mayor`, `area_manager`, etc.) contra su área de incumbencia y los permisos declarados, dictaminando booleanos (`true/false`).
+
+## 4.2. Tolerancia a Fallos (`ErrorBoundary`)
+El componente raíz (`App.tsx`) envuelve la aplicación en una frontera de errores asíncrona. Si ocurre una excepción no controlada ("White Screen of Death"), el sistema captura el *Stack Trace* y envía un payload a la tabla `activity_logs` (Supabase) detallando el contexto, URL y credenciales del dispositivo afectado, garantizando observabilidad en producción.
 
 ---
 
-# 4. Componentes React
+# 5. Gestión del Estado y Context Providers
 
-El proyecto utiliza una arquitectura basada en componentes reutilizables.
+La información transaccional y el contexto multi-jurisdiccional se manejan globalmente mediante:
 
-## Componentes principales
-
-- AppLayout
-- BottomNav
-- EmergencyBanner
-- EmptyState
-- FavoriteButton
-- FullscreenToggle
-- HomeBanners
-- InscripcionDialog
-- InternalAnnouncement
-- LeadDialog
-- MayorFullscreen
-- MisFavoritos
-- MisInscripciones
-- MisReclamos
-- NavLink
-- NewsCarousel
-- NotificationsBell
-- PreviewSwitcher
-- ProtectedRoute
-- RatePueblo
-- RatingStars
-- TouristGate
-- VecinoHomeBlocks
-- VecinoHomeCarousel
+- **`AuthProvider`:** Inicializa y valida la sesión criptográfica, decodifica el JWT, inyecta los roles y gestiona el caché transitorio (`muno.pending.dni`) durante flujos de registro asíncrono.
+- **`MunicipalityProvider`:** Resuelve el UUID real del municipio seleccionado y su metadata visual, eliminando búsquedas redundantes y blindando el flujo cruzado del home y panel.
+- **`TanStack React Query`:** Administra el caché de datos remotos, paralelizando peticiones a Supabase con parámetros optimizados (`{ head: true }` para contadores).
 
 ---
 
-## Componentes administrativos
+# 6. Arquitectura Backend (PostgreSQL & Supabase)
 
-- AdminShell
-- StaffNewsWidget
+El esquema `public` de la base de datos ha sido refactorizado para garantizar persistencia física y aislamiento total de jurisdicciones.
 
----
+## 6.1. Tablas Transaccionales Principales
 
-## Biblioteca UI
+| Tabla | Propósito y Modificación Hito 2 |
+|---------|--------------------------------|
+| `profiles` | Perfiles ciudadanos. Vinculados de forma nativa a `auth.users`. |
+| `claims` | Reclamos. Evidencias apuntan a Supabase Storage y autores inmutables. |
+| `businesses` | Comercio local. Tipado estricto para roles `mayor` y `tourism_chief`. |
+| `business_reservations` | *(NUEVA)* Persistencia transaccional de turnos y agendas comerciales. |
+| `activity_logs` | Trazabilidad legal aislada por `municipality_id` y telemetría de crashes. |
+| `analytics_events` | Almacén de big data para métricas ISA sin bloqueos UI. |
+| `content_items` | Consolidación universal de eventos, lugares turísticos y cultura. |
 
-El proyecto incorpora una biblioteca de componentes basada en shadcn/ui y Radix UI.
+## 6.2. Seguridad Multi-Tenant (Row Level Security - RLS)
 
-Actualmente se identifican más de 45 componentes reutilizables, entre ellos:
-
-- Accordion
-- Alert
-- Avatar
-- Badge
-- Breadcrumb
-- Button
-- Calendar
-- Card
-- Carousel
-- Chart
-- Checkbox
-- Dialog
-- Drawer
-- Dropdown
-- Form
-- Input
-- Label
-- Menubar
-- Navigation Menu
-- Pagination
-- Popover
-- Progress
-- Radio Group
-- Scroll Area
-- Select
-- Sheet
-- Sidebar
-- Slider
-- Sonner
-- Switch
-- Table
-- Tabs
-- Textarea
-- Toast
-- Tooltip
-
-Estos componentes constituyen la base visual común utilizada por toda la plataforma.
+Todas las tablas están protegidas. Destacan las siguientes reglas estrictas:
+- **Lecturas (`SELECT`):** Filtradas obligatoriamente por la cláusula `municipality_id = auth.jwt() ->> 'municipality_id'` o validando el perfil.
+- **Escrituras/Actualizaciones (`INSERT`, `UPDATE`):** Reforzadas con la cláusula **`WITH CHECK`**. Esto prohíbe explícitamente que un administrador altere registros de usuarios de otros municipios, bloqueando fraudes y ataques BOLA.
 
 ---
 
-# 5. Hooks Personalizados
+# 7. Procedimientos Almacenados (RPC) y Triggers
 
-Actualmente el proyecto implementa los siguientes hooks propios:
+La lógica pesada y los extractores de datos están delegados a la capa de base de datos para minimizar la latencia de red.
 
-| Hook | Función |
-|-------|----------|
-| use-mobile | Detección de dispositivos móviles |
-| use-toast | Gestión centralizada de notificaciones |
-
-La mayor parte del comportamiento compartido de la aplicación se implementa mediante Context API en lugar de hooks personalizados.
+- **RPC `get_municipality_counts`:** Procedimiento PL/pgSQL que realiza la agregación de reclamos, usuarios y comercios en una sola transacción, eliminando el problema de saturación "N+1" del panel global ISA.
+- **Trigger `handle_new_user()`:** Disparador optimizado que intercepta la creación asíncrona de usuarios para inyectar correctamente el `dni` y `municipality_id` a la tabla `profiles` desde el objeto `new.raw_user_meta_data`.
 
 ---
 
-# 6. Biblioteca de Utilidades
+# 8. Edge Functions (Deno)
 
-La carpeta `src/lib` centraliza funciones auxiliares utilizadas por distintos módulos.
-
-Actualmente contiene:
-
-| Archivo | Función |
-|----------|----------|
-| analytics.ts | Métricas y analítica |
-| audit.ts | Registro de auditoría |
-| data.ts | Utilidades de datos |
-| format.ts | Formateo |
-| inscripciones.ts | Gestión de inscripciones |
-| isaReport.ts | Reportes ISA |
-| session.ts | Manejo de sesión |
-| utils.ts | Funciones generales |
+- **`invite-staff`:**
+  * **Objetivo:** Enviar enlaces mágicos a funcionarios municipales para unirse al Backoffice.
+  * **Seguridad (Hardening):** Evalúa el `callerMunicipality` cruzando el ID del emisor para prevenir ataques de escalada o sobreescritura (`onConflict`, `ignoreDuplicates: true`) sobre cuentas de otras intendencias.
 
 ---
 
-# 7. Arquitectura Backend
+# 9. Seguridad Perimetral y Despliegue (Vercel)
 
-La capa backend de MUNO se encuentra implementada íntegramente sobre Supabase.
+El proyecto se despliega sobre la infraestructura de Vercel. La arquitectura perimetral fue sellada mediante el archivo `vercel.json`, inyectando las siguientes cabeceras a toda petición entrante/saliente:
 
-Los servicios utilizados actualmente son:
-
-- PostgreSQL
-- Supabase Auth
-- Row Level Security (RLS)
-- Edge Functions
-- Storage
-- Realtime (habilitado por Supabase)
-
-Toda la lógica persistente se implementa mediante:
-
-- tablas SQL
-- funciones PL/pgSQL
-- triggers
-- políticas RLS
-- migraciones versionadas
-
-La evolución del esquema se encuentra registrada mediante migraciones SQL almacenadas en:
-
-supabase/migrations/
-
-Actualmente el proyecto dispone de más de veinte migraciones versionadas.
+1. **`Content-Security-Policy` (CSP):** Lista blanca de dominios permitidos (Supabase, Google Fonts) para prevenir inyecciones de código malicioso (XSS).
+2. **`X-Frame-Options: DENY`:** Bloqueo de secuestro de iFrames (Clickjacking).
+3. **`X-Content-Type-Options: nosniff`:** Prevención de ataques MIME-sniffing.
+4. **`Referrer-Policy: strict-origin-when-cross-origin`:** Privacidad de metadatos de navegación.
 
 ---
 
-# 8. Base de Datos
+# 10. Pipeline de Regresión (QA Automático)
 
-Motor:
-
-PostgreSQL
-
-Proveedor:
-
-Supabase
-
-El esquema principal utilizado por la aplicación es:
-
-public
-
-La autenticación utiliza el esquema:
-
-auth
-
-Los archivos del proyecto indican una arquitectura basada en migraciones, evitando modificaciones manuales sobre producción.
-
----
-
-# 9. Tablas Principales
-
-Durante la inspección del código se identifican inicialmente las siguientes tablas principales:
-
-| Tabla | Propósito |
-|---------|------------|
-| profiles | Información del usuario |
-| user_roles | Roles del sistema |
-| claims | Reclamos ciudadanos |
-| businesses | Comercios |
-| analytics_reports | Reportes ISA |
-| announcements | Banners públicos |
-
-El resto de las tablas será documentado conforme avance el relevamiento completo del esquema.
-
----
-
-# 10. Relaciones
-
-Las relaciones actualmente verificadas son:
-
-auth.users
-│
-├── profiles
-│
-├── user_roles
-│
-├── claims
-│
-├── analytics_reports
-│
-└── businesses
-
-Todas estas relaciones utilizan claves UUID.
-
-La autenticación depende del identificador generado por Supabase Auth.
-
----
-
-# 11. Triggers
-
-Actualmente fueron identificados los siguientes triggers:
-
-- handle_new_user
-- set_updated_at
-- businesses_auto_disable
-
-Los triggers permiten automatizar la creación de perfiles, mantener fechas de modificación y deshabilitar automáticamente comercios vencidos.
-
----
-
-# 12. Funciones SQL
-
-Durante la inspección inicial se identifican las siguientes funciones:
-
-- has_role()
-- handle_new_user()
-- set_updated_at()
-- businesses_auto_disable()
-
-Estas funciones implementan parte de la lógica de negocio directamente dentro de PostgreSQL.
-
----
-
-# 13. Row Level Security
-
-Todas las tablas principales operan bajo políticas RLS.
-
-Las políticas implementan controles de acceso para:
-
-- perfiles
-- reclamos
-- comercios
-- reportes
-- anuncios
-- roles
-
-La autorización depende de la función has_role() y de los roles asignados a cada usuario.
-
----
-
-# 14. Edge Functions
-
-Actualmente se identificó la siguiente Edge Function:
-
-invite-staff
-
-Su finalidad es gestionar el proceso de invitación de colaboradores municipales.
-
-La implementación completa será documentada durante el relevamiento funcional del backend.
-
----
+La arquitectura soporta integraciones continuas garantizadas a través de `Vitest`.
+- **`src/test/permissions.test.ts`:** Automatiza pruebas unitarias sobre el motor `can()`. Valida matemáticamente que un rol de vecino (`resident`) no pueda realizar acciones de intendente (`mayor`), y que los jefes de área (`area_manager`) estén limitados a su incumbencia (ej. Cultura).

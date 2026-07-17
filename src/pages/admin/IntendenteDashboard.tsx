@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, ElementType } from "react";
 import { Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
@@ -17,11 +17,15 @@ function SelectorAudienciaBanner() {
   const [saving, setSaving] = useState(false);
 
   const publish = async () => {
-    if (!title.trim() || !description.trim()) {
+    if (!title.trim() || !description.trim() || !user) {
       toast.error("Completá título y descripción");
       return;
     }
     setSaving(true);
+    
+    // Obtenemos el municipio para asegurar que el banner quede anclado a su jurisdicción
+    const { data: profile } = await supabase.from("profiles").select("municipality_id").eq("id", user.id).maybeSingle();
+    
     const { error } = await supabase.from("announcements").insert({
       title: title.trim(),
       description: description.trim(),
@@ -29,7 +33,9 @@ function SelectorAudienciaBanner() {
       color: "navy",
       enabled: true,
       tags: ["intendente"],
-    } as any);
+      municipality_id: profile?.municipality_id,
+    });
+    
     setSaving(false);
     if (error) {
       toast.error("No se pudo publicar: " + error.message);
@@ -98,7 +104,15 @@ function SelectorAudienciaBanner() {
   );
 }
 
-const Stat = ({ icon: Icon, label, value, color }: any) => (
+// Interfaz para limpiar el error de ESLint de tipo 'any'
+interface StatProps {
+  icon: ElementType;
+  label: string;
+  value: number;
+  color: string;
+}
+
+const Stat = ({ icon: Icon, label, value, color }: StatProps) => (
   <div className="bg-white rounded-[16px] border p-4">
     <div className="flex items-center justify-between">
       <div className="text-[10px] uppercase tracking-[0.18em] font-bold text-muted-foreground">{label}</div>
@@ -128,21 +142,50 @@ const STATUS_DOT: Record<string, string> = {
 };
 
 function AnalisisDeGestion() {
+  const { user } = useAuth();
   const [rows, setRows] = useState<ClaimRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<string>("");
 
   useEffect(() => {
-    supabase
-      .from("claims")
-      .select("id,area,status,created_at,resolved_at,category,description,resolution_note")
-      .order("created_at", { ascending: false })
-      .limit(500)
-      .then(({ data }) => {
-        setRows((data as ClaimRow[]) || []);
-        setLoading(false);
-      });
-  }, []);
+    let isMounted = true;
+    if (!user) return;
+
+    const fetchClaims = async () => {
+      try {
+        // Blindaje Multi-Tenant para la tabla de análisis
+        const { data: profile } = await supabase
+          .from("profiles")
+          .select("municipality_id")
+          .eq("id", user.id)
+          .maybeSingle();
+
+        const muniId = profile?.municipality_id;
+        if (!muniId || !isMounted) return;
+
+        const { data } = await supabase
+          .from("claims")
+          .select("id,area,status,created_at,resolved_at,category,description,resolution_note")
+          .eq("municipality_id", muniId)
+          .order("created_at", { ascending: false })
+          .limit(500);
+          
+        if (isMounted) {
+          setRows((data as ClaimRow[]) || []);
+          setLoading(false);
+        }
+      } catch (error) {
+        console.error("Error al cargar análisis de gestión:", error);
+        if (isMounted) setLoading(false);
+      }
+    };
+
+    fetchClaims();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [user]);
 
   const stats = useMemo(() => {
     const byArea: Record<string, { total: number; pendientes: number; cerrados: number; totalHrs: number; count: number }> = {};
@@ -328,16 +371,29 @@ function InformeEjecutivoMensual() {
 }
 
 export default function IntendenteDashboard() {
+  const { user } = useAuth();
   const [counts, setCounts] = useState({ claims: 0, businesses: 0, content: 0, banners: 0 });
 
   useEffect(() => {
+    if (!user) return;
     (async () => {
+      // Blindaje Multi-Tenant para las métricas globales
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("municipality_id")
+        .eq("id", user.id)
+        .maybeSingle();
+
+      const muniId = profile?.municipality_id;
+      if (!muniId) return;
+
       const [c1, c2, c3, c4] = await Promise.all([
-        supabase.from("claims").select("id", { count: "exact", head: true }),
-        supabase.from("businesses").select("id", { count: "exact", head: true }),
-        supabase.from("content_items").select("id", { count: "exact", head: true }),
-        supabase.from("announcements").select("id", { count: "exact", head: true }),
+        supabase.from("claims").select("id", { count: "exact", head: true }).eq("municipality_id", muniId),
+        supabase.from("businesses").select("id", { count: "exact", head: true }).eq("municipality_id", muniId),
+        supabase.from("content_items").select("id", { count: "exact", head: true }).eq("municipality_id", muniId),
+        supabase.from("announcements").select("id", { count: "exact", head: true }).eq("municipality_id", muniId),
       ]);
+      
       setCounts({
         claims: c1.count || 0,
         businesses: c2.count || 0,
@@ -345,7 +401,7 @@ export default function IntendenteDashboard() {
         banners: c4.count || 0,
       });
     })();
-  }, []);
+  }, [user]);
 
   return (
     <div className="space-y-6">

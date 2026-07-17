@@ -64,9 +64,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const loadRoles = async (uid: string) => {
-    const { data } = await supabase.from("user_roles").select("role,area").eq("user_id", uid);
-    const rows = (data || []) as any[];
-    setRoles(rows.map((r) => r.role) as AppRole[]);
+    const { data } = await supabase
+      .from("user_roles")
+      .select("role, area")
+      .eq("user_id", uid)
+      .eq("active", true); // Corrección quirúrgica P0: impide bypass de roles inactivos
+
+    // Tipado estricto para eliminar el error de 'any'
+    const rows = (data || []) as { role: AppRole; area: string | null }[];
+    
+    setRoles(rows.map((r) => r.role));
     const mgr = rows.find((r) => r.role === "area_manager" && r.area);
     setArea(mgr?.area ?? null);
   };
@@ -82,11 +89,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 }
 
+// Silenciamos la advertencia de react-refresh de forma segura para las exportaciones del Contexto
+// eslint-disable-next-line react-refresh/only-export-components
 export const useAuth = () => useContext(Ctx);
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function routeForRoles(roles: AppRole[]): string {
   if (roles.includes("isa_super_admin")) return "/isa/global";
   if (roles.includes("isa_consultant")) return "/isa/panel";
-  if (roles.includes("admin") || roles.includes("area_manager") || roles.includes("mayor") || roles.includes("tourism_chief")) return "/admin/dashboard";
+  if (
+    roles.includes("admin") || 
+    roles.includes("area_manager") || 
+    roles.includes("mayor") || 
+    roles.includes("tourism_chief")
+  ) return "/admin/dashboard";
+  
   return "/";
 }

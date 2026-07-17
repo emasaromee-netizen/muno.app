@@ -10,6 +10,30 @@ type Role = "area_manager" | "tourism_chief" | "mayor" | "resident" | "admin";
 
 const HIERARCHY_ROLES: Role[] = ["area_manager", "tourism_chief", "mayor", "admin"];
 
+// Interfaces estrictas para eliminar los 'any'
+interface DBUserRole {
+  id?: string;
+  role: string;
+  area: string | null;
+  municipality_id: string | null;
+}
+
+interface InsertRolePayload {
+  user_id: string;
+  role: Role;
+  area: string | null;
+  active: boolean;
+  municipality_id?: string;
+}
+
+interface ProfileUpsert {
+  id: string;
+  email: string;
+  full_name: string;
+  dni: string;
+  municipality_id?: string;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
@@ -43,18 +67,18 @@ Deno.serve(async (req) => {
     if (!["area_manager", "tourism_chief", "mayor", "resident"].includes(role)) return json({ error: "Rol inválido" }, 400);
 
     // Get caller roles + area
-    const { data: callerRoles } = await admin
+    const { data: callerRolesData } = await admin
       .from("user_roles")
       .select("role,area,municipality_id")
       .eq("user_id", caller.id);
 
-    const callerRoleNames = (callerRoles || []).map((r: any) => r.role) as string[];
+    const callerRoles = (callerRolesData || []) as DBUserRole[];
+    const callerRoleNames = callerRoles.map((r) => r.role);
     const isAdmin = callerRoleNames.includes("admin");
     const isMayor = callerRoleNames.includes("mayor");
     const isAreaMgr = callerRoleNames.includes("area_manager");
-    const callerArea = (callerRoles || []).find((r: any) => r.role === "area_manager")?.area || null;
-    const callerMunicipality =
-      (callerRoles || []).find((r: any) => r.municipality_id)?.municipality_id || null;
+    const callerArea = callerRoles.find((r) => r.role === "area_manager")?.area || null;
+    const callerMunicipality = callerRoles.find((r) => r.municipality_id)?.municipality_id || null;
 
     // Authorization: hierarchy
     if (HIERARCHY_ROLES.includes(role)) {
@@ -76,19 +100,24 @@ Deno.serve(async (req) => {
     let userId: string | null = null;
     const { data: existingProfile } = await admin
       .from("profiles")
-      .select("id")
+      .select("id, municipality_id, dni")
       .eq("email", email)
       .maybeSingle();
 
     if (existingProfile?.id) {
       userId = existingProfile.id;
+      
+      // SOLUCIÓN BOLA P1: Impedir alteración de perfiles inter-municipios
+      if (existingProfile.municipality_id && callerMunicipality && existingProfile.municipality_id !== callerMunicipality) {
+        return json({ error: "El usuario ya pertenece a otra jurisdicción municipal" }, 403);
+      }
     } else {
       // Create auth user with DNI as provisional password
       const { data: created, error: createErr } = await admin.auth.admin.createUser({
         email,
         password: dni,
         email_confirm: true,
-        user_metadata: { full_name: fullName },
+        user_metadata: { full_name: fullName, dni, municipality_id: callerMunicipality },
       });
       if (createErr || !created?.user) {
         return json({ error: "No se pudo crear el usuario: " + (createErr?.message || "desconocido") }, 400);
@@ -96,40 +125,46 @@ Deno.serve(async (req) => {
       userId = created.user.id;
     }
 
-    // Upsert profile (name, dni, municipality)
+    // Upsert profile (name, dni, municipality) - Seguro con ignoreDuplicates
+    const profilePayload: ProfileUpsert = {
+      id: userId,
+      email,
+      full_name: fullName,
+      dni,
+    };
+    if (callerMunicipality) {
+      profilePayload.municipality_id = callerMunicipality;
+    }
+
     await admin
       .from("profiles")
-      .upsert(
-        {
-          id: userId,
-          email,
-          full_name: fullName,
-          dni,
-          ...(callerMunicipality ? { municipality_id: callerMunicipality } : {}),
-        } as any,
-        { onConflict: "id" },
-      );
+      .upsert(profilePayload, { onConflict: "id", ignoreDuplicates: true });
 
     // Insert user_roles (avoid duplicate role+user)
-    const { data: existingRole } = await admin
+    const { data: existingRoleData } = await admin
       .from("user_roles")
       .select("id")
       .eq("user_id", userId)
-      .eq("role", role as any)
+      .eq("role", role)
       .maybeSingle();
 
+    const existingRole = existingRoleData as { id: string } | null;
+
     if (!existingRole) {
-      const insertPayload: any = {
+      const insertPayload: InsertRolePayload = {
         user_id: userId,
         role,
         area: HIERARCHY_ROLES.includes(role) || role === "resident" ? area : null,
         active: true,
       };
-      if (callerMunicipality) insertPayload.municipality_id = callerMunicipality;
+      if (callerMunicipality) {
+        insertPayload.municipality_id = callerMunicipality;
+      }
+      
       const { error: roleErr } = await admin.from("user_roles").insert(insertPayload);
       if (roleErr) return json({ error: "No se pudo asignar el rol: " + roleErr.message }, 400);
     } else if (area) {
-      await admin.from("user_roles").update({ area, active: true } as any).eq("id", existingRole.id);
+      await admin.from("user_roles").update({ area, active: true }).eq("id", existingRole.id);
     }
 
     return json({
@@ -138,8 +173,9 @@ Deno.serve(async (req) => {
       provisional_password: dni,
       message: `Usuario habilitado. Credenciales: ${email} / ${dni}`,
     });
-  } catch (e: any) {
-    return json({ error: e?.message || "Error interno" }, 500);
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "Error interno";
+    return json({ error: message }, 500);
   }
 });
 

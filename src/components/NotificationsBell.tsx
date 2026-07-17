@@ -11,6 +11,7 @@ type Notif = {
   link: string | null;
   audience: string;
   created_at: string;
+  user_id?: string | null;
 };
 
 const STORAGE_KEY = "muno.guest.notif.reads";
@@ -22,6 +23,7 @@ function getGuestReads(): string[] {
     return [];
   }
 }
+
 function addGuestRead(id: string) {
   const arr = getGuestReads();
   if (!arr.includes(id)) {
@@ -38,52 +40,67 @@ export default function NotificationsBell() {
   const [readIds, setReadIds] = useState<Set<string>>(new Set());
   const ref = useRef<HTMLDivElement>(null);
 
- const isResident =
-  roles.includes("resident") ||
-  roles.includes("admin") ||
-  roles.includes("mayor") ||
-  roles.includes("tourism_chief") ||
-  roles.includes("area_manager") ||
-  roles.includes("isa_super_admin") ||
-  roles.includes("isa_consultant");
+  const isResident =
+    roles.includes("resident") ||
+    roles.includes("admin") ||
+    roles.includes("mayor") ||
+    roles.includes("tourism_chief") ||
+    roles.includes("area_manager") ||
+    roles.includes("isa_super_admin") ||
+    roles.includes("isa_consultant");
 
-const audienceFilter = isResident
-  ? ["residents", "both"]
-  : ["tourists", "both"];
-
-  const load = async () => {
-    let query = supabase
-      .from("notifications")
-      .select("id,title,body,link,audience,created_at,user_id" as any)
-      .order("created_at", { ascending: false })
-      .limit(30);
-    if (user) {
-      query = query.or(`user_id.eq.${user.id},and(user_id.is.null,audience.in.(${audienceFilter.join(",")}))`);
-    } else {
-      query = query.is("user_id", null).in("audience", audienceFilter);
-    }
-    const { data } = await query;
-    setItems((data as any) || []);
-
-    if (user) {
-      const { data: reads } = await supabase
-        .from("notification_reads" as any)
-        .select("notification_id")
-        .eq("user_id", user.id);
-      setReadIds(new Set((reads || []).map((r: any) => r.notification_id)));
-    } else {
-      setReadIds(new Set(getGuestReads()));
-    }
-  };
+  const audienceFilter = isResident
+    ? ["residents", "both"]
+    : ["tourists", "both"];
 
   useEffect(() => {
+    let isMounted = true; // Escudo protector contra fugas de memoria
+
+    const load = async () => {
+      let query = supabase
+        .from("notifications")
+        .select("id,title,body,link,audience,created_at,user_id")
+        .order("created_at", { ascending: false })
+        .limit(30);
+
+      if (user) {
+        query = query.or(`user_id.eq.${user.id},and(user_id.is.null,audience.in.(${audienceFilter.join(",")}))`);
+      } else {
+        query = query.is("user_id", null).in("audience", audienceFilter);
+      }
+      
+      const { data } = await query;
+      
+      if (isMounted) {
+        setItems((data as Notif[]) || []);
+      }
+
+      if (user && isMounted) {
+        const { data: reads } = await supabase
+          .from("notification_reads")
+          .select("notification_id")
+          .eq("user_id", user.id);
+          
+        if (isMounted) {
+          setReadIds(new Set((reads || []).map((r: { notification_id: string }) => r.notification_id)));
+        }
+      } else if (isMounted) {
+        setReadIds(new Set(getGuestReads()));
+      }
+    };
+
     load();
+
     const ch = supabase
       .channel("notif_bell")
-      .on("postgres_changes", { event: "*", schema: "public", table: "notifications" }, () => load())
+      .on("postgres_changes", { event: "*", schema: "public", table: "notifications" }, () => {
+        if (isMounted) load();
+      })
       .subscribe();
+
     return () => {
-      supabase.removeChannel(ch);
+      isMounted = false; // Bloquea actualizaciones de estado si el componente se desmonta
+      supabase.removeChannel(ch); // Cierra el WebSocket de Supabase
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, roles]);
@@ -102,9 +119,9 @@ const audienceFilter = isResident
   const markRead = async (id: string) => {
     setReadIds((s) => new Set(s).add(id));
     if (user) {
-      await supabase.from("notification_reads" as any).upsert(
+      await supabase.from("notification_reads").upsert(
         { user_id: user.id, notification_id: id },
-        { onConflict: "user_id,notification_id" } as any,
+        { onConflict: "user_id,notification_id" }
       );
     } else {
       addGuestRead(id);
@@ -120,10 +137,10 @@ const audienceFilter = isResident
     });
     if (user && ids.length) {
       await supabase
-        .from("notification_reads" as any)
+        .from("notification_reads")
         .upsert(
           ids.map((id) => ({ user_id: user.id, notification_id: id })),
-          { onConflict: "user_id,notification_id" } as any,
+          { onConflict: "user_id,notification_id" }
         );
     } else {
       ids.forEach(addGuestRead);
@@ -133,7 +150,10 @@ const audienceFilter = isResident
   const onItemClick = async (n: Notif) => {
     await markRead(n.id);
     if (n.link) {
-      if (n.link.startsWith("http") || n.link.startsWith("tel:") || n.link.startsWith("mailto:")) {
+      // SOLUCIÓN: Preservar SPA abriendo http en nueva pestaña
+      if (n.link.startsWith("http")) {
+        window.open(n.link, "_blank", "noopener,noreferrer");
+      } else if (n.link.startsWith("tel:") || n.link.startsWith("mailto:")) {
         window.location.href = n.link;
       } else {
         nav(n.link);

@@ -11,7 +11,6 @@ import FavoriteButton from "@/components/FavoriteButton";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
 
-// --- TIPOS E INTERFACES ESTRICTAS ---
 const TABS_VECINO = ["Lugares", "Saltos", "Museos", "Cultural", "Gastronomía", "Agenda"] as const;
 const TABS_TURISTA = ["Comercio", "Gastronomía", "Hospedaje"] as const;
 const AGENDA_CATS: AgendaCategory[] = ["Hoy", "Fin de Semana", "Conciertos"];
@@ -65,7 +64,6 @@ interface AgendaItem {
   category: string;
 }
 
-// --- COMPONENTES AUXILIARES ---
 const InfoLine = ({ icon: Icon, children }: { icon: ElementType; children: ReactNode }) => (
   <div className="flex items-start gap-1.5 text-[11px] text-muted-foreground">
     <Icon strokeWidth={1.5} className="w-3 h-3 mt-0.5 shrink-0" />
@@ -123,12 +121,10 @@ const LodgingCard = ({ item, onConsultar }: { item: LodgingItem; onConsultar: (i
   );
 };
 
-// Utilidad genérica para evitar 'any' en el filtrado
 function filterByZoneAndQuery<T extends { zone?: string; name: string }>(items: T[], zone: Zone, q: string): T[] {
   return items.filter((i) => (zone === "Todas" || i.zone === zone) && i.name.toLowerCase().includes(q.toLowerCase()));
 }
 
-// Componente Grid fuertemente tipado
 function Grid<T>({ items, render, cols = 3 }: { items: T[]; render: (item: T) => ReactNode; cols?: number }) {
   if (!items.length) return <p className="text-sm text-muted-foreground text-center py-6">Sin resultados.</p>;
   return <div className={`grid grid-cols-1 sm:grid-cols-2 ${cols === 2 ? "lg:grid-cols-2" : "lg:grid-cols-3"} gap-4`}>{items.map(render)}</div>;
@@ -136,17 +132,17 @@ function Grid<T>({ items, render, cols = 3 }: { items: T[]; render: (item: T) =>
 
 export default function Turismo() {
   const { user, roles } = useAuth();
-  const { municipality, setMunicipality } = useMunicipality();
+  const { municipality, municipalityId, setMunicipality } = useMunicipality();
   const isTurista = roles.includes("tourist");
   
-  // Tipado estricto para las tabs dependiendo del rol
-  const TABS = isTurista ? TABS_TURISTA : (TABS_VECINO as readonly string[]);
+  // Tipado estricto sin "as any" o "as readonly string[]"
+  const TABS: readonly TabType[] = isTurista ? TABS_TURISTA : TABS_VECINO;
   
   const [params, setParams] = useSearchParams();
   const urlZone = params.get("zone") as Zone | null;
   const initialZone: Zone = (urlZone || (municipality as Zone) || "Todas") as Zone;
   
-  const [tab, setTab] = useState<TabType>(TABS[0] as TabType);
+  const [tab, setTab] = useState<TabType>(TABS[0]);
   const [zone, setZone] = useState<Zone>(initialZone);
   const [q, setQ] = useState("");
   const [agendaCat, setAgendaCat] = useState<AgendaCategory>("Hoy");
@@ -173,25 +169,24 @@ export default function Turismo() {
     setParams({});
   };
 
+  // Optimización total de memoria: Todos los filtros memorizados
   const allPlaces = useMemo(() => filterByZoneAndQuery(places, zone, q), [zone, q]);
-  const saltos = allPlaces.filter((p) => p.type === "Salto");
-  const museos = allPlaces.filter((p) => p.type === "Museo");
-  const culturales = allPlaces.filter((p) => p.type === "Cultural");
-  const gastro = filterByZoneAndQuery(gastronomy, zone, q);
-  const com = filterByZoneAndQuery(commerces, zone, q);
-  const lodg = filterByZoneAndQuery(lodging, zone, q);
+  const saltos = useMemo(() => allPlaces.filter((p) => p.type === "Salto"), [allPlaces]);
+  const museos = useMemo(() => allPlaces.filter((p) => p.type === "Museo"), [allPlaces]);
+  const culturales = useMemo(() => allPlaces.filter((p) => p.type === "Cultural"), [allPlaces]);
+  const gastro = useMemo(() => filterByZoneAndQuery(gastronomy, zone, q), [zone, q]);
+  const com = useMemo(() => filterByZoneAndQuery(commerces, zone, q), [zone, q]);
+  const lodg = useMemo(() => filterByZoneAndQuery(lodging, zone, q), [zone, q]);
   
   const agendaFiltered = useMemo(() => {
     return agenda.filter((a) => a.category === agendaCat && (zone === "Todas" || a.zone === zone));
   }, [agendaCat, zone]);
 
-  // Estados tipados para BD
   const [dbLugares, setDbLugares] = useState<PlaceItem[]>([]);
   const [dbAgenda, setDbAgenda] = useState<DBTurismoItem[]>([]);
 
-  // SOLUCIÓN QUIRÚRGICA: Fetch unificado sin dependencias innecesarias
   useEffect(() => {
-    let isMounted = true; // Prevención de Memory Leaks para móviles
+    let isMounted = true; 
 
     const fetchTurismo = async () => {
       try {
@@ -200,9 +195,9 @@ export default function Turismo() {
           const { data: prof } = await supabase.from("profiles").select("municipality_id").eq("id", user.id).maybeSingle();
           munId = prof?.municipality_id ?? null;
         }
+        
         if (!munId && zone && zone !== "Todas") {
-          const { data: m } = await supabase.from("municipalities").select("id").eq("name", zone).maybeSingle();
-          munId = m?.id ?? null;
+          munId = municipalityId || null;
         }
 
         let qLugares = supabase.from("content_items").select("*").eq("published", true).eq("kind", "Lugar").order("created_at", { ascending: false });
@@ -216,10 +211,10 @@ export default function Turismo() {
         const [resLugares, resEv] = await Promise.all([qLugares, qEv]);
 
         if (isMounted) {
-          const lugData = resLugares.data || [];
-          const evData = resEv.data || [];
+          const lugData = (resLugares.data as unknown as DBTurismoItem[]) || [];
+          const evData = (resEv.data as unknown as DBTurismoItem[]) || [];
 
-          setDbLugares(lugData.map((it: DBTurismoItem) => ({
+          setDbLugares(lugData.map((it) => ({
             id: it.id, 
             name: it.title, 
             type: it.category || it.type || "Lugar",
@@ -232,7 +227,6 @@ export default function Turismo() {
             how_to_get: "#",
           })));
 
-          // Guardamos los datos crudos, SIN mutar la categoría por la pestaña activa
           setDbAgenda(evData); 
         }
       } catch (err) {
@@ -245,11 +239,10 @@ export default function Turismo() {
     return () => {
       isMounted = false;
     };
-  }, [user?.id, zone]); // 'agendaCat' REMOVIDO correctamente
+  }, [user?.id, zone, municipalityId]);
 
   const lugaresAll = [...dbLugares, ...allPlaces];
   
-  // Mapeo reactivo en memoria combinando BD y Mocks
   const agendaAll = useMemo(() => {
     const dbMapped: AgendaItem[] = dbAgenda.map((it) => ({
       id: it.id, 
@@ -323,7 +316,7 @@ export default function Turismo() {
       ) : (
         <div className="flex flex-wrap gap-2">
           {TABS.map((t) => (
-            <button key={t} onClick={() => setTab(t as TabType)} className={`px-3 py-1.5 rounded-[20px] text-xs font-bold transition-colors min-h-[36px] ${tab === t ? "bg-isa-navy text-isa-white" : "bg-card text-isa-navy hover:bg-muted border"}`}>{t}</button>
+            <button key={t} onClick={() => setTab(t)} className={`px-3 py-1.5 rounded-[20px] text-xs font-bold transition-colors min-h-[36px] ${tab === t ? "bg-isa-navy text-isa-white" : "bg-card text-isa-navy hover:bg-muted border"}`}>{t}</button>
           ))}
         </div>
       )}

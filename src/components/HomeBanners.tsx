@@ -1,9 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { AlertTriangle, ArrowRight, X, MapPin, Phone, CalendarDays, Clock } from "lucide-react";
+import { AlertTriangle, ArrowRight, X, MapPin, Phone, CalendarDays, Clock, type LucideIcon } from "lucide-react";
 import { useBanners, COLOR_BG, type CustomBanner } from "@/context/BannersContext";
 
 type Audience = "vecino" | "turista" | "all";
+
+// Tipado extendido para evitar "any"
+type ExtendedBanner = CustomBanner & { 
+  audience?: string; 
+  meta?: { 
+    schedule?: string; 
+    zones?: string; 
+  } 
+};
 
 const VECINO_TAGS = ["comunidad", "cultura", "deporte", "noticias_municipales"];
 const EXCLUDE_FOR_VECINO = ["hospedaje_turistico"];
@@ -29,18 +38,22 @@ export default function HomeBanners({ audience = "vecino" }: { audience?: Audien
 
   const slides = useMemo(() => {
     const audienceMatch = (b: CustomBanner) => {
-      const aud = (b as any).audience as string | undefined;
+      const extendedBanner = b as ExtendedBanner;
+      const aud = extendedBanner.audience;
       if (!aud) return audience === "vecino"; // legacy default = residents
       if (audience === "turista") return aud === "tourists" || aud === "both";
       return aud === "residents" || aud === "both";
     };
+    
     const enabled = banners.filter((b) => b.enabled !== false).filter(audienceMatch);
+    
     if (audience === "turista") {
       // Banner MUNO (navy) + cualquiera marcado para turistas
       const muno = banners.filter((b) => b.enabled !== false && b.color === "navy");
       const merged = [...muno, ...enabled.filter((b) => b.color !== "navy")];
       return merged.sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0));
     }
+    
     const filtered = enabled.filter((b) => {
       const tags = b.tags || [];
       if (audience === "vecino") {
@@ -50,6 +63,7 @@ export default function HomeBanners({ audience = "vecino" }: { audience?: Audien
       }
       return true;
     });
+    
     return filtered.sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0));
   }, [banners, audience]);
 
@@ -141,28 +155,37 @@ function BannerModal({
   onClose: () => void;
   navigate: (to: string) => void;
 }) {
-  const isAlert = banner.color === "red";
-  const ctaLabel = banner.cta || (isAlert ? "Más información" : "Ver detalle");
-  const ctaTo = banner.ctaTo;
+  const extendedBanner = banner as ExtendedBanner;
+  const isAlert = extendedBanner.color === "red";
+  const ctaLabel = extendedBanner.cta || (isAlert ? "Más información" : "Ver detalle");
+  const ctaTo = extendedBanner.ctaTo;
 
-  // Heurística para botón de acción según destino
-  let actionIcon: any = ArrowRight;
+  // Heurística para botón de acción según destino con tipado estricto LucideIcon
+  let actionIcon: LucideIcon = ArrowRight;
   let actionLabel = ctaLabel;
+  
   if (ctaTo?.startsWith("tel:")) { actionIcon = Phone; actionLabel = "Llamar ahora"; }
   else if (ctaTo?.startsWith("http") && ctaTo.includes("google.com/maps")) { actionIcon = MapPin; actionLabel = "Ir a Google Maps"; }
   else if (ctaTo === "/eventos") { actionIcon = CalendarDays; actionLabel = "Ver Agenda"; }
 
   const onAction = () => {
     if (!ctaTo) return onClose();
-    if (ctaTo.startsWith("http") || ctaTo.startsWith("tel:") || ctaTo.startsWith("mailto:")) {
+    
+    // OPTIMIZACIÓN: Abrir enlaces HTTP en pestaña nueva para no matar la SPA.
+    // tel: y mailto: se manejan nativamente sin romper el navegador.
+    if (ctaTo.startsWith("http")) {
+      window.open(ctaTo, "_blank", "noopener,noreferrer");
+    } else if (ctaTo.startsWith("tel:") || ctaTo.startsWith("mailto:")) {
       window.location.href = ctaTo;
     } else {
       navigate(ctaTo);
     }
+    
     onClose();
   };
 
   const Icon = actionIcon;
+  const meta = extendedBanner.meta;
 
   return (
     <div
@@ -183,8 +206,8 @@ function BannerModal({
           <X strokeWidth={2} className="w-4 h-4" />
         </button>
 
-        {banner.image && (
-          <img src={banner.image} alt={banner.title} className="w-full h-52 object-cover" />
+        {extendedBanner.image && (
+          <img src={extendedBanner.image} alt={extendedBanner.title} className="w-full h-52 object-cover" />
         )}
 
         <div className="p-5 space-y-3">
@@ -195,30 +218,31 @@ function BannerModal({
               </span>
             )}
             <span className="text-[10px] uppercase tracking-[0.22em] font-bold text-isa-navy/70">
-              {isAlert ? "Aviso de Servicio" : banner.color === "emerald" ? "Cultura · Deporte" : "Novedad"}
+              {isAlert ? "Aviso de Servicio" : extendedBanner.color === "emerald" ? "Cultura · Deporte" : "Novedad"}
             </span>
           </div>
 
           <h3 className="font-display font-extrabold text-isa-navy text-[22px] leading-tight">
-            {banner.title}
+            {extendedBanner.title}
           </h3>
 
           <p className="text-[14px] text-isa-navy/80 leading-relaxed whitespace-pre-line">
-            {banner.description}
+            {extendedBanner.description}
           </p>
 
-          {isAlert && (banner as any).meta && (
+          {/* Bloque limpio y tipado para la metadata (horarios y zonas) */}
+          {isAlert && meta && (
             <div className="rounded-[12px] bg-white p-3 border border-isa-navy/10 space-y-1.5">
-              {(banner as any).meta?.schedule && (
+              {meta.schedule && (
                 <div className="flex items-center gap-2 text-[13px] text-isa-navy">
                   <Clock strokeWidth={1.5} className="w-4 h-4" />
-                  <span><strong>Horario:</strong> {(banner as any).meta.schedule}</span>
+                  <span><strong>Horario:</strong> {meta.schedule}</span>
                 </div>
               )}
-              {(banner as any).meta?.zones && (
+              {meta.zones && (
                 <div className="flex items-start gap-2 text-[13px] text-isa-navy">
                   <MapPin strokeWidth={1.5} className="w-4 h-4 mt-0.5" />
-                  <span><strong>Zonas afectadas:</strong> {(banner as any).meta.zones}</span>
+                  <span><strong>Zonas afectadas:</strong> {meta.zones}</span>
                 </div>
               )}
             </div>

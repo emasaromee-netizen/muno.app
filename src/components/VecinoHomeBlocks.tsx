@@ -141,7 +141,7 @@ function NewsBlock({ slides, onOpen }: { slides: Banner[]; onOpen: (b: Banner) =
         <div className="flex items-center justify-center gap-1.5 mt-3">
           {slides.map((_, i) => (
             <button
-              key={i}
+              key={`slide-dot-${i}`}
               onClick={() => emblaApi?.scrollTo(i)}
               aria-label={`Slide ${i + 1}`}
               className={`h-1.5 rounded-full transition-all ${i === selected ? "w-6" : "w-1.5"}`}
@@ -159,22 +159,22 @@ function NewsBlock({ slides, onOpen }: { slides: Banner[]; onOpen: (b: Banner) =
   );
 }
 
-/* (Bloque de emergencia eliminado: ahora se integra al carrusel) */
-
 /* ========== MODAL "VER MÁS" ========== */
 function DetailModal({ banner, onClose }: { banner: Banner; onClose: () => void }) {
   const navigate = useNavigate();
+  
   const onAction = () => {
     if (!banner.cta_to) return onClose();
-    if (
-      banner.cta_to.startsWith("http") ||
-      banner.cta_to.startsWith("tel:") ||
-      banner.cta_to.startsWith("mailto:")
-    ) {
+    
+    // SOLUCIÓN: Preservar SPA abriendo http en nueva pestaña
+    if (banner.cta_to.startsWith("http")) {
+      window.open(banner.cta_to, "_blank", "noopener,noreferrer");
+    } else if (banner.cta_to.startsWith("tel:") || banner.cta_to.startsWith("mailto:")) {
       window.location.href = banner.cta_to;
     } else {
       navigate(banner.cta_to);
     }
+    
     onClose();
   };
 
@@ -225,14 +225,29 @@ export default function VecinoHomeBlocks() {
   const [open, setOpen] = useState<Banner | null>(null);
 
   useEffect(() => {
-    (async () => {
-      const { data } = await supabase
-        .from("announcements")
-        .select("id,title,description,image_url,cta_label,cta_to,tags,color,enabled,order_index")
-        .eq("enabled", true)
-        .order("order_index", { ascending: true });
-      setBanners((data || []) as Banner[]);
-    })();
+    let isMounted = true; // Control de Memory Leak
+
+    const fetchBanners = async () => {
+      try {
+        const { data } = await supabase
+          .from("announcements")
+          .select("id,title,description,image_url,cta_label,cta_to,tags,color,enabled,order_index")
+          .eq("enabled", true)
+          .order("order_index", { ascending: true });
+
+        if (isMounted) {
+          setBanners((data || []) as Banner[]);
+        }
+      } catch (error) {
+        console.error("Error al obtener banners:", error);
+      }
+    };
+
+    fetchBanners();
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   const allowedNonAlert = banners.filter((b) => {

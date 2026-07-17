@@ -34,16 +34,23 @@ export default function WifiAccess() {
     if (!valid) return;
     setBusy(true);
     const finalOrigin = isOther ? `Otro · ${originOther.trim()}` : origin;
+    
     track({ kind: "wifi_lead", origin: finalOrigin, meta: { name, email, source: "wifi-access" } });
-    try {
-      await supabase.from("tourist_leads").insert({
-        name,
-        origin: finalOrigin,
-        email,
-        source: "wifi_lead",
-        meta: { ssid: MUNI_SSID, origin_other: isOther ? originOther.trim() : null },
-      });
-    } catch (_) {}
+    
+    // SOLUCIÓN: Eliminamos el try/catch vacío y manejamos el error correctamente
+    const { error } = await supabase.from("tourist_leads").insert({
+      name,
+      origin: finalOrigin,
+      email,
+      source: "wifi_lead",
+      meta: { ssid: MUNI_SSID, origin_other: isOther ? originOther.trim() : null },
+    });
+
+    if (error) {
+      console.error("Error al registrar el lead de WiFi:", error.message);
+      // Nota: No bloqueamos el acceso al WiFi aunque falle el registro en la BD
+    }
+    
     setBusy(false);
     setRevealed(true);
   };

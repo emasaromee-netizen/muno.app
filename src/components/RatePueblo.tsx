@@ -4,6 +4,9 @@ import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
 import { useMunicipality } from "@/context/MunicipalityContext";
 import { toast } from "sonner";
+import type { Database } from "@/integrations/supabase/types";
+
+type InsertRating = Database["public"]["Tables"]["tourist_ratings"]["Insert"];
 
 export default function RatePueblo() {
   const { user } = useAuth();
@@ -25,13 +28,18 @@ export default function RatePueblo() {
       const { data: m } = await supabase.from("municipalities").select("id").eq("name", municipality).maybeSingle();
       municipality_id = m?.id || null;
     }
-    const { error } = await (supabase.from("tourist_ratings") as any).insert({
+    
+    const payload: InsertRating = {
       municipality_id,
       user_id: user?.id || null,
       rating,
       comment: comment.trim() || null,
-    });
+    };
+
+    const { error } = await supabase.from("tourist_ratings").insert(payload);
+    
     setSaving(false);
+    
     if (error) {
       toast.error("No se pudo enviar la valoración");
     } else {

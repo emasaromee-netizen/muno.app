@@ -1,8 +1,8 @@
 import { useParams, Link } from "react-router-dom";
 import { type Area } from "@/data/mock";
-import { Music2, Compass, Trophy, AlertTriangle, Users, FileEdit, Layout, Store } from "lucide-react";
+import { Music2, Compass, Trophy, AlertTriangle, Users, FileEdit, Layout, Store, type LucideIcon } from "lucide-react";
 
-const ICONS: Record<Area, any> = { Cultura: Music2, Turismo: Compass, Deporte: Trophy, Infraestructura: AlertTriangle, Comercios: Store };
+const ICONS: Record<Area, LucideIcon> = { Cultura: Music2, Turismo: Compass, Deporte: Trophy, Infraestructura: AlertTriangle, Comercios: Store };
 const COLORS: Record<Area, string> = { Cultura: "hsl(var(--isa-navy))", Turismo: "hsl(var(--muno-blue))", Deporte: "hsl(var(--muno-teal))", Infraestructura: "hsl(var(--muno-red))", Comercios: "hsl(var(--muno-amber))" };
 
 const SHORTCUTS: Record<Area, { to: string; label: string }[]> = {

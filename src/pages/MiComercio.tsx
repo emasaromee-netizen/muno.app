@@ -1,7 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import { z } from "zod";
-import { reservations as initialReservations } from "@/data/mock";
-import { CheckCircle2, Store, AlertTriangle, Calendar, Camera, X, Plus, MapPin, Compass, Users } from "lucide-react";
+import { CheckCircle2, Store, AlertTriangle, Calendar, Camera, X, Plus, MapPin, Compass, Users, Loader2 } from "lucide-react";
 import { formatARS } from "@/lib/format";
 import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/integrations/supabase/client";
@@ -10,7 +9,6 @@ import { toast } from "sonner";
 const ALL_TABS = ["Datos", "Habilitaciones", "Pagos", "Fotos", "Reservas"] as const;
 const RESERVAS_CATEGORIES = ["Gastronomía", "Hospedaje"];
 
-// Categorías y a qué perfil de la app llegan
 const CATEGORIES = [
   { value: "Gastronomía", audience: "vecino+turista", hint: "Aparece en Guía Vecinal y Turismo" },
   { value: "Farmacia", audience: "vecino", hint: "Aparece solo en Guía Vecinal" },
@@ -29,6 +27,14 @@ const businessSchema = z.object({
   schedule: z.string().trim().max(200, "Máx. 200 caracteres").optional(),
 });
 
+interface Reservation {
+  id: string;
+  guest: string;
+  date: string;
+  nights: number;
+  status: string;
+}
+
 export default function MiComercio() {
   const { user } = useAuth();
   const [tab, setTab] = useState<(typeof ALL_TABS)[number]>("Datos");
@@ -46,28 +52,68 @@ export default function MiComercio() {
     "https://images.unsplash.com/photo-1587061949409-02df41d5e562?w=800",
   ]);
   const fileRef = useRef<HTMLInputElement>(null);
-  const [reservations, setReservations] = useState(initialReservations);
+  
+  const [reservations, setReservations] = useState<Reservation[]>([]);
   const [newRes, setNewRes] = useState({ guest: "", date: "", nights: 1 });
+  const [loadingReservations, setLoadingReservations] = useState(false);
+  const [savingRes, setSavingRes] = useState(false);
 
-  // Cargar comercio existente del usuario
+  // Candado síncrono para evitar dobles envíos accidentales
+  const isSubmitting = useRef(false);
+
+  // Efecto blindado contra Memory Leaks y sin advertencias de dependencias
   useEffect(() => {
+    let isMounted = true;
     if (!user) return;
-    supabase
-      .from("businesses")
-      .select("*")
-      .eq("owner_id", user.id)
-      .order("updated_at", { ascending: false })
-      .limit(1)
-      .maybeSingle()
-      .then(({ data }) => {
-        if (!data) return;
+
+    const fetchBusiness = async () => {
+      try {
+        const { data } = await supabase
+          .from("businesses")
+          .select("*")
+          .eq("owner_id", user.id)
+          .order("updated_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (!isMounted || !data) return;
+
         setBusinessId(data.id);
         setName(data.name || "");
         setAddress(data.address || "");
         setCategory((data.type as Category) || "");
-        setHours(data.schedule || hours);
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+        setHours((prev) => data.schedule || prev);
+
+        setLoadingReservations(true);
+        const { data: dbRes } = await supabase
+          .from("business_reservations")
+          .select("*")
+          .eq("business_id", data.id)
+          .order("reservation_date", { ascending: false });
+
+        if (!isMounted) return;
+
+        if (dbRes) {
+          setReservations(dbRes.map((r) => ({
+            id: r.id,
+            guest: r.guest_name,
+            date: r.reservation_date,
+            nights: r.nights,
+            status: r.status
+          })));
+        }
+      } catch (error) {
+        console.error("Error al cargar comercio:", error);
+      } finally {
+        if (isMounted) setLoadingReservations(false);
+      }
+    };
+
+    fetchBusiness();
+
+    return () => {
+      isMounted = false;
+    };
   }, [user]);
 
   const audienceFor = (cat: Category | ""): { label: string; tone: string } | null => {
@@ -83,6 +129,7 @@ export default function MiComercio() {
     setPhotos((p) => [...p, ...files.map((f) => URL.createObjectURL(f))]);
   };
 
+  // Fix del link de Google Maps
   const openMap = () => {
     const q = encodeURIComponent(address.trim() || name.trim());
     if (!q) return toast.error("Escribí primero la dirección o el nombre");
@@ -96,16 +143,20 @@ export default function MiComercio() {
       address: address.trim(),
       schedule: hours.trim(),
     });
+    
     if (!parsed.success) {
       const msg = parsed.error.issues[0]?.message || "Datos inválidos";
       toast.error(msg);
       return;
     }
+    
     if (!user) {
       toast.error("Tenés que iniciar sesión");
       return;
     }
+    
     setSaving(true);
+    
     const payload = {
       owner_id: user.id,
       name: parsed.data.name,
@@ -113,18 +164,75 @@ export default function MiComercio() {
       address: parsed.data.address,
       schedule: parsed.data.schedule || null,
     };
-    const res = businessId
-      ? await supabase.from("businesses").update(payload).eq("id", businessId)
+    
+    const { data, error } = businessId
+      ? await supabase.from("businesses").update(payload).eq("id", businessId).select("id").single()
       : await supabase.from("businesses").insert(payload).select("id").single();
+      
     setSaving(false);
-    if ((res as any).error) {
+    
+    if (error) {
       toast.error("No se pudo guardar");
       return;
     }
-    if (!businessId && (res as any).data?.id) setBusinessId((res as any).data.id);
+    
+    if (!businessId && data?.id) setBusinessId(data.id);
     setSaved(true);
     toast.success("Datos del comercio guardados");
     setTimeout(() => setSaved(false), 1800);
+  };
+
+  // Guardado asíncrono con control de concurrencia inmediato en useRef
+  const handleAddReservation = async () => {
+    if (!businessId || !newRes.guest.trim() || !newRes.date) {
+      toast.error("Completá todos los campos de la reserva");
+      return;
+    }
+
+    if (isSubmitting.current) return;
+    isSubmitting.current = true;
+    setSavingRes(true);
+    
+    try {
+      const payload = {
+        business_id: businessId,
+        guest_name: newRes.guest.trim(),
+        reservation_date: newRes.date,
+        nights: newRes.nights,
+        status: "Confirmada"
+      };
+
+      const { data, error } = await supabase
+        .from("business_reservations")
+        .insert(payload)
+        .select()
+        .single();
+      
+      if (error || !data) {
+        toast.error("No se pudo registrar la reserva en el servidor");
+        return;
+      }
+
+      setReservations((prev) => [
+        {
+          id: data.id,
+          guest: data.guest_name,
+          date: data.reservation_date,
+          nights: data.nights,
+          status: data.status
+        },
+        ...prev
+      ]);
+      
+      setNewRes({ guest: "", date: "", nights: 1 });
+      toast.success("Reserva agendada y sincronizada");
+    } catch (error) {
+      console.error("Error al guardar reserva:", error);
+      toast.error("Ocurrió un error inesperado al guardar la reserva");
+    } finally {
+      isSubmitting.current = false;
+      setSavingRes(false);
+    }
   };
 
   const dest = audienceFor(category);
@@ -252,7 +360,7 @@ export default function MiComercio() {
         <div className="isa-card p-5 space-y-3">
           <div className="grid grid-cols-2 gap-3">
             {photos.map((p, i) => (
-              <div key={i} className="relative aspect-square rounded-xl overflow-hidden">
+              <div key={p} className="relative aspect-square rounded-xl overflow-hidden">
                 <img src={p} className="w-full h-full object-cover" />
                 <button onClick={() => setPhotos(photos.filter((_, j) => j !== i))} className="absolute top-2 right-2 w-7 h-7 grid place-items-center rounded-full bg-black/60 text-white"><X className="w-4 h-4" /></button>
               </div>
@@ -275,14 +383,28 @@ export default function MiComercio() {
               <input type="number" min={1} placeholder="Noches" value={newRes.nights} onChange={(e) => setNewRes({ ...newRes, nights: +e.target.value })} className="px-3 py-2 rounded-lg border bg-background text-sm" />
             </div>
             <button
-              disabled={!newRes.guest || !newRes.date}
-              onClick={() => { setReservations([{ id: String(Date.now()), guest: newRes.guest, date: newRes.date, nights: newRes.nights, status: "Confirmada" }, ...reservations]); setNewRes({ guest: "", date: "", nights: 1 }); }}
+              disabled={!newRes.guest || !newRes.date || savingRes || !businessId}
+              onClick={handleAddReservation}
               className="w-full bg-isa-navy text-isa-white rounded-[20px] py-2.5 font-bold text-sm flex items-center justify-center gap-1 disabled:opacity-40"
             >
-              <Plus className="w-4 h-4" /> Agregar reserva
+              {savingRes ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />} 
+              {savingRes ? "Guardando..." : "Agregar reserva"}
             </button>
           </div>
-          {reservations.map((r) => (
+          
+          {loadingReservations && (
+            <div className="text-center py-4 text-sm text-muted-foreground inline-flex items-center justify-center w-full gap-2">
+              <Loader2 className="w-4 h-4 animate-spin" /> Cargando reservas...
+            </div>
+          )}
+
+          {!loadingReservations && reservations.length === 0 && (
+            <div className="text-center py-6 text-sm text-muted-foreground border border-dashed rounded-xl">
+              No hay reservas agendadas.
+            </div>
+          )}
+
+          {!loadingReservations && reservations.map((r) => (
             <div key={r.id} className="isa-card p-4 flex items-center justify-between">
               <div>
                 <div className="font-extrabold text-isa-navy text-sm">{r.guest}</div>
@@ -297,7 +419,15 @@ export default function MiComercio() {
   );
 }
 
-function Field({ label, value, onChange, textarea, maxLength }: any) {
+interface FieldProps {
+  label: string;
+  value: string;
+  onChange: (val: string) => void;
+  textarea?: boolean;
+  maxLength?: number;
+}
+
+function Field({ label, value, onChange, textarea, maxLength }: FieldProps) {
   return (
     <div>
       <label className="text-xs font-bold text-muted-foreground">{label}</label>
@@ -310,7 +440,14 @@ function Field({ label, value, onChange, textarea, maxLength }: any) {
   );
 }
 
-function Habilitacion({ title, status, until, warn }: any) {
+interface HabilitacionProps {
+  title: string;
+  status: string;
+  until: string;
+  warn?: boolean;
+}
+
+function Habilitacion({ title, status, until, warn }: HabilitacionProps) {
   return (
     <div className="isa-card p-4 flex items-center justify-between">
       <div>
@@ -322,7 +459,14 @@ function Habilitacion({ title, status, until, warn }: any) {
   );
 }
 
-function Pago({ concept, due, amount, warn }: any) {
+interface PagoProps {
+  concept: string;
+  due: string;
+  amount: number;
+  warn?: boolean;
+}
+
+function Pago({ concept, due, amount, warn }: PagoProps) {
   return (
     <div className={`isa-card p-4 flex items-center justify-between ${warn ? "border-l-4 border-[hsl(var(--muno-amber))]" : ""}`}>
       <div>

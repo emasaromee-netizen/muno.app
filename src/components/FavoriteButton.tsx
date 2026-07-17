@@ -18,31 +18,57 @@ export default function FavoriteButton({ place, className = "" }: { place: Place
   const [favId, setFavId] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!user || !place?.id) return;
-    (supabase.from("tourist_favorites") as any)
-      .select("id")
-      .eq("user_id", user.id)
-      .eq("place_id", String(place.id))
-      .maybeSingle()
-      .then(({ data }: any) => setFavId(data?.id || null));
-  }, [user?.id, place?.id]);
+    // Si no hay usuario o no hay ID del lugar, no hacemos nada
+    if (!user?.id || !place?.id) return;
+    
+    let isMounted = true; // Prevención de fuga de memoria en móviles
+
+    const checkFavorite = async () => {
+      try {
+        const { data } = await supabase
+          .from("tourist_favorites")
+          .select("id")
+          .eq("user_id", user.id)
+          .eq("place_id", String(place.id))
+          .maybeSingle();
+
+        // Solo actualizamos el estado si el componente sigue abierto en pantalla
+        if (isMounted) {
+          setFavId(data?.id || null);
+        }
+      } catch (error) {
+        console.error("Error verificando favoritos:", error);
+      }
+    };
+
+    checkFavorite();
+
+    // Cleanup function: se ejecuta si el usuario sale de la pantalla rápido
+    return () => {
+      isMounted = false;
+    };
+  }, [user?.id, place?.id]); // Dependemos solo de los IDs primitivos, no del objeto completo
 
   const toggle = async (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    
     if (!user) {
       toast.error("Iniciá sesión para guardar favoritos");
       return;
     }
+    
     setLoading(true);
+    
     if (favId) {
-      const { error } = await (supabase.from("tourist_favorites") as any).delete().eq("id", favId);
+      const { error } = await supabase.from("tourist_favorites").delete().eq("id", favId);
       if (!error) {
         setFavId(null);
         toast.success("Eliminado de favoritos");
       }
     } else {
-      const { data, error } = await (supabase.from("tourist_favorites") as any)
+      const { data, error } = await supabase
+        .from("tourist_favorites")
         .insert({
           user_id: user.id,
           place_id: String(place.id),
@@ -52,7 +78,8 @@ export default function FavoriteButton({ place, className = "" }: { place: Place
           place_zone: place.zone || null,
         })
         .select("id")
-        .single();
+        .maybeSingle();
+        
       if (!error && data) {
         setFavId(data.id);
         toast.success("Guardado en favoritos");

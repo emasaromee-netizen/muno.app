@@ -32,8 +32,8 @@ export default function AdminCultura() {
             <tr><th className="text-left p-4">Nombre</th><th className="text-left p-4">Email</th><th className="text-left p-4">Taller</th></tr>
           </thead>
           <tbody>
-            {MOCK_REGS.map((r, i) => (
-              <tr key={i} className="border-t">
+            {MOCK_REGS.map((r) => (
+              <tr key={r.email} className="border-t">
                 <td className="p-4 font-bold">{r.name}</td>
                 <td className="p-4 text-muted-foreground">{r.email}</td>
                 <td className="p-4">{r.workshop}</td>

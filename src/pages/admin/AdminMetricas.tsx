@@ -2,19 +2,20 @@ import { useEffect, useState } from "react";
 import { Lock, Download, ShieldCheck, FileText } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { buildIsaReportPDF, type IsaReportData } from "@/lib/isaReport";
+import { toast } from "sonner"; // <-- IMPORTACIÓN AGREGADA
 import {
   PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend,
 } from "recharts";
 
 const COLORS = ["#242E44", "#1A56F0", "#00B89C", "#F5C84B", "#EF4444", "#10B981"];
 
-// SOLUCIÓN TS: Interfaces estrictas para el reporte de base de datos
+// Interfaces estrictas para el reporte de base de datos
 interface DBAnalyticsReport {
   id: string;
   title: string;
   period: string | null;
   created_at: string;
-  body: unknown;
+  body?: unknown; // body es opcional porque no siempre lo traemos
 }
 
 interface ChartCardProps {
@@ -29,27 +30,59 @@ export default function AdminMetricas() {
 
   useEffect(() => {
     let isMounted = true;
-    supabase
-      .from("analytics_reports")
-      .select("*")
-      .order("created_at", { ascending: false })
-      .then(({ data }) => {
-        if (!isMounted) return;
-        const list = (data as DBAnalyticsReport[]) || [];
-        setReports(list);
-        setLatest(list[0] || null);
-        
-        // SOLUCIÓN L-05: Persistir el ID del último reporte visualizado con éxito
-        if (list[0]?.id) {
-          localStorage.setItem("muno.isa.report.last_read_id", list[0].id);
+    
+    const loadReports = async () => {
+      // 1. OVERFETCHING FIX: Solo traemos metadatos livianos para la lista
+      const { data: listData } = await supabase
+        .from("analytics_reports")
+        .select("id, title, period, created_at")
+        .order("created_at", { ascending: false });
+
+      if (!isMounted) return;
+      const list = (listData as DBAnalyticsReport[]) || [];
+      setReports(list);
+
+      // 2. Traemos el JSON pesado (body) ÚNICAMENTE para el último reporte a mostrar en pantalla
+      if (list.length > 0) {
+        const { data: latestData } = await supabase
+          .from("analytics_reports")
+          .select("*")
+          .eq("id", list[0].id)
+          .single();
+
+        if (isMounted && latestData) {
+          setLatest(latestData as DBAnalyticsReport);
+          localStorage.setItem("muno.isa.report.last_read_id", latestData.id);
         }
-      });
-      
+      }
+    };
+
+    loadReports();
     return () => { isMounted = false; };
   }, []);
 
-  const download = (r: DBAnalyticsReport) => {
-    const body = (r.body || {}) as IsaReportData;
+  const download = async (r: DBAnalyticsReport) => {
+    // 3. OVERFETCHING FIX: Descarga diferida (Lazy Load) del cuerpo del PDF
+    let reportBody = r.body;
+    
+    if (!reportBody) {
+      const toastId = toast.loading("Generando documento...");
+      const { data, error } = await supabase
+        .from("analytics_reports")
+        .select("body")
+        .eq("id", r.id)
+        .single();
+        
+      toast.dismiss(toastId);
+      
+      if (error || !data) {
+        toast.error("No se pudo obtener el informe");
+        return;
+      }
+      reportBody = data.body;
+    }
+
+    const body = (reportBody || {}) as IsaReportData;
     const blob = buildIsaReportPDF({
       title: r.title,
       period: r.period || "",
@@ -201,7 +234,6 @@ function Locked() {
   );
 }
 
-// SOLUCIÓN TS: Tipado del componente hijo
 function ChartCard({ title, children, className = "" }: ChartCardProps) {
   return (
     <div className={`bg-white rounded-[16px] p-5 border ${className}`}>

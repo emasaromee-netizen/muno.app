@@ -7,7 +7,9 @@ export async function fetchVisibleBusinesses() {
     .from("businesses")
     .select("*")
     .eq("enabled", true)
-    .order("created_at", { ascending: false });
+    .order("created_at", { ascending: false })
+    .limit(100); // <-- FIX COMPLIANCE 1.2: Evitamos Unbounded Payload en móviles
+    
   if (error) throw error;
   return data ?? [];
 }
@@ -17,7 +19,9 @@ export async function fetchMyClaims(userId: string) {
     .from("claims")
     .select("*")
     .eq("user_id", userId)
-    .order("created_at", { ascending: false });
+    .order("created_at", { ascending: false })
+    .limit(50); // <-- FIX COMPLIANCE 1.2: Límite de carga de historial
+    
   if (error) throw error;
   return data ?? [];
 }
@@ -25,8 +29,10 @@ export async function fetchMyClaims(userId: string) {
 export async function fetchAnalyticsReports() {
   const { data, error } = await supabase
     .from("analytics_reports")
-    .select("*")
-    .order("created_at", { ascending: false });
+    .select("id, title, period, created_at") // <-- FIX 2.1: Eliminado el overfetching de JSONB
+    .order("created_at", { ascending: false })
+    .limit(20); // <-- FIX COMPLIANCE 1.2: Limitamos a los reportes más recientes
+    
   if (error) throw error;
   return data ?? [];
 }

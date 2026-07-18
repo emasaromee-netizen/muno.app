@@ -70,26 +70,48 @@ export default function AdminColaboradores() {
     if (isMounted.current) setLoading(true);
     
     try {
-      const q = supabase.from("user_roles").select("*").eq("role", "resident");
+      // FIX N+1: Resource Embedding
+      const q = supabase
+        .from("user_roles")
+        .select(`
+          id,
+          user_id,
+          role,
+          area,
+          active,
+          created_at,
+          profiles ( email, full_name )
+        `)
+        .eq("role", "resident");
+
       const { data: urData } = isAdmin || isMayor ? await q : await q.eq("area", myArea);
       
-      const ur = (urData || []) as DBUserRole[];
-      const ids = Array.from(new Set(ur.map((r) => r.user_id)));
-      
-      const { data: profsData } = ids.length
-        ? await supabase.from("profiles").select("id,email,full_name").in("id", ids)
-        : { data: [] };
-        
-      const profs = (profsData || []) as DBProfile[];
-      const map = new Map(profs.map((p) => [p.id, p]));
-      
-      // 3. Chequeamos la referencia (.current) antes de actualizar la pantalla
       if (isMounted.current) {
-        setRows(ur.map((r) => ({
-          ...r,
-          email: map.get(r.user_id)?.email || undefined,
-          full_name: map.get(r.user_id)?.full_name || undefined,
-        })));
+        // Tipado estricto para eliminar el error de 'any'
+        type JoinedData = {
+          id: string;
+          user_id: string;
+          role: string;
+          area: string | null;
+          active: boolean;
+          created_at: string;
+          profiles: { email: string | null; full_name: string | null } | null;
+        };
+
+        const rawData = (urData || []) as unknown as JoinedData[];
+
+        const formattedRows: Row[] = rawData.map((r) => ({
+          id: r.id,
+          user_id: r.user_id,
+          role: r.role,
+          area: r.area,
+          active: r.active,
+          created_at: r.created_at,
+          email: r.profiles?.email || undefined,
+          full_name: r.profiles?.full_name || undefined,
+        }));
+        
+        setRows(formattedRows);
       }
     } catch (error) {
       console.error("Error al cargar colaboradores:", error);

@@ -41,7 +41,6 @@ export default function AdminUsuariosMunicipales() {
     if (isMounted.current) setLoading(true);
 
     try {
-      // Obtener la jurisdicción (tenant) del administrador actual para blindaje BOLA
       const { data: adminRole } = await supabase
         .from("user_roles")
         .select("municipality_id")
@@ -51,40 +50,52 @@ export default function AdminUsuariosMunicipales() {
 
       const currentMuniId = adminRole?.municipality_id;
 
+      // FIX N+1: Resource Embedding
       let q = supabase
         .from("user_roles")
-        .select("*")
+        .select(`
+          id,
+          user_id,
+          role,
+          area,
+          active,
+          created_at,
+          profiles ( email, full_name )
+        `)
         .in("role", ROLES_VISIBLE);
 
-      // Aplicar el filtro de inquilino de forma estricta
       if (currentMuniId) {
         q = q.eq("municipality_id", currentMuniId);
       }
 
       const { data: ur } = await q;
       
-      // Tipado estricto para extraer user_ids
-      const safeUr = (ur || []) as Row[];
-      const ids = Array.from(new Set(safeUr.map((r) => r.user_id)));
-      
-      // Obtener perfiles
-      const { data: profs } = ids.length
-        ? await supabase.from("profiles").select("id, email, full_name").in("id", ids)
-        : { data: [] as { id: string; email: string | null; full_name: string | null }[] };
-        
-      // Tipado del mapa de perfiles
-      const map = new Map<string, { email: string | null; full_name: string | null }>(
-        (profs || []).map((p) => [p.id, p])
-      );
-      
-      // 3. Verificación de la referencia antes de setear variables de estado
       if (isMounted.current) {
-        // Unir datos
-        setRows(safeUr.map((r) => ({
-          ...r,
-          email: map.get(r.user_id)?.email,
-          full_name: map.get(r.user_id)?.full_name,
-        })));
+        // Tipado estricto para eliminar el error de 'any'
+        type JoinedData = {
+          id: string;
+          user_id: string;
+          role: string;
+          area: string | null;
+          active: boolean;
+          created_at: string;
+          profiles: { email: string | null; full_name: string | null } | null;
+        };
+
+        const rawData = (ur || []) as unknown as JoinedData[];
+
+        const formattedRows: Row[] = rawData.map((r) => ({
+          id: r.id,
+          user_id: r.user_id,
+          role: r.role,
+          area: r.area,
+          active: r.active,
+          created_at: r.created_at,
+          email: r.profiles?.email || undefined,
+          full_name: r.profiles?.full_name || undefined,
+        }));
+        
+        setRows(formattedRows);
         setLoading(false);
       }
     } catch (err) {

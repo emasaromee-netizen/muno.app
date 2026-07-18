@@ -534,6 +534,7 @@ export type Database = {
           accepted_by: string | null
           area: string | null
           created_at: string
+          deleted_at: string | null
           email: string
           expires_at: string
           id: string
@@ -550,6 +551,7 @@ export type Database = {
           accepted_by?: string | null
           area?: string | null
           created_at?: string
+          deleted_at?: string | null
           email: string
           expires_at?: string
           id?: string
@@ -566,6 +568,7 @@ export type Database = {
           accepted_by?: string | null
           area?: string | null
           created_at?: string
+          deleted_at?: string | null
           email?: string
           expires_at?: string
           id?: string
@@ -772,6 +775,7 @@ export type Database = {
         Row: {
           companions: string[]
           created_at: string
+          deleted_at: string | null
           event_date: string | null
           event_id: string
           event_place: string | null
@@ -791,6 +795,7 @@ export type Database = {
         Insert: {
           companions?: string[]
           created_at?: string
+          deleted_at?: string | null
           event_date?: string | null
           event_id: string
           event_place?: string | null
@@ -810,6 +815,7 @@ export type Database = {
         Update: {
           companions?: string[]
           created_at?: string
+          deleted_at?: string | null
           event_date?: string | null
           event_id?: string
           event_place?: string | null

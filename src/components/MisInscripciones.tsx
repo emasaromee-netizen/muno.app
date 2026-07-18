@@ -24,7 +24,7 @@ export default function MisInscripciones() {
   const [items, setItems] = useState<Item[]>([]);
 
   useEffect(() => {
-    let isMounted = true; // Control de Memory Leak en dispositivos móviles
+    let isMounted = true; // Control de Memory Leak
     let channel: RealtimeChannel | null = null; // Tipado estricto
 
     const refresh = async () => {
@@ -48,16 +48,16 @@ export default function MisInscripciones() {
           .from("registrations")
           .select("id,event_title,event_date,event_type,event_place,companions")
           .eq("user_id", user.id)
-          .order("created_at", { ascending: false });
+          .eq("status", "activa") // FIX: Filtramos las canceladas lógicamente
+          .order("created_at", { ascending: false })
+          .limit(50); // FIX 1.2: Límite de carga (evita Unbounded Payloads)
 
-        // Eliminamos el any, utilizando inferencia segura
         const db: Item[] = (data || []).map((r) => ({
           id: r.id,
           titulo: r.event_title,
           fecha: r.event_date || "",
           tipo: r.event_type || "",
           lugar: r.event_place,
-          // Asegurar que es un array de strings si viene de Supabase (Json)
           acompanantes: Array.isArray(r.companions) ? r.companions.map(String) : [],
           source: "db",
         }));
@@ -73,7 +73,7 @@ export default function MisInscripciones() {
 
     refresh();
     
-    // Escuchar eventos locales (ej. al abrir el diálogo de inscripción en otra pestaña)
+    // Escuchar eventos locales
     const handleLocalEvent = () => refresh();
     window.addEventListener("muno:inscripciones", handleLocalEvent);
 
@@ -89,7 +89,6 @@ export default function MisInscripciones() {
         .subscribe();
     }
 
-    // Cleanup: Desmontaje del componente
     return () => {
       isMounted = false;
       window.removeEventListener("muno:inscripciones", handleLocalEvent);
@@ -97,11 +96,16 @@ export default function MisInscripciones() {
         supabase.removeChannel(channel);
       }
     };
-  }, [user]); // El array de dependencias correcto
+  }, [user]);
 
   const cancel = async (it: Item) => {
     if (it.source === "db") {
-      const { error } = await supabase.from("registrations").delete().eq("id", it.id);
+      // COMPLIANCE FIX: Soft Delete legal y tipado estrictamente
+      const { error } = await supabase
+        .from("registrations")
+        .update({ status: "cancelada", deleted_at: new Date().toISOString() })
+        .eq("id", it.id);
+        
       if (error) {
         toast.error("No se pudo cancelar");
         return;
@@ -110,7 +114,6 @@ export default function MisInscripciones() {
       cancelInscripcion(it.id);
     }
     toast.success("Inscripción cancelada");
-    // Emitimos el evento para forzar recarga local
     window.dispatchEvent(new Event("muno:inscripciones"));
   };
 

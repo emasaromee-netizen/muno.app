@@ -8,7 +8,7 @@ import { toast } from "sonner";
 type Municipality = { id: string; slug: string; name: string; province: string | null; is_default: boolean };
 type Counts = { users: number; businesses: number; claims: number; banners: number };
 
-// --- INTERFACES ESTRICTAS (SOLUCIÓN ESLINT) ---
+// --- INTERFACES ESTRICTAS ---
 interface DBCountsResponse {
   muni_id: string;
   users_count: number;
@@ -64,7 +64,6 @@ export default function IsaGlobalPanel() {
   const [editId, setEditId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
 
-  // SOLUCIÓN: Referencia maestra para todo el componente
   const isMounted = useRef(true);
 
   useEffect(() => {
@@ -82,7 +81,6 @@ export default function IsaGlobalPanel() {
     fetchMunis();
   }, []);
 
-  // SOLUCIÓN M-07: Reducir peticiones N+1 HTTP a UNA sola llamada optimizada por RPC
   useEffect(() => {
     if (munis.length === 0) return;
 
@@ -124,7 +122,6 @@ export default function IsaGlobalPanel() {
     return acc;
   }, [counts]);
 
-  // Cargar banners del municipio seleccionado
   useEffect(() => {
     if (selected === "ALL") { setBanners([]); setInternal(null); return; }
     
@@ -210,12 +207,13 @@ export default function IsaGlobalPanel() {
     }
   };
 
-  // 1. Remoción del booleano falso y uso de isMounted.current
   const loadMuniInvites = useCallback(async (muniId: string) => {
     const { data } = await supabase
       .from("municipal_invitations")
       .select("*")
       .eq("municipality_id", muniId)
+      // COMPLIANCE FIX: Solo traer las invitaciones que no están borradas lógicamente
+      .is("deleted_at", null)
       .order("created_at", { ascending: false });
       
     if (isMounted.current) {
@@ -262,7 +260,18 @@ export default function IsaGlobalPanel() {
   };
 
   const removeInvite = async (id: string) => {
-    await supabase.from("municipal_invitations").delete().eq("id", id);
+    // COMPLIANCE FIX: Soft Delete en lugar de Hard Delete
+    const { error } = await supabase
+      .from("municipal_invitations")
+      .update({ status: "revocada", deleted_at: new Date().toISOString() })
+      .eq("id", id);
+
+    if (error) {
+      toast.error("No se pudo revocar la invitación");
+      return;
+    }
+
+    toast.success("Invitación revocada");
     setMuniInvites((xs) => xs.filter((x) => x.id !== id));
   };
 
@@ -329,7 +338,7 @@ export default function IsaGlobalPanel() {
           </button>
         </section>
 
-        {/* Colaboradores por municipio (solo cuando se selecciona uno) */}
+        {/* Colaboradores por municipio */}
         {selected !== "ALL" && currentMuni && (
           <section className="bg-white border border-isa-navy/10 rounded-2xl p-5 space-y-3">
             <div className="flex items-center gap-2">
@@ -342,7 +351,7 @@ export default function IsaGlobalPanel() {
             <div className="grid grid-cols-1 md:grid-cols-12 gap-2">
               <input value={collabEmail} onChange={(e) => setCollabEmail(e.target.value)} placeholder="email@municipio.gob.ar" type="email"
                 className="md:col-span-5 px-3 py-2.5 rounded-xl border bg-background text-sm" />
-              <select value={collabRole} onChange={(e) => setCollabRole(e.target.value as "admin" | "area_manager")} // Solución TS
+              <select value={collabRole} onChange={(e) => setCollabRole(e.target.value as "admin" | "area_manager")}
                 className="md:col-span-3 px-3 py-2.5 rounded-xl border bg-background text-sm">
                 <option value="admin">Intendente / Admin</option>
                 <option value="area_manager">Jefe de área</option>
@@ -492,7 +501,7 @@ export default function IsaGlobalPanel() {
   );
 }
 
-// SOLUCIÓN TS: Tipado estricto del KPI
+// Tipado estricto del KPI
 function Kpi({ icon: Icon, label, value, loading }: { icon: React.ElementType; label: string; value: number; loading: boolean }) {
   return (
     <div className="bg-white border border-isa-navy/10 rounded-2xl p-5">

@@ -16,7 +16,7 @@ type EventItem = {
   place: string;
   kind: "Cultura" | "Deportes";
   photo: string;
-  municipality_id?: string | null; // Tipado estricto
+  municipality_id?: string | null;
 };
 
 // Interface para limpiar el 'any' de Supabase
@@ -106,7 +106,8 @@ export default function Eventos() {
           .select("id,title,description,kind,area,schedule,days,photo_url,municipality_id,published")
           .eq("published", true)
           .in("kind", ["Evento", "Actividad", "Taller"])
-          .order("created_at", { ascending: false });
+          .order("created_at", { ascending: false })
+          .limit(50); // <-- FIX COMPLIANCE 1.2: Límite de carga para evitar Unbounded Payloads
           
         if (munId) q = q.eq("municipality_id", munId);
         

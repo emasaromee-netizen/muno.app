@@ -239,6 +239,9 @@ supabase/
     mayor-insights/
       index.ts
   migrations/
+    supabase/
+      migrations/
+        20260717110000_harden_rpc_metrics.sql
     20260507041448_fe6a92b9-400d-4026-b0d3-da0a6ac4f5c1.sql
     20260507041510_f50a5b6b-2032-4723-912c-77787e6cc1ca.sql
     20260507042932_0d11f3ac-3a3b-4518-b205-d1f2cf129d3c.sql
@@ -5473,6 +5476,55 @@ REGLAS DE SEGURIDAD ABSOLUTAS:
     });
   }
 });
+</file>
+
+<file path="supabase/migrations/supabase/migrations/20260717110000_harden_rpc_metrics.sql">
+-- 1. Revocar la ejecución pública
+REVOKE ALL ON FUNCTION public.get_municipality_counts() FROM PUBLIC, anon, authenticated;
+
+-- 2. Conceder permisos al service_role
+GRANT EXECUTE ON FUNCTION public.get_municipality_counts() TO service_role;
+
+-- 3. Hardening interno de la función
+CREATE OR REPLACE FUNCTION public.get_municipality_counts()
+RETURNS TABLE (
+  muni_id UUID,
+  users_count BIGINT,
+  businesses_count BIGINT,
+  claims_count BIGINT,
+  banners_count BIGINT
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  IF NOT (
+    SELECT EXISTS (
+      SELECT 1 FROM public.user_roles
+      WHERE user_roles.user_id = auth.uid()
+        AND user_roles.role = 'isa_super_admin'::app_role
+        AND user_roles.active = true
+    )
+  ) THEN
+    RAISE EXCEPTION 'Acceso denegado: Privilegios de auditoría insuficientes';
+  END IF;
+
+  RETURN QUERY
+  SELECT 
+    m.id AS muni_id,
+    COALESCE(COUNT(DISTINCT u.id), 0) AS users_count,
+    COALESCE(COUNT(DISTINCT b.id), 0) AS businesses_count,
+    COALESCE(COUNT(DISTINCT c.id), 0) AS claims_count,
+    COALESCE(COUNT(DISTINCT a.id), 0) AS banners_count
+  FROM municipalities m
+  LEFT JOIN profiles u ON u.municipality_id = m.id
+  LEFT JOIN businesses b ON b.municipality_id = m.id
+  LEFT JOIN claims c ON c.municipality_id = m.id
+  LEFT JOIN announcements a ON a.municipality_id = m.id
+  GROUP BY m.id;
+END;
+$$;
 </file>
 
 <file path="supabase/migrations/20260507041448_fe6a92b9-400d-4026-b0d3-da0a6ac4f5c1.sql">
@@ -14900,458 +14952,6 @@ function TemplatesDialog({ onClose }: { onClose: () => void }) {
 }
 </file>
 
-<file path="src/pages/admin/IntendenteDashboard.tsx">
-import { useEffect, useMemo, useState, ElementType } from "react";
-import { Link } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
-import { useAuth } from "@/context/AuthContext";
-import { toast } from "sonner";
-import { Megaphone, Users, Wallet, AlertTriangle, BarChart3, Send, Loader2, Activity, Clock, FileText, MapPin, Heart, TrendingUp } from "lucide-react";
-import { CLAIM_AREAS } from "@/data/mock";
-import MayorFullscreen from "@/components/MayorFullscreen";
-
-type Audience = "residents" | "tourists" | "both";
-
-function SelectorAudienciaBanner() {
-  const { user } = useAuth();
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
-  const [audience, setAudience] = useState<Audience>("residents");
-  const [saving, setSaving] = useState(false);
-
-  const publish = async () => {
-    if (!title.trim() || !description.trim() || !user) {
-      toast.error("Completá título y descripción");
-      return;
-    }
-    setSaving(true);
-    
-    // Obtenemos el municipio para asegurar que el banner quede anclado a su jurisdicción
-    const { data: profile } = await supabase.from("profiles").select("municipality_id").eq("id", user.id).maybeSingle();
-    
-    const { error } = await supabase.from("announcements").insert({
-      title: title.trim(),
-      description: description.trim(),
-      audience,
-      color: "navy",
-      enabled: true,
-      tags: ["intendente"],
-      municipality_id: profile?.municipality_id,
-    });
-    
-    setSaving(false);
-    if (error) {
-      toast.error("No se pudo publicar: " + error.message);
-      return;
-    }
-    toast.success(`Banner publicado (${audience})`);
-    setTitle("");
-    setDescription("");
-  };
-
-  const opts: { id: Audience; label: string; hint: string }[] = [
-    { id: "residents", label: "Vecino", hint: "Visible para residentes" },
-    { id: "tourists", label: "Turista", hint: "Visible solo para turistas" },
-    { id: "both", label: "Ambos", hint: "Vecinos + turistas" },
-  ];
-
-  return (
-    <div className="bg-white rounded-[16px] border p-5 space-y-4">
-      <div className="flex items-center gap-2">
-        <Megaphone className="w-4 h-4 text-isa-navy" />
-        <h3 className="font-extrabold text-isa-navy text-sm">Publicar Banner Home</h3>
-      </div>
-
-      <div>
-        <label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">Destino</label>
-        <div className="mt-2 grid grid-cols-3 gap-2">
-          {opts.map((o) => (
-            <button
-              key={o.id}
-              type="button"
-              onClick={() => setAudience(o.id)}
-              className={`p-3 rounded-xl border text-left transition-all opacity-100 ${
-                audience === o.id ? "bg-isa-navy text-white border-isa-navy" : "bg-white text-isa-navy hover:border-isa-navy/40"
-              }`}
-            >
-              <div className="text-[13px] font-extrabold">{o.label}</div>
-              <div className={`text-[10px] mt-0.5 ${audience === o.id ? "text-white/70" : "text-muted-foreground"}`}>{o.hint}</div>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <input
-        value={title}
-        onChange={(e) => setTitle(e.target.value)}
-        placeholder="Título del banner"
-        className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm"
-      />
-      <textarea
-        value={description}
-        onChange={(e) => setDescription(e.target.value)}
-        rows={3}
-        placeholder="Mensaje a publicar"
-        className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm resize-none"
-      />
-
-      <button
-        onClick={publish}
-        disabled={saving}
-        className="inline-flex items-center gap-2 bg-isa-navy text-white rounded-[12px] px-4 py-2.5 text-[13px] font-bold opacity-100 disabled:opacity-60"
-      >
-        {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-        Publicar banner
-      </button>
-    </div>
-  );
-}
-
-// Interfaz para limpiar el error de ESLint de tipo 'any'
-interface StatProps {
-  icon: ElementType;
-  label: string;
-  value: number;
-  color: string;
-}
-
-const Stat = ({ icon: Icon, label, value, color }: StatProps) => (
-  <div className="bg-white rounded-[16px] border p-4">
-    <div className="flex items-center justify-between">
-      <div className="text-[10px] uppercase tracking-[0.18em] font-bold text-muted-foreground">{label}</div>
-      <div className="w-9 h-9 rounded-xl grid place-items-center" style={{ background: color + "15", color }}>
-        <Icon strokeWidth={1.5} className="w-[18px] h-[18px]" />
-      </div>
-    </div>
-    <div className="font-display text-[26px] font-extrabold text-isa-navy mt-2 leading-none">{value}</div>
-  </div>
-);
-
-type ClaimRow = {
-  id: string;
-  area: string | null;
-  status: "Pendiente" | "En curso" | "Cerrado";
-  created_at: string;
-  resolved_at: string | null;
-  category: string;
-  description: string | null;
-  resolution_note: string | null;
-};
-
-const STATUS_DOT: Record<string, string> = {
-  Pendiente: "bg-red-500",
-  "En curso": "bg-amber-400",
-  Cerrado: "bg-emerald-500",
-};
-
-function AnalisisDeGestion() {
-  const { user } = useAuth();
-  const [rows, setRows] = useState<ClaimRow[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState<string>("");
-
-  useEffect(() => {
-    let isMounted = true;
-    if (!user) return;
-
-    const fetchClaims = async () => {
-      try {
-        // Blindaje Multi-Tenant para la tabla de análisis
-        const { data: profile } = await supabase
-          .from("profiles")
-          .select("municipality_id")
-          .eq("id", user.id)
-          .maybeSingle();
-
-        const muniId = profile?.municipality_id;
-        if (!muniId || !isMounted) return;
-
-        const { data } = await supabase
-          .from("claims")
-          .select("id,area,status,created_at,resolved_at,category,description,resolution_note")
-          .eq("municipality_id", muniId)
-          .order("created_at", { ascending: false })
-          .limit(500);
-          
-        if (isMounted) {
-          setRows((data as ClaimRow[]) || []);
-          setLoading(false);
-        }
-      } catch (error) {
-        console.error("Error al cargar análisis de gestión:", error);
-        if (isMounted) setLoading(false);
-      }
-    };
-
-    fetchClaims();
-
-    return () => {
-      isMounted = false;
-    };
-  }, [user]);
-
-  const stats = useMemo(() => {
-    const byArea: Record<string, { total: number; pendientes: number; cerrados: number; totalHrs: number; count: number }> = {};
-    for (const a of CLAIM_AREAS) byArea[a] = { total: 0, pendientes: 0, cerrados: 0, totalHrs: 0, count: 0 };
-    for (const r of rows) {
-      const a = (r.area as string) || "Sin área";
-      if (!byArea[a]) byArea[a] = { total: 0, pendientes: 0, cerrados: 0, totalHrs: 0, count: 0 };
-      byArea[a].total++;
-      if (r.status === "Pendiente" || r.status === "En curso") byArea[a].pendientes++;
-      if (r.status === "Cerrado" && r.resolved_at) {
-        byArea[a].cerrados++;
-        const hrs = (new Date(r.resolved_at).getTime() - new Date(r.created_at).getTime()) / 36e5;
-        byArea[a].totalHrs += hrs;
-        byArea[a].count++;
-      }
-    }
-    let topPend: { area: string; n: number } = { area: "—", n: 0 };
-    let bestAvgHrs = 0;
-    let allHrs = 0;
-    let allCount = 0;
-    for (const [area, s] of Object.entries(byArea)) {
-      if (s.pendientes > topPend.n) topPend = { area, n: s.pendientes };
-      allHrs += s.totalHrs;
-      allCount += s.count;
-    }
-    bestAvgHrs = allCount ? allHrs / allCount : 0;
-    return { byArea, topPend, avgHrs: bestAvgHrs };
-  }, [rows]);
-
-  const filtered = filter ? rows.filter((r) => r.area === filter) : rows;
-  const maxBar = Math.max(1, ...Object.values(stats.byArea).map((s) => s.total));
-
-  return (
-    <section className="bg-white rounded-[16px] border p-5 space-y-5">
-      <div className="flex items-center gap-2">
-        <Activity className="w-4 h-4 text-isa-navy" />
-        <h3 className="font-extrabold text-isa-navy text-sm">Análisis de Gestión por Área</h3>
-      </div>
-
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <div className="rounded-xl border p-4 bg-red-500/5">
-          <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground">Área con más pendientes</div>
-          <div className="font-display font-extrabold text-isa-navy text-xl mt-1">{stats.topPend.area}</div>
-          <div className="text-xs text-muted-foreground mt-0.5">{stats.topPend.n} reclamos sin resolver</div>
-        </div>
-        <div className="rounded-xl border p-4 bg-emerald-500/5">
-          <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground inline-flex items-center gap-1"><Clock className="w-3 h-3" /> Tiempo promedio de respuesta</div>
-          <div className="font-display font-extrabold text-isa-navy text-xl mt-1">
-            {stats.avgHrs > 0 ? `${stats.avgHrs.toFixed(1)} hs` : "—"}
-          </div>
-          <div className="text-xs text-muted-foreground mt-0.5">Promedio entre todas las áreas</div>
-        </div>
-      </div>
-
-      <div>
-        <div className="text-xs font-bold text-muted-foreground mb-2">Reclamos por área</div>
-        <div className="space-y-1.5">
-          {Object.entries(stats.byArea).map(([area, s]) => (
-            <button
-              key={area}
-              onClick={() => setFilter(filter === area ? "" : area)}
-              className={`w-full text-left p-2 rounded-lg transition-colors ${filter === area ? "bg-isa-navy/5 ring-1 ring-isa-navy" : "hover:bg-muted/40"}`}
-            >
-              <div className="flex items-center justify-between text-xs">
-                <span className="font-bold text-isa-navy">{area}</span>
-                <span className="text-muted-foreground">{s.pendientes} pend · {s.cerrados} cerrados · {s.total} total</span>
-              </div>
-              <div className="mt-1 h-2 rounded-full bg-muted overflow-hidden">
-                <div className="h-full bg-isa-navy" style={{ width: `${(s.total / maxBar) * 100}%` }} />
-              </div>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div>
-        <div className="flex items-center justify-between mb-2">
-          <div className="text-xs font-bold text-muted-foreground">
-            Vista espejo {filter && `· filtrado por ${filter}`}
-          </div>
-          {filter && (
-            <button onClick={() => setFilter("")} className="text-[11px] font-bold text-muno-blue">Quitar filtro</button>
-          )}
-        </div>
-        {loading ? (
-          <div className="text-xs text-muted-foreground py-4 text-center inline-flex items-center gap-2 justify-center w-full">
-            <Loader2 className="w-3 h-3 animate-spin" /> Cargando…
-          </div>
-        ) : filtered.length === 0 ? (
-          <div className="text-xs text-muted-foreground py-4 text-center border rounded-lg">Sin reclamos.</div>
-        ) : (
-          <div className="border rounded-lg divide-y max-h-72 overflow-y-auto">
-            {filtered.slice(0, 30).map((r) => (
-              <div key={r.id} className="p-3 text-xs">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="font-bold text-isa-navy">#MUNO-{r.id.slice(0, 4).toUpperCase()} · {r.category}</div>
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-muted">
-                    <span className={`w-1.5 h-1.5 rounded-full ${STATUS_DOT[r.status]}`} /> {r.status}
-                  </span>
-                </div>
-                <div className="text-muted-foreground mt-0.5">Área: {r.area || "—"} · {new Date(r.created_at).toLocaleDateString("es-AR")}</div>
-                {r.resolution_note && (
-                  <div className="mt-1 p-2 rounded bg-muted/50 italic text-isa-navy">"{r.resolution_note}"</div>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </section>
-  );
-}
-
-function InformeEjecutivoMensual() {
-  const month = new Date().toLocaleDateString("es-AR", { month: "long", year: "numeric" });
-  const blocks = [
-    {
-      icon: Activity,
-      color: "#1A56F0",
-      title: "Resumen de Eficiencia",
-      body: "Área de Infraestructura resolvió el 85% de los incidentes este mes.",
-      kpi: "24 hs",
-      kpiLabel: "Tiempo promedio de respuesta",
-    },
-    {
-      icon: MapPin,
-      color: "#EF4444",
-      title: "Mapa de Calor de Demandas",
-      body: "Se detecta un 60% de reclamos de luminarias concentrados en la Zona Norte.",
-      kpi: "Zona Norte",
-      kpiLabel: "Recomendación: reforzar cuadrilla en dicho cuadrante.",
-    },
-    {
-      icon: TrendingUp,
-      color: "#F59E0B",
-      title: "Comunicación Segmentada",
-      body: "El 70% de los clics en banners se concentraron en 'Talleres Culturales'.",
-      kpi: "70%",
-      kpiLabel: "Recomendación: promocionar inscripciones de Cultura el próximo mes.",
-    },
-    {
-      icon: Heart,
-      color: "#00B89C",
-      title: "Termómetro Turístico",
-      body: "Atractivo más votado del mes con corazones: Paseo del Lago.",
-      kpi: "4.7 / 5 ★",
-      kpiLabel: "Puntuación general del municipio por visitantes",
-    },
-  ];
-
-  return (
-    <section className="bg-white rounded-[16px] border p-5 space-y-4">
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <FileText className="w-4 h-4 text-isa-navy" />
-          <div>
-            <h3 className="font-extrabold text-isa-navy text-sm">Informe Ejecutivo de Gestión Mensual</h3>
-            <p className="text-[11px] text-muted-foreground capitalize">{month} · datos demo</p>
-          </div>
-        </div>
-        <span className="text-[10px] uppercase tracking-[0.18em] font-bold text-isa-navy bg-isa-light px-2 py-1 rounded-full">
-          Modo Espejo
-        </span>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        {blocks.map((b) => (
-          <div key={b.title} className="rounded-xl border p-4 bg-gradient-to-br from-white to-muted/30">
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-lg grid place-items-center" style={{ background: b.color + "15", color: b.color }}>
-                <b.icon strokeWidth={1.5} className="w-4 h-4" />
-              </div>
-              <div className="text-xs font-extrabold text-isa-navy">{b.title}</div>
-            </div>
-            <div className="font-display font-extrabold text-isa-navy text-[22px] leading-none mt-3">{b.kpi}</div>
-            <div className="text-[11px] text-muted-foreground mt-1">{b.kpiLabel}</div>
-            <p className="text-xs text-isa-navy mt-3 leading-relaxed">{b.body}</p>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-export default function IntendenteDashboard() {
-  const { user } = useAuth();
-  const [counts, setCounts] = useState({ claims: 0, businesses: 0, content: 0, banners: 0 });
-
-  useEffect(() => {
-    if (!user) return;
-    (async () => {
-      // Blindaje Multi-Tenant para las métricas globales
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("municipality_id")
-        .eq("id", user.id)
-        .maybeSingle();
-
-      const muniId = profile?.municipality_id;
-      if (!muniId) return;
-
-      const [c1, c2, c3, c4] = await Promise.all([
-        supabase.from("claims").select("id", { count: "exact", head: true }).eq("municipality_id", muniId),
-        supabase.from("businesses").select("id", { count: "exact", head: true }).eq("municipality_id", muniId),
-        supabase.from("content_items").select("id", { count: "exact", head: true }).eq("municipality_id", muniId),
-        supabase.from("announcements").select("id", { count: "exact", head: true }).eq("municipality_id", muniId),
-      ]);
-      
-      setCounts({
-        claims: c1.count || 0,
-        businesses: c2.count || 0,
-        content: c3.count || 0,
-        banners: c4.count || 0,
-      });
-    })();
-  }, [user]);
-
-  return (
-    <div className="space-y-6">
-      <MayorFullscreen />
-      <header>
-        <h2 className="font-display font-extrabold text-isa-navy text-[22px] leading-tight">
-          Dashboard del Intendente
-        </h2>
-        <p className="text-sm text-muted-foreground mt-1">
-          Supervisión global del municipio. Visualizá indicadores y publicá comunicaciones.
-        </p>
-      </header>
-
-      <section className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <Stat icon={AlertTriangle} label="Reclamos" value={counts.claims} color="#EF4444" />
-        <Stat icon={Wallet} label="Comercios" value={counts.businesses} color="#1A56F0" />
-        <Stat icon={Users} label="Contenido publicado" value={counts.content} color="#00B89C" />
-        <Stat icon={Megaphone} label="Banners totales" value={counts.banners} color="#F59E0B" />
-      </section>
-
-      <InformeEjecutivoMensual />
-
-      <AnalisisDeGestion />
-
-      <SelectorAudienciaBanner />
-
-      <section className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-        <Link to="/admin/turismo" className="bg-white rounded-[16px] border p-4 hover:shadow-md transition-shadow">
-          <div className="font-extrabold text-isa-navy text-sm">Guía de Turismo</div>
-          <p className="text-xs text-muted-foreground mt-1">Cargá comercios, eventos y atractivos.</p>
-        </Link>
-        <Link to="/admin/hacienda" className="bg-white rounded-[16px] border p-4 hover:shadow-md transition-shadow">
-          <div className="font-extrabold text-isa-navy text-sm">Hacienda</div>
-          <p className="text-xs text-muted-foreground mt-1">Habilitaciones y vencimientos.</p>
-        </Link>
-        <Link to="/admin/metricas" className="bg-white rounded-[16px] border p-4 hover:shadow-md transition-shadow">
-          <div className="font-extrabold text-isa-navy text-sm flex items-center gap-2">
-            <BarChart3 className="w-4 h-4" /> Informe ISA
-          </div>
-          <p className="text-xs text-muted-foreground mt-1">KPIs y conclusión estratégica.</p>
-        </Link>
-      </section>
-    </div>
-  );
-}
-</file>
-
 <file path="src/pages/admin/Turismo.tsx">
 import { useEffect, useRef, useState, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
@@ -18596,196 +18196,6 @@ import "./index.css";
 //} catch {}
 
 createRoot(document.getElementById("root")!).render(<App />);
-</file>
-
-<file path="supabase/functions/invite-staff/index.ts">
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-};
-
-type Role = "area_manager" | "tourism_chief" | "mayor" | "resident" | "admin";
-
-const HIERARCHY_ROLES: Role[] = ["area_manager", "tourism_chief", "mayor", "admin"];
-
-// Interfaces estrictas para eliminar los 'any'
-interface DBUserRole {
-  id?: string;
-  role: string;
-  area: string | null;
-  municipality_id: string | null;
-}
-
-interface InsertRolePayload {
-  user_id: string;
-  role: Role;
-  area: string | null;
-  active: boolean;
-  municipality_id?: string;
-}
-
-interface ProfileUpsert {
-  id: string;
-  email: string;
-  full_name: string;
-  dni: string;
-  municipality_id?: string;
-}
-
-Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
-
-  try {
-    const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-    const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || Deno.env.get("SUPABASE_ANON_KEY")!;
-
-    const authHeader = req.headers.get("Authorization") || "";
-    const userClient = createClient(SUPABASE_URL, ANON_KEY, {
-      global: { headers: { Authorization: authHeader } },
-    });
-    const admin = createClient(SUPABASE_URL, SERVICE_KEY);
-
-    const { data: userData } = await userClient.auth.getUser();
-    const caller = userData?.user;
-    if (!caller) {
-      return json({ error: "Unauthorized" }, 401);
-    }
-
-    const body = await req.json();
-    const fullName = String(body.full_name || "").trim();
-    const email = String(body.email || "").trim().toLowerCase();
-    const dni = String(body.dni || "").replace(/\D/g, "");
-    const role = String(body.role || "") as Role;
-    const area = body.area ? String(body.area) : null;
-
-    if (!fullName || fullName.length < 2 || fullName.length > 120) return json({ error: "Nombre inválido" }, 400);
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ error: "Email inválido" }, 400);
-    if (!/^\d{7,9}$/.test(dni)) return json({ error: "DNI inválido (7-9 dígitos)" }, 400);
-    if (!["area_manager", "tourism_chief", "mayor", "resident"].includes(role)) return json({ error: "Rol inválido" }, 400);
-
-    // Get caller roles + area
-    const { data: callerRolesData } = await admin
-      .from("user_roles")
-      .select("role,area,municipality_id")
-      .eq("user_id", caller.id);
-
-    const callerRoles = (callerRolesData || []) as DBUserRole[];
-    const callerRoleNames = callerRoles.map((r) => r.role);
-    const isAdmin = callerRoleNames.includes("admin");
-    const isMayor = callerRoleNames.includes("mayor");
-    const isAreaMgr = callerRoleNames.includes("area_manager");
-    const callerArea = callerRoles.find((r) => r.role === "area_manager")?.area || null;
-    const callerMunicipality = callerRoles.find((r) => r.municipality_id)?.municipality_id || null;
-
-    // Authorization: hierarchy
-    if (HIERARCHY_ROLES.includes(role)) {
-      // Creating an area chief / tourism chief / mayor → only admin or mayor
-      if (!isAdmin && !isMayor) {
-        return json({ error: "Solo el Intendente puede crear Jefes de Área" }, 403);
-      }
-    } else {
-      // Creating a collaborator (resident) → admin/mayor OR area_manager (own area only)
-      if (!isAdmin && !isMayor) {
-        if (!isAreaMgr) return json({ error: "No autorizado" }, 403);
-        if (!area || area !== callerArea) {
-          return json({ error: "Solo podés agregar colaboradores en tu propia área" }, 403);
-        }
-      }
-    }
-
-    // Check if user exists in profiles by email
-    let userId: string | null = null;
-    const { data: existingProfile } = await admin
-      .from("profiles")
-      .select("id, municipality_id, dni")
-      .eq("email", email)
-      .maybeSingle();
-
-    if (existingProfile?.id) {
-      userId = existingProfile.id;
-      
-      // SOLUCIÓN BOLA P1: Impedir alteración de perfiles inter-municipios
-      if (existingProfile.municipality_id && callerMunicipality && existingProfile.municipality_id !== callerMunicipality) {
-        return json({ error: "El usuario ya pertenece a otra jurisdicción municipal" }, 403);
-      }
-    } else {
-      // Create auth user with DNI as provisional password
-      const { data: created, error: createErr } = await admin.auth.admin.createUser({
-        email,
-        password: dni,
-        email_confirm: true,
-        user_metadata: { full_name: fullName, dni, municipality_id: callerMunicipality },
-      });
-      if (createErr || !created?.user) {
-        return json({ error: "No se pudo crear el usuario: " + (createErr?.message || "desconocido") }, 400);
-      }
-      userId = created.user.id;
-    }
-
-    // Upsert profile (name, dni, municipality) - Seguro con ignoreDuplicates
-    const profilePayload: ProfileUpsert = {
-      id: userId,
-      email,
-      full_name: fullName,
-      dni,
-    };
-    if (callerMunicipality) {
-      profilePayload.municipality_id = callerMunicipality;
-    }
-
-    await admin
-      .from("profiles")
-      .upsert(profilePayload, { onConflict: "id", ignoreDuplicates: true });
-
-    // Insert user_roles (avoid duplicate role+user)
-    const { data: existingRoleData } = await admin
-      .from("user_roles")
-      .select("id")
-      .eq("user_id", userId)
-      .eq("role", role)
-      .maybeSingle();
-
-    const existingRole = existingRoleData as { id: string } | null;
-
-    if (!existingRole) {
-      const insertPayload: InsertRolePayload = {
-        user_id: userId,
-        role,
-        area: HIERARCHY_ROLES.includes(role) || role === "resident" ? area : null,
-        active: true,
-      };
-      if (callerMunicipality) {
-        insertPayload.municipality_id = callerMunicipality;
-      }
-      
-      const { error: roleErr } = await admin.from("user_roles").insert(insertPayload);
-      if (roleErr) return json({ error: "No se pudo asignar el rol: " + roleErr.message }, 400);
-    } else if (area) {
-      await admin.from("user_roles").update({ area, active: true }).eq("id", existingRole.id);
-    }
-
-    return json({
-      ok: true,
-      user_id: userId,
-      provisional_password: dni,
-      message: `Usuario habilitado. Credenciales: ${email} / ${dni}`,
-    });
-  } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : "Error interno";
-    return json({ error: message }, 500);
-  }
-});
-
-function json(payload: unknown, status = 200) {
-  return new Response(JSON.stringify(payload), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
 </file>
 
 <file path="supabase/migrations/20260510195340_83f7e08d-60bb-4a6c-8290-559aae0e84f5.sql">
@@ -22105,6 +21515,470 @@ function Modal({ title, onClose, children }: ModalProps) {
 }
 </file>
 
+<file path="src/pages/admin/IntendenteDashboard.tsx">
+import { useEffect, useMemo, useState, ElementType } from "react";
+import { Link } from "react-router-dom";
+import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/context/AuthContext";
+import { toast } from "sonner";
+import { Megaphone, Users, Wallet, AlertTriangle, BarChart3, Send, Loader2, Activity, Clock, FileText, MapPin, Heart, TrendingUp } from "lucide-react";
+import { CLAIM_AREAS } from "@/data/mock";
+import MayorFullscreen from "@/components/MayorFullscreen";
+
+type Audience = "residents" | "tourists" | "both";
+
+function SelectorAudienciaBanner() {
+  const { user } = useAuth();
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [audience, setAudience] = useState<Audience>("residents");
+  const [saving, setSaving] = useState(false);
+
+  const publish = async () => {
+    if (!title.trim() || !description.trim() || !user) {
+      toast.error("Completá título y descripción");
+      return;
+    }
+    setSaving(true);
+    
+    // Obtenemos el municipio para asegurar que el banner quede anclado a su jurisdicción
+    const { data: profile } = await supabase.from("profiles").select("municipality_id").eq("id", user.id).maybeSingle();
+    
+    const { error } = await supabase.from("announcements").insert({
+      title: title.trim(),
+      description: description.trim(),
+      audience,
+      color: "navy",
+      enabled: true,
+      tags: ["intendente"],
+      municipality_id: profile?.municipality_id,
+    });
+    
+    setSaving(false);
+    if (error) {
+      toast.error("No se pudo publicar: " + error.message);
+      return;
+    }
+    toast.success(`Banner publicado (${audience})`);
+    setTitle("");
+    setDescription("");
+  };
+
+  const opts: { id: Audience; label: string; hint: string }[] = [
+    { id: "residents", label: "Vecino", hint: "Visible para residentes" },
+    { id: "tourists", label: "Turista", hint: "Visible solo para turistas" },
+    { id: "both", label: "Ambos", hint: "Vecinos + turistas" },
+  ];
+
+  return (
+    <div className="bg-white rounded-[16px] border p-5 space-y-4">
+      <div className="flex items-center gap-2">
+        <Megaphone className="w-4 h-4 text-isa-navy" />
+        <h3 className="font-extrabold text-isa-navy text-sm">Publicar Banner Home</h3>
+      </div>
+
+      <div>
+        <label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">Destino</label>
+        <div className="mt-2 grid grid-cols-3 gap-2">
+          {opts.map((o) => (
+            <button
+              key={o.id}
+              type="button"
+              onClick={() => setAudience(o.id)}
+              className={`p-3 rounded-xl border text-left transition-all opacity-100 ${
+                audience === o.id ? "bg-isa-navy text-white border-isa-navy" : "bg-white text-isa-navy hover:border-isa-navy/40"
+              }`}
+            >
+              <div className="text-[13px] font-extrabold">{o.label}</div>
+              <div className={`text-[10px] mt-0.5 ${audience === o.id ? "text-white/70" : "text-muted-foreground"}`}>{o.hint}</div>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <input
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        placeholder="Título del banner"
+        className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm"
+      />
+      <textarea
+        value={description}
+        onChange={(e) => setDescription(e.target.value)}
+        rows={3}
+        placeholder="Mensaje a publicar"
+        className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm resize-none"
+      />
+
+      <button
+        onClick={publish}
+        disabled={saving}
+        className="inline-flex items-center gap-2 bg-isa-navy text-white rounded-[12px] px-4 py-2.5 text-[13px] font-bold opacity-100 disabled:opacity-60"
+      >
+        {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+        Publicar banner
+      </button>
+    </div>
+  );
+}
+
+// Interfaz para limpiar el error de ESLint de tipo 'any'
+interface StatProps {
+  icon: ElementType;
+  label: string;
+  value: number;
+  color: string;
+}
+
+const Stat = ({ icon: Icon, label, value, color }: StatProps) => (
+  <div className="bg-white rounded-[16px] border p-4">
+    <div className="flex items-center justify-between">
+      <div className="text-[10px] uppercase tracking-[0.18em] font-bold text-muted-foreground">{label}</div>
+      <div className="w-9 h-9 rounded-xl grid place-items-center" style={{ background: color + "15", color }}>
+        <Icon strokeWidth={1.5} className="w-[18px] h-[18px]" />
+      </div>
+    </div>
+    <div className="font-display text-[26px] font-extrabold text-isa-navy mt-2 leading-none">{value}</div>
+  </div>
+);
+
+type ClaimRow = {
+  id: string;
+  area: string | null;
+  status: "Pendiente" | "En curso" | "Cerrado";
+  created_at: string;
+  resolved_at: string | null;
+  category: string;
+  description: string | null;
+  resolution_note: string | null;
+};
+
+const STATUS_DOT: Record<string, string> = {
+  Pendiente: "bg-red-500",
+  "En curso": "bg-amber-400",
+  Cerrado: "bg-emerald-500",
+};
+
+function AnalisisDeGestion() {
+  const { user } = useAuth();
+  const [rows, setRows] = useState<ClaimRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState<string>("");
+
+  useEffect(() => {
+    let isMounted = true;
+    if (!user) return;
+
+    const fetchClaims = async () => {
+      try {
+        // Blindaje Multi-Tenant para la tabla de análisis
+        const { data: profile } = await supabase
+          .from("profiles")
+          .select("municipality_id")
+          .eq("id", user.id)
+          .maybeSingle();
+
+        const muniId = profile?.municipality_id;
+        if (!muniId || !isMounted) return;
+
+        const { data } = await supabase
+          .from("claims")
+          .select("id,area,status,created_at,resolved_at,category,description,resolution_note")
+          .eq("municipality_id", muniId)
+          .order("created_at", { ascending: false })
+          .limit(500);
+          
+        if (isMounted) {
+          setRows((data as ClaimRow[]) || []);
+          setLoading(false);
+        }
+      } catch (error) {
+        console.error("Error al cargar análisis de gestión:", error);
+        if (isMounted) setLoading(false);
+      }
+    };
+
+    fetchClaims();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [user]);
+
+  const stats = useMemo(() => {
+    const byArea: Record<string, { total: number; pendientes: number; cerrados: number; totalHrs: number; count: number }> = {};
+    for (const a of CLAIM_AREAS) byArea[a] = { total: 0, pendientes: 0, cerrados: 0, totalHrs: 0, count: 0 };
+    for (const r of rows) {
+      const a = (r.area as string) || "Sin área";
+      if (!byArea[a]) byArea[a] = { total: 0, pendientes: 0, cerrados: 0, totalHrs: 0, count: 0 };
+      byArea[a].total++;
+      if (r.status === "Pendiente" || r.status === "En curso") byArea[a].pendientes++;
+      if (r.status === "Cerrado" && r.resolved_at) {
+        byArea[a].cerrados++;
+        const hrs = (new Date(r.resolved_at).getTime() - new Date(r.created_at).getTime()) / 36e5;
+        byArea[a].totalHrs += hrs;
+        byArea[a].count++;
+      }
+    }
+    let topPend: { area: string; n: number } = { area: "—", n: 0 };
+    let bestAvgHrs = 0;
+    let allHrs = 0;
+    let allCount = 0;
+    for (const [area, s] of Object.entries(byArea)) {
+      if (s.pendientes > topPend.n) topPend = { area, n: s.pendientes };
+      allHrs += s.totalHrs;
+      allCount += s.count;
+    }
+    bestAvgHrs = allCount ? allHrs / allCount : 0;
+    return { byArea, topPend, avgHrs: bestAvgHrs };
+  }, [rows]);
+
+  const filtered = filter ? rows.filter((r) => r.area === filter) : rows;
+  const maxBar = Math.max(1, ...Object.values(stats.byArea).map((s) => s.total));
+
+  return (
+    <section className="bg-white rounded-[16px] border p-5 space-y-5">
+      <div className="flex items-center gap-2">
+        <Activity className="w-4 h-4 text-isa-navy" />
+        <h3 className="font-extrabold text-isa-navy text-sm">Análisis de Gestión por Área</h3>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div className="rounded-xl border p-4 bg-red-500/5">
+          <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground">Área con más pendientes</div>
+          <div className="font-display font-extrabold text-isa-navy text-xl mt-1">{stats.topPend.area}</div>
+          <div className="text-xs text-muted-foreground mt-0.5">{stats.topPend.n} reclamos sin resolver</div>
+        </div>
+        <div className="rounded-xl border p-4 bg-emerald-500/5">
+          <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground inline-flex items-center gap-1"><Clock className="w-3 h-3" /> Tiempo promedio de respuesta</div>
+          <div className="font-display font-extrabold text-isa-navy text-xl mt-1">
+            {stats.avgHrs > 0 ? `${stats.avgHrs.toFixed(1)} hs` : "—"}
+          </div>
+          <div className="text-xs text-muted-foreground mt-0.5">Promedio entre todas las áreas</div>
+        </div>
+      </div>
+
+      <div>
+        <div className="text-xs font-bold text-muted-foreground mb-2">Reclamos por área</div>
+        <div className="space-y-1.5">
+          {Object.entries(stats.byArea).map(([area, s]) => (
+            <button
+              key={area}
+              onClick={() => setFilter(filter === area ? "" : area)}
+              className={`w-full text-left p-2 rounded-lg transition-colors ${filter === area ? "bg-isa-navy/5 ring-1 ring-isa-navy" : "hover:bg-muted/40"}`}
+            >
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-bold text-isa-navy">{area}</span>
+                <span className="text-muted-foreground">{s.pendientes} pend · {s.cerrados} cerrados · {s.total} total</span>
+              </div>
+              <div className="mt-1 h-2 rounded-full bg-muted overflow-hidden">
+                <div className="h-full bg-isa-navy" style={{ width: `${(s.total / maxBar) * 100}%` }} />
+              </div>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <div className="text-xs font-bold text-muted-foreground">
+            Vista espejo {filter && `· filtrado por ${filter}`}
+          </div>
+          {filter && (
+            <button onClick={() => setFilter("")} className="text-[11px] font-bold text-muno-blue">Quitar filtro</button>
+          )}
+        </div>
+        {loading ? (
+          <div className="text-xs text-muted-foreground py-4 text-center inline-flex items-center gap-2 justify-center w-full">
+            <Loader2 className="w-3 h-3 animate-spin" /> Cargando…
+          </div>
+        ) : filtered.length === 0 ? (
+          <div className="text-xs text-muted-foreground py-4 text-center border rounded-lg">Sin reclamos.</div>
+        ) : (
+          <div className="border rounded-lg divide-y max-h-72 overflow-y-auto">
+            {filtered.slice(0, 30).map((r) => (
+              <div key={r.id} className="p-3 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="font-bold text-isa-navy">#MUNO-{r.id.slice(0, 4).toUpperCase()} · {r.category}</div>
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-muted">
+                    <span className={`w-1.5 h-1.5 rounded-full ${STATUS_DOT[r.status]}`} /> {r.status}
+                  </span>
+                </div>
+                <div className="text-muted-foreground mt-0.5">Área: {r.area || "—"} · {new Date(r.created_at).toLocaleDateString("es-AR")}</div>
+                {r.resolution_note && (
+                  <div className="mt-1 p-2 rounded bg-muted/50 italic text-isa-navy">"{r.resolution_note}"</div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function InformeEjecutivoMensual() {
+  const month = new Date().toLocaleDateString("es-AR", { month: "long", year: "numeric" });
+  const blocks = [
+    {
+      icon: Activity,
+      color: "#1A56F0",
+      title: "Resumen de Eficiencia",
+      body: "Área de Infraestructura resolvió el 85% de los incidentes este mes.",
+      kpi: "24 hs",
+      kpiLabel: "Tiempo promedio de respuesta",
+    },
+    {
+      icon: MapPin,
+      color: "#EF4444",
+      title: "Mapa de Calor de Demandas",
+      body: "Se detecta un 60% de reclamos de luminarias concentrados en la Zona Norte.",
+      kpi: "Zona Norte",
+      kpiLabel: "Recomendación: reforzar cuadrilla en dicho cuadrante.",
+    },
+    {
+      icon: TrendingUp,
+      color: "#F59E0B",
+      title: "Comunicación Segmentada",
+      body: "El 70% de los clics en banners se concentraron en 'Talleres Culturales'.",
+      kpi: "70%",
+      kpiLabel: "Recomendación: promocionar inscripciones de Cultura el próximo mes.",
+    },
+    {
+      icon: Heart,
+      color: "#00B89C",
+      title: "Termómetro Turístico",
+      body: "Atractivo más votado del mes con corazones: Paseo del Lago.",
+      kpi: "4.7 / 5 ★",
+      kpiLabel: "Puntuación general del municipio por visitantes",
+    },
+  ];
+
+  return (
+    <section className="bg-white rounded-[16px] border p-5 space-y-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <FileText className="w-4 h-4 text-isa-navy" />
+          <div>
+            <h3 className="font-extrabold text-isa-navy text-sm">Informe Ejecutivo de Gestión Mensual</h3>
+            <p className="text-[11px] text-muted-foreground capitalize">{month} · datos demo</p>
+          </div>
+        </div>
+        <span className="text-[10px] uppercase tracking-[0.18em] font-bold text-isa-navy bg-isa-light px-2 py-1 rounded-full">
+          Modo Espejo
+        </span>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {blocks.map((b) => (
+          <div key={b.title} className="rounded-xl border p-4 bg-gradient-to-br from-white to-muted/30">
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-lg grid place-items-center" style={{ background: b.color + "15", color: b.color }}>
+                <b.icon strokeWidth={1.5} className="w-4 h-4" />
+              </div>
+              <div className="text-xs font-extrabold text-isa-navy">{b.title}</div>
+            </div>
+            <div className="font-display font-extrabold text-isa-navy text-[22px] leading-none mt-3">{b.kpi}</div>
+            <div className="text-[11px] text-muted-foreground mt-1">{b.kpiLabel}</div>
+            <p className="text-xs text-isa-navy mt-3 leading-relaxed">{b.body}</p>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+export default function IntendenteDashboard() {
+  const { user } = useAuth();
+  const [counts, setCounts] = useState({ claims: 0, businesses: 0, content: 0, banners: 0 });
+
+  useEffect(() => {
+    let isMounted = true; // <-- Flag de montaje síncrono
+    if (!user) return;
+
+    (async () => {
+      try {
+        // Blindaje Multi-Tenant para las métricas globales
+        const { data: profile } = await supabase
+          .from("profiles")
+          .select("municipality_id")
+          .eq("id", user.id)
+          .maybeSingle();
+
+        const muniId = profile?.municipality_id;
+        if (!muniId || !isMounted) return;
+
+        const [c1, c2, c3, c4] = await Promise.all([
+          supabase.from("claims").select("id", { count: "exact", head: true }).eq("municipality_id", muniId),
+          supabase.from("businesses").select("id", { count: "exact", head: true }).eq("municipality_id", muniId),
+          supabase.from("content_items").select("id", { count: "exact", head: true }).eq("municipality_id", muniId),
+          supabase.from("announcements").select("id", { count: "exact", head: true }).eq("municipality_id", muniId),
+        ]);
+        
+        if (isMounted) {
+          setCounts({
+            claims: c1.count || 0,
+            businesses: c2.count || 0,
+            content: c3.count || 0,
+            banners: c4.count || 0,
+          });
+        }
+      } catch (err) {
+        console.error("Error al recuperar estadísticas en dashboard ejecutivo:", err);
+      }
+    })();
+
+    return () => {
+      isMounted = false; // <-- Limpieza al desmontar
+    };
+  }, [user]);
+
+  return (
+    <div className="space-y-6">
+      <MayorFullscreen />
+      <header>
+        <h2 className="font-display font-extrabold text-isa-navy text-[22px] leading-tight">
+          Dashboard del Intendente
+        </h2>
+        <p className="text-sm text-muted-foreground mt-1">
+          Supervisión global del municipio. Visualizá indicadores y publicá comunicaciones.
+        </p>
+      </header>
+
+      <section className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <Stat icon={AlertTriangle} label="Reclamos" value={counts.claims} color="#EF4444" />
+        <Stat icon={Wallet} label="Comercios" value={counts.businesses} color="#1A56F0" />
+        <Stat icon={Users} label="Contenido publicado" value={counts.content} color="#00B89C" />
+        <Stat icon={Megaphone} label="Banners totales" value={counts.banners} color="#F59E0B" />
+      </section>
+
+      <InformeEjecutivoMensual />
+
+      <AnalisisDeGestion />
+
+      <SelectorAudienciaBanner />
+
+      <section className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+        <Link to="/admin/turismo" className="bg-white rounded-[16px] border p-4 hover:shadow-md transition-shadow">
+          <div className="font-extrabold text-isa-navy text-sm">Guía de Turismo</div>
+          <p className="text-xs text-muted-foreground mt-1">Cargá comercios, eventos y atractivos.</p>
+        </Link>
+        <Link to="/admin/hacienda" className="bg-white rounded-[16px] border p-4 hover:shadow-md transition-shadow">
+          <div className="font-extrabold text-isa-navy text-sm">Hacienda</div>
+          <p className="text-xs text-muted-foreground mt-1">Habilitaciones y vencimientos.</p>
+        </Link>
+        <Link to="/admin/metricas" className="bg-white rounded-[16px] border p-4 hover:shadow-md transition-shadow">
+          <div className="font-extrabold text-isa-navy text-sm flex items-center gap-2">
+            <BarChart3 className="w-4 h-4" /> Informe ISA
+          </div>
+          <p className="text-xs text-muted-foreground mt-1">KPIs y conclusión estratégica.</p>
+        </Link>
+      </section>
+    </div>
+  );
+}
+</file>
+
 <file path="src/pages/auth/Signup.tsx">
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
@@ -24030,6 +23904,205 @@ const App = () => (
 );
 
 export default App;
+</file>
+
+<file path="supabase/functions/invite-staff/index.ts">
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
+
+type Role = "area_manager" | "tourism_chief" | "mayor" | "resident" | "admin";
+
+const HIERARCHY_ROLES: Role[] = ["area_manager", "tourism_chief", "mayor", "admin"];
+
+// Interfaces estrictas para eliminar los 'any'
+interface DBUserRole {
+  id?: string;
+  role: string;
+  area: string | null;
+  municipality_id: string | null;
+}
+
+interface InsertRolePayload {
+  user_id: string;
+  role: Role;
+  area: string | null;
+  active: boolean;
+  municipality_id?: string;
+}
+
+interface ProfileUpsert {
+  id: string;
+  email: string;
+  full_name: string;
+  dni: string;
+  municipality_id?: string;
+}
+
+Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+
+  try {
+    const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
+    const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+    const ANON_KEY = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || Deno.env.get("SUPABASE_ANON_KEY")!;
+
+    const authHeader = req.headers.get("Authorization") || "";
+    const userClient = createClient(SUPABASE_URL, ANON_KEY, {
+      global: { headers: { Authorization: authHeader } },
+    });
+    const admin = createClient(SUPABASE_URL, SERVICE_KEY);
+
+    const { data: userData } = await userClient.auth.getUser();
+    const caller = userData?.user;
+    if (!caller) {
+      return json({ error: "Unauthorized" }, 401);
+    }
+
+    const body = await req.json();
+    const fullName = String(body.full_name || "").trim();
+    const email = String(body.email || "").trim().toLowerCase();
+    const dni = String(body.dni || "").replace(/\D/g, "");
+    const role = String(body.role || "") as Role;
+    const area = body.area ? String(body.area) : null;
+
+    if (!fullName || fullName.length < 2 || fullName.length > 120) return json({ error: "Nombre inválido" }, 400);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ error: "Email inválido" }, 400);
+    if (!/^\d{7,9}$/.test(dni)) return json({ error: "DNI inválido (7-9 dígitos)" }, 400);
+    if (!["area_manager", "tourism_chief", "mayor", "resident"].includes(role)) return json({ error: "Rol inválido" }, 400);
+
+    // Get caller roles + area
+    const { data: callerRolesData } = await admin
+      .from("user_roles")
+      .select("role,area,municipality_id")
+      .eq("user_id", caller.id);
+
+    const callerRoles = (callerRolesData || []) as DBUserRole[];
+    const callerRoleNames = callerRoles.map((r) => r.role);
+    const isAdmin = callerRoleNames.includes("admin");
+    const isMayor = callerRoleNames.includes("mayor");
+    const isAreaMgr = callerRoleNames.includes("area_manager");
+    const callerArea = callerRoles.find((r) => r.role === "area_manager")?.area || null;
+    const callerMunicipality = callerRoles.find((r) => r.municipality_id)?.municipality_id || null;
+
+    // Authorization: hierarchy
+    if (HIERARCHY_ROLES.includes(role)) {
+      // Creating an area chief / tourism chief / mayor → only admin or mayor
+      if (!isAdmin && !isMayor) {
+        return json({ error: "Solo el Intendente puede crear Jefes de Área" }, 403);
+      }
+    } else {
+      // Creating a collaborator (resident) → admin/mayor OR area_manager (own area only)
+      if (!isAdmin && !isMayor) {
+        if (!isAreaMgr) return json({ error: "No autorizado" }, 403);
+        if (!area || area !== callerArea) {
+          return json({ error: "Solo podés agregar colaboradores en tu propia área" }, 403);
+        }
+      }
+    }
+
+    // Check if user exists in profiles by email
+    let userId: string | null = null;
+    const { data: existingProfile } = await admin
+      .from("profiles")
+      .select("id, municipality_id, dni")
+      .eq("email", email)
+      .maybeSingle();
+
+    if (existingProfile?.id) {
+      userId = existingProfile.id;
+      
+      // SOLUCIÓN BOLA P1: Impedir alteración de perfiles inter-municipios
+      if (existingProfile.municipality_id && callerMunicipality && existingProfile.municipality_id !== callerMunicipality) {
+        return json({ error: "El usuario ya pertenece a otra jurisdicción municipal" }, 403);
+      }
+    } else {
+      // Create auth user with DNI as provisional password
+      const { data: created, error: createErr } = await admin.auth.admin.createUser({
+        email,
+        password: dni,
+        email_confirm: true,
+        user_metadata: { full_name: fullName, dni, municipality_id: callerMunicipality },
+      });
+      if (createErr || !created?.user) {
+        return json({ error: "No se pudo crear el usuario: " + (createErr?.message || "desconocido") }, 400);
+      }
+      userId = created.user.id;
+    }
+
+    // Upsert profile (name, dni, municipality) - Seguro con ignoreDuplicates
+    const profilePayload: ProfileUpsert = {
+      id: userId,
+      email,
+      full_name: fullName,
+      dni,
+    };
+    if (callerMunicipality) {
+      profilePayload.municipality_id = callerMunicipality;
+    }
+
+    await admin
+      .from("profiles")
+      .upsert(profilePayload, { onConflict: "id", ignoreDuplicates: true });
+
+    // Insert user_roles (avoid duplicate role+user)
+    const { data: existingRoleData } = await admin
+      .from("user_roles")
+      .select("id")
+      .eq("user_id", userId)
+      .eq("role", role)
+      .maybeSingle();
+
+    const existingRole = existingRoleData as { id: string } | null;
+
+    if (!existingRole) {
+      const insertPayload: InsertRolePayload = {
+        user_id: userId,
+        role,
+        area: HIERARCHY_ROLES.includes(role) || role === "resident" ? area : null,
+        active: true,
+      };
+      if (callerMunicipality) {
+        insertPayload.municipality_id = callerMunicipality;
+      }
+      
+      const { error: roleErr } = await admin.from("user_roles").insert(insertPayload);
+      if (roleErr) return json({ error: "No se pudo asignar el rol: " + roleErr.message }, 400);
+    } else if (area) {
+      // Asegurar que el update de user_roles filtre estrictamente por el tenant del emisor
+      const { error: updateRoleErr } = await admin
+        .from("user_roles")
+        .update({ area, active: true })
+        .eq("id", existingRole.id)
+        .eq("municipality_id", callerMunicipality); // <-- Blindaje BOLA añadido
+
+      if (updateRoleErr) {
+        return json({ error: "No se pudo actualizar el rol debido a discrepancia de jurisdicción" }, 403);
+      }
+    }
+
+    return json({
+      ok: true,
+      user_id: userId,
+      provisional_password: dni,
+      message: `Usuario habilitado. Credenciales: ${email} / ${dni}`,
+    });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "Error interno";
+    return json({ error: message }, 500);
+  }
+});
+
+function json(payload: unknown, status = 200) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
 </file>
 
 <file path=".gitignore">

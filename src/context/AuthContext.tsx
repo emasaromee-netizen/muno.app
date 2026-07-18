@@ -79,7 +79,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const signOut = async () => {
+    // 1. Destruimos la sesión en el backend
     await supabase.auth.signOut();
+    
+    // 2. Limpieza profunda global de la memoria del navegador (Red Team Fix)
+    localStorage.removeItem("muno.inscripciones.v1");
+    localStorage.removeItem("muno.guest.notif.reads");
+    localStorage.removeItem("supabase.auth.token");
   };
 
   return (

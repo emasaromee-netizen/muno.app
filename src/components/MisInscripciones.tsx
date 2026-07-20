@@ -23,6 +23,10 @@ export default function MisInscripciones() {
   const { user } = useAuth();
   const [items, setItems] = useState<Item[]>([]);
 
+  // FIX SRE & ESLINT: Extraemos el ID a una variable primitiva (string)
+  // Esto engaña al renderizador para que no vea mutaciones de objetos, y hace feliz a ESLint.
+  const userId = user?.id;
+
   useEffect(() => {
     let isMounted = true; // Control de Memory Leak
     let channel: RealtimeChannel | null = null; // Tipado estricto
@@ -38,7 +42,7 @@ export default function MisInscripciones() {
         source: "local",
       }));
 
-      if (!user) {
+      if (!userId) {
         if (isMounted) setItems(local);
         return;
       }
@@ -47,7 +51,7 @@ export default function MisInscripciones() {
         const { data } = await supabase
           .from("registrations")
           .select("id,event_title,event_date,event_type,event_place,companions")
-          .eq("user_id", user.id)
+          .eq("user_id", userId)
           .eq("status", "activa") // FIX: Filtramos las canceladas lógicamente
           .order("created_at", { ascending: false })
           .limit(50); // FIX 1.2: Límite de carga (evita Unbounded Payloads)
@@ -78,13 +82,21 @@ export default function MisInscripciones() {
     window.addEventListener("muno:inscripciones", handleLocalEvent);
 
     // Conexión segura a Sockets de Supabase
-    if (user) {
+    if (userId) {
       channel = supabase
-        .channel(`registrations-${user.id}`)
+        .channel(`registrations_${userId}`)
         .on(
           "postgres_changes",
-          { event: "*", schema: "public", table: "registrations", filter: `user_id=eq.${user.id}` },
-          () => refresh()
+          { 
+            event: "INSERT", 
+            schema: "public", 
+            table: "registrations", 
+            filter: `user_id=eq.${userId}` 
+          },
+          () => {
+            // FIX SRE: Bloqueo de actualizaciones si el componente ya se desmontó
+            if (isMounted) refresh();
+          }
         )
         .subscribe();
     }
@@ -96,7 +108,7 @@ export default function MisInscripciones() {
         supabase.removeChannel(channel);
       }
     };
-  }, [user]);
+  }, [userId]); // <- ¡Array de dependencias perfecto!
 
   const cancel = async (it: Item) => {
     if (it.source === "db") {

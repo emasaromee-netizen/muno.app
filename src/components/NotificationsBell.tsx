@@ -3,6 +3,8 @@ import { Bell, X } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
+import { useMunicipality } from "@/context/MunicipalityContext"; // <-- Necesario para el filtro de canal
+import type { RealtimeChannel } from "@supabase/supabase-js"; // <-- Para tipar los canales
 
 type Notif = {
   id: string;
@@ -34,6 +36,7 @@ function addGuestRead(id: string) {
 
 export default function NotificationsBell() {
   const { user, roles } = useAuth();
+  const { municipalityInfo } = useMunicipality(); // Obtenemos info del tenant actual
   const nav = useNavigate();
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<Notif[]>([]);
@@ -53,12 +56,13 @@ export default function NotificationsBell() {
     ? ["residents", "both"]
     : ["tourists", "both"];
 
-  // FIX MEDIO: Convertimos el array a string para estabilizar la referencia en memoria
-  // y evitar desconexiones constantes del WebSocket.
   const rolesKey = roles.join(",");
+  const userId = user?.id;
+  const municipalityId = municipalityInfo?.id;
 
   useEffect(() => {
-    let isMounted = true; // Escudo protector contra fugas de memoria
+    let isMounted = true;
+    const channels: RealtimeChannel[] = []; // Array para guardar múltiples canales
 
     const load = async () => {
       let query = supabase
@@ -67,8 +71,8 @@ export default function NotificationsBell() {
         .order("created_at", { ascending: false })
         .limit(30);
 
-      if (user) {
-        query = query.or(`user_id.eq.${user.id},and(user_id.is.null,audience.in.(${audienceFilter.join(",")}))`);
+      if (userId) {
+        query = query.or(`user_id.eq.${userId},and(user_id.is.null,audience.in.(${audienceFilter.join(",")}))`);
       } else {
         query = query.is("user_id", null).in("audience", audienceFilter);
       }
@@ -79,11 +83,11 @@ export default function NotificationsBell() {
         setItems((data as Notif[]) || []);
       }
 
-      if (user && isMounted) {
+      if (userId && isMounted) {
         const { data: reads } = await supabase
           .from("notification_reads")
           .select("notification_id")
-          .eq("user_id", user.id);
+          .eq("user_id", userId);
           
         if (isMounted) {
           setReadIds(new Set((reads || []).map((r: { notification_id: string }) => r.notification_id)));
@@ -95,19 +99,51 @@ export default function NotificationsBell() {
 
     load();
 
-    const ch = supabase
-      .channel("notif_bell")
-      .on("postgres_changes", { event: "*", schema: "public", table: "notifications" }, () => {
-        if (isMounted) load();
-      })
-      .subscribe();
+    // 🔴 FIX CRÍTICO SRE: Prevención de Tormenta de Difusión (Broadcast Storm)
+    
+    // Canal 1: Suscribirse ÚNICAMENTE a las alertas públicas del municipio donde está el usuario
+    if (municipalityId) {
+      const muniChannel = supabase
+        .channel(`notif_muni_${municipalityId}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "notifications",
+            filter: `municipality_id=eq.${municipalityId}` // El filtro mágico en servidor
+          },
+          () => { if (isMounted) load(); }
+        )
+        .subscribe();
+      channels.push(muniChannel);
+    }
+
+    // Canal 2: Suscribirse ÚNICAMENTE a notificaciones privadas enviadas a este usuario exacto
+    if (userId) {
+      const userChannel = supabase
+        .channel(`notif_user_${userId}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "notifications",
+            filter: `user_id=eq.${userId}` // El filtro mágico en servidor
+          },
+          () => { if (isMounted) load(); }
+        )
+        .subscribe();
+      channels.push(userChannel);
+    }
 
     return () => {
-      isMounted = false; // Bloquea actualizaciones de estado si el componente se desmonta
-      supabase.removeChannel(ch); // Cierra el WebSocket de Supabase
+      isMounted = false;
+      // Cerramos ordenadamente todos los canales al desmontar
+      channels.forEach(ch => supabase.removeChannel(ch));
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id, rolesKey]); // <-- FIX Aplicado en el array de dependencias
+  }, [userId, municipalityId, rolesKey]); 
 
   useEffect(() => {
     const onClick = (e: MouseEvent) => {
@@ -154,7 +190,6 @@ export default function NotificationsBell() {
   const onItemClick = async (n: Notif) => {
     await markRead(n.id);
     if (n.link) {
-      // SOLUCIÓN: Preservar SPA abriendo http en nueva pestaña
       if (n.link.startsWith("http")) {
         window.open(n.link, "_blank", "noopener,noreferrer");
       } else if (n.link.startsWith("tel:") || n.link.startsWith("mailto:")) {

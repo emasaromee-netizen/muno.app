@@ -28,6 +28,54 @@ interface ClaimPayload {
 
 const STEPS = ["Categoría", "Fotos", "Ubicación", "Resumen"] as const;
 
+// 🔴 FIX CRÍTICO SRE: Función de compresión de imágenes asíncrona en cliente
+const compressImage = (file: File): Promise<Blob> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.src = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(img.src);
+      const canvas = document.createElement("canvas");
+      // Redimensionar a Full HD máximo
+      const MAX_WIDTH = 1920;
+      const MAX_HEIGHT = 1080;
+      let width = img.width;
+      let height = img.height;
+
+      if (width > height) {
+        if (width > MAX_WIDTH) {
+          height *= MAX_WIDTH / width;
+          width = MAX_WIDTH;
+        }
+      } else {
+        if (height > MAX_HEIGHT) {
+          width *= MAX_HEIGHT / height;
+          height = MAX_HEIGHT;
+        }
+      }
+
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return reject(new Error("Canvas context is null"));
+      ctx.drawImage(img, 0, 0, width, height);
+      // Comprimir a JPEG al 75%
+      canvas.toBlob(
+        (blob) => {
+          if (blob) {
+            resolve(blob);
+          } else {
+            reject(new Error("Compression output blob is null"));
+          }
+        },
+        "image/jpeg",
+        0.75
+      );
+    };
+    img.onerror = (err) => reject(err);
+  });
+};
+
 export default function Reclamos() {
   const navigate = useNavigate();
   const { user } = useAuth();
@@ -90,21 +138,35 @@ export default function Reclamos() {
     const uploadedUrls: string[] = [];
     for (let i = 0; i < photoFiles.length; i++) {
       const file = photoFiles[i];
-      const fileExt = file.name.split(".").pop() || "jpg";
+      const fileExt = "jpg"; // Forzamos formato por la compresión
       const filePath = `claims/${user.id}/${Date.now()}-${i}.${fileExt}`;
       
-      const { error: uploadError } = await supabase.storage
-        .from("avatars") 
-        .upload(filePath, file, { contentType: file.type });
+      try {
+        // Ejecutamos la compresión asíncrona reduciendo drásticamente el payload
+        const compressedBlob = await compressImage(file);
+        
+        const { error: uploadError } = await supabase.storage
+          .from("avatars") 
+          .upload(filePath, compressedBlob, { 
+            contentType: "image/jpeg",
+            cacheControl: "31536000",
+            upsert: true
+          });
 
-      if (uploadError) {
+        if (uploadError) {
+          setSaving(false);
+          toast.error(`Error de conexión al subir la imagen ${i + 1}`);
+          return;
+        }
+
+        const { data: urlData } = supabase.storage.from("avatars").getPublicUrl(filePath);
+        uploadedUrls.push(urlData.publicUrl);
+      } catch (err) {
         setSaving(false);
-        toast.error(`Error de conexión al subir la imagen ${i + 1}`);
+        toast.error("Error al procesar la imagen en tu dispositivo.");
+        console.error(err);
         return;
       }
-
-      const { data: urlData } = supabase.storage.from("avatars").getPublicUrl(filePath);
-      uploadedUrls.push(urlData.publicUrl);
     }
 
     const finalArea = area || category?.area || "";

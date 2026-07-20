@@ -25,6 +25,10 @@ const C = createContext<Ctx>({
   setMunicipality: () => {} 
 });
 
+// 🟡 FIX MEDIO SRE: Caché estática en memoria (RAM)
+// Sobrevive a los re-renderizados y evita llamadas redundantes al servidor.
+const municipalityCache = new Map<string, MunicipalityInfo>();
+
 export function MunicipalityProvider({ children }: { children: ReactNode }) {
   const [municipality, setMun] = useState<string>(() => {
     try {
@@ -37,7 +41,15 @@ export function MunicipalityProvider({ children }: { children: ReactNode }) {
   const [municipalityInfo, setMunInfo] = useState<MunicipalityInfo | null>(() => {
     try {
       const raw = localStorage.getItem(KEY_INFO);
-      return raw ? JSON.parse(raw) : null;
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        // Pre-calentamos la caché en RAM con lo que recuperamos del navegador
+        if (parsed && parsed.name) {
+          municipalityCache.set(parsed.name, parsed);
+        }
+        return parsed;
+      }
+      return null;
     } catch {
       return null;
     }
@@ -62,6 +74,7 @@ export function MunicipalityProvider({ children }: { children: ReactNode }) {
               name: data.name,
               slug: data.slug,
             };
+            municipalityCache.set(data.name, info); // Guardamos en caché
             setMun(data.name);
             setMunInfo(info);
             try {
@@ -104,6 +117,18 @@ export function MunicipalityProvider({ children }: { children: ReactNode }) {
       console.error(err);
     }
 
+    // 1. CHEQUEO ULTRA RÁPIDO: Comprobar caché en RAM (Cache Hit)
+    if (municipalityCache.has(name)) {
+      const cached = municipalityCache.get(name)!;
+      setMunInfo(cached);
+      try {
+        localStorage.setItem(KEY_INFO, JSON.stringify(cached));
+      } catch (err) {
+        console.error(err);
+      }
+      return;
+    }
+
     // Si pasamos el ID directamente, evitamos la query y actualizamos caché
     if (explicitId) {
       const info: MunicipalityInfo = {
@@ -111,6 +136,7 @@ export function MunicipalityProvider({ children }: { children: ReactNode }) {
         name,
         slug: name.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
       };
+      municipalityCache.set(name, info); // Guardamos en caché
       setMunInfo(info);
       try {
         localStorage.setItem(KEY_INFO, JSON.stringify(info));
@@ -120,7 +146,7 @@ export function MunicipalityProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    // Resolver el UUID por nombre una única vez al cambiar de municipio
+    // Solo llegamos acá si la RAM no lo tenía (Cache Miss). Hacemos la consulta a la BD.
     const { data } = await supabase
       .from("municipalities")
       .select("id, name, slug")
@@ -133,6 +159,7 @@ export function MunicipalityProvider({ children }: { children: ReactNode }) {
         name: data.name,
         slug: data.slug,
       };
+      municipalityCache.set(name, info); // Guardamos en caché para la próxima vez
       setMunInfo(info);
       try {
         localStorage.setItem(KEY_INFO, JSON.stringify(info));

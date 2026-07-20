@@ -268,6 +268,7 @@ supabase/
     20260717120000_auditoria_redteam_fixes.sql
     20260718100000_compliance_soft_deletes.sql
     20260718120000_auditoria_big4_fixes.sql
+    20260720111500_fix_trigger_handle_new_user_null.sql
   config.toml
 .env.example
 .gitignore
@@ -3795,28 +3796,6 @@ export const initial_ratings: Record<string, number[]> = {
 };
 </file>
 
-<file path="src/hooks/use-mobile.tsx">
-import * as React from "react";
-
-const MOBILE_BREAKPOINT = 768;
-
-export function useIsMobile() {
-  const [isMobile, setIsMobile] = React.useState<boolean | undefined>(undefined);
-
-  React.useEffect(() => {
-    const mql = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT - 1}px)`);
-    const onChange = () => {
-      setIsMobile(window.innerWidth < MOBILE_BREAKPOINT);
-    };
-    mql.addEventListener("change", onChange);
-    setIsMobile(window.innerWidth < MOBILE_BREAKPOINT);
-    return () => mql.removeEventListener("change", onChange);
-  }, []);
-
-  return !!isMobile;
-}
-</file>
-
 <file path="src/hooks/use-toast.ts">
 import * as React from "react";
 
@@ -7085,6 +7064,29 @@ CREATE POLICY "registrations_owner_select" ON public.registrations
       )
     )
   );
+</file>
+
+<file path="supabase/migrations/20260720111500_fix_trigger_handle_new_user_null.sql">
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER 
+LANGUAGE plpgsql 
+SECURITY DEFINER 
+SET search_path = public 
+AS $$
+BEGIN
+  INSERT INTO public.profiles (id, email, full_name, dni, municipality_id)
+  VALUES (
+    NEW.id, 
+    NEW.email, 
+    COALESCE(NEW.raw_user_meta_data->>'full_name', ''),
+    NEW.raw_user_meta_data->>'dni',
+    COALESCE((NEW.raw_user_meta_data->>'municipality_id')::uuid, public.default_municipality_id())
+  )
+  ON CONFLICT (id) DO NOTHING;
+  
+  RETURN NEW;
+END;
+$$;
 </file>
 
 <file path=".env.example">
@@ -10461,112 +10463,6 @@ export default function PreviewSwitcher() {
 }
 </file>
 
-<file path="src/components/RatePueblo.tsx">
-import { useState } from "react";
-import { Star, Loader2, CheckCircle2 } from "lucide-react";
-import { supabase } from "@/integrations/supabase/client";
-import { useAuth } from "@/context/AuthContext";
-import { useMunicipality } from "@/context/MunicipalityContext";
-import { toast } from "sonner";
-import type { Database } from "@/integrations/supabase/types";
-
-type InsertRating = Database["public"]["Tables"]["tourist_ratings"]["Insert"];
-
-export default function RatePueblo() {
-  const { user } = useAuth();
-  const { municipality } = useMunicipality();
-  const [rating, setRating] = useState(0);
-  const [hover, setHover] = useState(0);
-  const [comment, setComment] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [done, setDone] = useState(false);
-
-  const submit = async () => {
-    if (!rating) {
-      toast.error("Elegí una calificación");
-      return;
-    }
-    setSaving(true);
-    let municipality_id: string | null = null;
-    if (municipality) {
-      const { data: m } = await supabase.from("municipalities").select("id").eq("name", municipality).maybeSingle();
-      municipality_id = m?.id || null;
-    }
-    
-    const payload: InsertRating = {
-      municipality_id,
-      user_id: user?.id || null,
-      rating,
-      comment: comment.trim() || null,
-    };
-
-    const { error } = await supabase.from("tourist_ratings").insert(payload);
-    
-    setSaving(false);
-    
-    if (error) {
-      toast.error("No se pudo enviar la valoración");
-    } else {
-      setDone(true);
-      toast.success("¡Gracias por puntuar el pueblo!");
-    }
-  };
-
-  if (done) {
-    return (
-      <div className="isa-card p-6 text-center space-y-2">
-        <CheckCircle2 className="w-10 h-10 text-muno-teal mx-auto" />
-        <div className="font-extrabold text-isa-navy">¡Gracias!</div>
-        <p className="text-sm text-muted-foreground">Tu opinión ayuda al municipio a mejorar la experiencia turística.</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="isa-card p-5 space-y-3">
-      <div>
-        <div className="font-extrabold text-isa-navy">Puntuá el pueblo</div>
-        <p className="text-xs text-muted-foreground">
-          {municipality ? `Tu experiencia visitando ${municipality}.` : "Contanos cómo fue tu visita al municipio."}
-        </p>
-      </div>
-      <div className="flex items-center gap-1">
-        {[1, 2, 3, 4, 5].map((n) => (
-          <button
-            key={n}
-            onMouseEnter={() => setHover(n)}
-            onMouseLeave={() => setHover(0)}
-            onClick={() => setRating(n)}
-            aria-label={`${n} estrellas`}
-            className="p-1"
-          >
-            <Star
-              strokeWidth={1.5}
-              className={`w-8 h-8 ${(hover || rating) >= n ? "fill-[hsl(var(--muno-amber))] text-[hsl(var(--muno-amber))]" : "text-muted-foreground"}`}
-            />
-          </button>
-        ))}
-      </div>
-      <textarea
-        value={comment}
-        onChange={(e) => setComment(e.target.value)}
-        rows={3}
-        placeholder="Comentario (opcional)"
-        className="w-full px-3 py-2 rounded-xl border bg-background text-sm resize-none outline-none focus:ring-2 focus:ring-isa-navy"
-      />
-      <button
-        onClick={submit}
-        disabled={saving || !rating}
-        className="w-full bg-isa-navy text-isa-white rounded-[16px] py-3 font-bold text-sm inline-flex items-center justify-center gap-2 disabled:opacity-50"
-      >
-        {saving && <Loader2 className="w-4 h-4 animate-spin" />}
-        Enviar valoración
-      </button>
-    </div>
-  );
-}
-</file>
-
 <file path="src/components/VecinoHomeBlocks.tsx">
 import { useEffect, useState } from "react";
 import useEmblaCarousel from "embla-carousel-react";
@@ -11344,6 +11240,32 @@ export const PreviewProvider = ({ children }: { children: ReactNode }) => {
 };
 
 export const usePreview = () => useContext(Ctx);
+</file>
+
+<file path="src/hooks/use-mobile.tsx">
+import * as React from "react";
+
+const MOBILE_BREAKPOINT = 768;
+
+export function useIsMobile() {
+  // FIX: Inicialización sincrónica para evitar parpadeos (Layout Thrashing)
+  const [isMobile, setIsMobile] = React.useState<boolean>(
+    () => typeof window !== "undefined" ? window.innerWidth < MOBILE_BREAKPOINT : false
+  );
+
+  React.useEffect(() => {
+    const mql = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT - 1}px)`);
+    const onChange = () => {
+      setIsMobile(window.innerWidth < MOBILE_BREAKPOINT);
+    };
+    mql.addEventListener("change", onChange);
+    setIsMobile(window.innerWidth < MOBILE_BREAKPOINT);
+    return () => mql.removeEventListener("change", onChange);
+  }, []);
+
+  // Ya no hace falta la doble negación (!!) porque el estado es estrictamente boolean
+  return isMobile; 
+}
 </file>
 
 <file path="src/integrations/lovable/index.ts">
@@ -17097,244 +17019,122 @@ export default function MisInscripciones() {
 }
 </file>
 
-<file path="src/components/NotificationsBell.tsx">
-import { useEffect, useState, useRef } from "react";
-import { Bell, X } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+<file path="src/components/RatePueblo.tsx">
+import { useState } from "react";
+import { Star, Loader2, CheckCircle2 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
+import { useMunicipality } from "@/context/MunicipalityContext";
+import { toast } from "sonner";
+import type { Database } from "@/integrations/supabase/types";
 
-type Notif = {
-  id: string;
-  title: string;
-  body: string;
-  link: string | null;
-  audience: string;
-  created_at: string;
-  user_id?: string | null;
-};
+type InsertRating = Database["public"]["Tables"]["tourist_ratings"]["Insert"];
 
-const STORAGE_KEY = "muno.guest.notif.reads";
+export default function RatePueblo() {
+  const { user } = useAuth();
+  const { municipality } = useMunicipality();
+  const [rating, setRating] = useState(0);
+  const [hover, setHover] = useState(0);
+  const [comment, setComment] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [done, setDone] = useState(false);
 
-function getGuestReads(): string[] {
-  try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
-  } catch {
-    return [];
+  // FIX MEDIO: Bloquear el widget si el usuario no tiene sesión iniciada
+  if (!user) {
+    return (
+      <div className="isa-card p-5 text-center space-y-2">
+        <div className="font-extrabold text-isa-navy">¿Te gustó el pueblo?</div>
+        <p className="text-xs text-muted-foreground">Iniciá sesión para valorar tu experiencia y ayudar al municipio.</p>
+      </div>
+    );
   }
-}
 
-function addGuestRead(id: string) {
-  const arr = getGuestReads();
-  if (!arr.includes(id)) {
-    arr.push(id);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(arr.slice(-200)));
+  const submit = async () => {
+    if (!rating) {
+      toast.error("Elegí una calificación");
+      return;
+    }
+    setSaving(true);
+    let municipality_id: string | null = null;
+    if (municipality) {
+      const { data: m } = await supabase.from("municipalities").select("id").eq("name", municipality).maybeSingle();
+      municipality_id = m?.id || null;
+    }
+    
+    const payload: InsertRating = {
+      municipality_id,
+      user_id: user.id, // TypeScript ahora sabe que user.id existe sí o sí
+      rating,
+      comment: comment.trim() || null,
+    };
+
+    const { error } = await supabase.from("tourist_ratings").insert(payload);
+    
+    setSaving(false);
+    
+    if (error) {
+      // Bonus UI: Si salta la restricción UNIQUE que pusimos en SQL, avisamos bien
+      if (error.code === '23505') {
+        toast.error("Ya enviaste una valoración para este municipio.");
+      } else {
+        toast.error("No se pudo enviar la valoración");
+      }
+    } else {
+      setDone(true);
+      toast.success("¡Gracias por puntuar el pueblo!");
+    }
+  };
+
+  if (done) {
+    return (
+      <div className="isa-card p-6 text-center space-y-2">
+        <CheckCircle2 className="w-10 h-10 text-muno-teal mx-auto" />
+        <div className="font-extrabold text-isa-navy">¡Gracias!</div>
+        <p className="text-sm text-muted-foreground">Tu opinión ayuda al municipio a mejorar la experiencia turística.</p>
+      </div>
+    );
   }
-}
-
-export default function NotificationsBell() {
-  const { user, roles } = useAuth();
-  const nav = useNavigate();
-  const [open, setOpen] = useState(false);
-  const [items, setItems] = useState<Notif[]>([]);
-  const [readIds, setReadIds] = useState<Set<string>>(new Set());
-  const ref = useRef<HTMLDivElement>(null);
-
-  const isResident =
-    roles.includes("resident") ||
-    roles.includes("admin") ||
-    roles.includes("mayor") ||
-    roles.includes("tourism_chief") ||
-    roles.includes("area_manager") ||
-    roles.includes("isa_super_admin") ||
-    roles.includes("isa_consultant");
-
-  const audienceFilter = isResident
-    ? ["residents", "both"]
-    : ["tourists", "both"];
-
-  useEffect(() => {
-    let isMounted = true; // Escudo protector contra fugas de memoria
-
-    const load = async () => {
-      let query = supabase
-        .from("notifications")
-        .select("id,title,body,link,audience,created_at,user_id")
-        .order("created_at", { ascending: false })
-        .limit(30);
-
-      if (user) {
-        query = query.or(`user_id.eq.${user.id},and(user_id.is.null,audience.in.(${audienceFilter.join(",")}))`);
-      } else {
-        query = query.is("user_id", null).in("audience", audienceFilter);
-      }
-      
-      const { data } = await query;
-      
-      if (isMounted) {
-        setItems((data as Notif[]) || []);
-      }
-
-      if (user && isMounted) {
-        const { data: reads } = await supabase
-          .from("notification_reads")
-          .select("notification_id")
-          .eq("user_id", user.id);
-          
-        if (isMounted) {
-          setReadIds(new Set((reads || []).map((r: { notification_id: string }) => r.notification_id)));
-        }
-      } else if (isMounted) {
-        setReadIds(new Set(getGuestReads()));
-      }
-    };
-
-    load();
-
-    const ch = supabase
-      .channel("notif_bell")
-      .on("postgres_changes", { event: "*", schema: "public", table: "notifications" }, () => {
-        if (isMounted) load();
-      })
-      .subscribe();
-
-    return () => {
-      isMounted = false; // Bloquea actualizaciones de estado si el componente se desmonta
-      supabase.removeChannel(ch); // Cierra el WebSocket de Supabase
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id, roles]);
-
-  useEffect(() => {
-    const onClick = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    if (open) document.addEventListener("mousedown", onClick);
-    return () => document.removeEventListener("mousedown", onClick);
-  }, [open]);
-
-  const unread = items.filter((n) => !readIds.has(n.id));
-  const unreadCount = unread.length;
-
-  const markRead = async (id: string) => {
-    setReadIds((s) => new Set(s).add(id));
-    if (user) {
-      await supabase.from("notification_reads").upsert(
-        { user_id: user.id, notification_id: id },
-        { onConflict: "user_id,notification_id" }
-      );
-    } else {
-      addGuestRead(id);
-    }
-  };
-
-  const markAllRead = async () => {
-    const ids = unread.map((n) => n.id);
-    setReadIds((s) => {
-      const ns = new Set(s);
-      ids.forEach((i) => ns.add(i));
-      return ns;
-    });
-    if (user && ids.length) {
-      await supabase
-        .from("notification_reads")
-        .upsert(
-          ids.map((id) => ({ user_id: user.id, notification_id: id })),
-          { onConflict: "user_id,notification_id" }
-        );
-    } else {
-      ids.forEach(addGuestRead);
-    }
-  };
-
-  const onItemClick = async (n: Notif) => {
-    await markRead(n.id);
-    if (n.link) {
-      // SOLUCIÓN: Preservar SPA abriendo http en nueva pestaña
-      if (n.link.startsWith("http")) {
-        window.open(n.link, "_blank", "noopener,noreferrer");
-      } else if (n.link.startsWith("tel:") || n.link.startsWith("mailto:")) {
-        window.location.href = n.link;
-      } else {
-        nav(n.link);
-      }
-    }
-    setOpen(false);
-  };
 
   return (
-    <div className="relative" ref={ref}>
-      <button
-        onClick={() => setOpen((v) => !v)}
-        aria-label="Notificaciones"
-        className="relative inline-flex items-center justify-center w-9 h-9 rounded-xl hover:bg-isa-light transition-colors"
-      >
-        <Bell strokeWidth={1.8} className="w-5 h-5 text-isa-navy" />
-        {unreadCount > 0 && (
-          <span
-            className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 rounded-full bg-muno-red text-white text-[10px] font-extrabold grid place-items-center ring-2 ring-card"
-            aria-label={`${unreadCount} no leídas`}
+    <div className="isa-card p-5 space-y-3">
+      <div>
+        <div className="font-extrabold text-isa-navy">Puntuá el pueblo</div>
+        <p className="text-xs text-muted-foreground">
+          {municipality ? `Tu experiencia visitando ${municipality}.` : "Contanos cómo fue tu visita al municipio."}
+        </p>
+      </div>
+      <div className="flex items-center gap-1">
+        {[1, 2, 3, 4, 5].map((n) => (
+          <button
+            key={n}
+            onMouseEnter={() => setHover(n)}
+            onMouseLeave={() => setHover(0)}
+            onClick={() => setRating(n)}
+            aria-label={`${n} estrellas`}
+            className="p-1"
           >
-            {unreadCount > 9 ? "9+" : unreadCount}
-          </span>
-        )}
+            <Star
+              strokeWidth={1.5}
+              className={`w-8 h-8 ${(hover || rating) >= n ? "fill-[hsl(var(--muno-amber))] text-[hsl(var(--muno-amber))]" : "text-muted-foreground"}`}
+            />
+          </button>
+        ))}
+      </div>
+      <textarea
+        value={comment}
+        onChange={(e) => setComment(e.target.value)}
+        rows={3}
+        placeholder="Comentario (opcional)"
+        className="w-full px-3 py-2 rounded-xl border bg-background text-sm resize-none outline-none focus:ring-2 focus:ring-isa-navy"
+      />
+      <button
+        onClick={submit}
+        disabled={saving || !rating}
+        className="w-full bg-isa-navy text-isa-white rounded-[16px] py-3 font-bold text-sm inline-flex items-center justify-center gap-2 disabled:opacity-50"
+      >
+        {saving && <Loader2 className="w-4 h-4 animate-spin" />}
+        Enviar valoración
       </button>
-
-      {open && (
-        <div className="absolute right-0 mt-2 w-[320px] max-w-[92vw] bg-card border rounded-[16px] shadow-xl z-50 overflow-hidden animate-fade-in">
-          <div className="px-4 py-3 border-b flex items-center justify-between bg-isa-light/40">
-            <div className="font-extrabold text-isa-navy text-sm">Notificaciones</div>
-            <div className="flex items-center gap-2">
-              {unreadCount > 0 && (
-                <button onClick={markAllRead} className="text-[11px] font-bold text-muno-blue">
-                  Marcar todo leído
-                </button>
-              )}
-              <button onClick={() => setOpen(false)} aria-label="Cerrar">
-                <X strokeWidth={2} className="w-4 h-4 text-isa-navy" />
-              </button>
-            </div>
-          </div>
-          <div className="max-h-[60vh] overflow-y-auto">
-            {items.length === 0 ? (
-              <div className="px-4 py-8 text-center text-[12px] text-muted-foreground">
-                Sin notificaciones por ahora.
-              </div>
-            ) : (
-              <ul>
-                {items.map((n) => {
-                  const isUnread = !readIds.has(n.id);
-                  return (
-                    <li key={n.id}>
-                      <button
-                        onClick={() => onItemClick(n)}
-                        className={`w-full text-left px-4 py-3 border-b hover:bg-isa-light/40 transition-colors ${
-                          isUnread ? "bg-isa-light/20" : ""
-                        }`}
-                      >
-                        <div className="flex items-start gap-2">
-                          {isUnread && (
-                            <span className="mt-1.5 w-2 h-2 rounded-full bg-muno-red shrink-0" />
-                          )}
-                          <div className="min-w-0 flex-1">
-                            <div className="font-extrabold text-isa-navy text-[13px] leading-tight">{n.title}</div>
-                            <div className="text-[11px] text-muted-foreground mt-0.5">
-                              {new Date(n.created_at).toLocaleString("es-AR", { dateStyle: "short", timeStyle: "short" })}
-                            </div>
-                            {n.body && (
-                              <p className="text-[12px] text-isa-navy/80 mt-1 line-clamp-2">{n.body}</p>
-                            )}
-                          </div>
-                        </div>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -23847,6 +23647,253 @@ Despliegue técnico de la plataforma en la infraestructura de Vercel/Supabase, a
 | 2.0 | 13/07/2026 | Cierre del Hito 2: Aprobación de auditoría final, 0 errores TS, cobertura de tests superada y certificación para producción. Transición a Despliegue. |
 </file>
 
+<file path="src/components/NotificationsBell.tsx">
+import { useEffect, useState, useRef } from "react";
+import { Bell, X } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/context/AuthContext";
+
+type Notif = {
+  id: string;
+  title: string;
+  body: string;
+  link: string | null;
+  audience: string;
+  created_at: string;
+  user_id?: string | null;
+};
+
+const STORAGE_KEY = "muno.guest.notif.reads";
+
+function getGuestReads(): string[] {
+  try {
+    return JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+  } catch {
+    return [];
+  }
+}
+
+function addGuestRead(id: string) {
+  const arr = getGuestReads();
+  if (!arr.includes(id)) {
+    arr.push(id);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(arr.slice(-200)));
+  }
+}
+
+export default function NotificationsBell() {
+  const { user, roles } = useAuth();
+  const nav = useNavigate();
+  const [open, setOpen] = useState(false);
+  const [items, setItems] = useState<Notif[]>([]);
+  const [readIds, setReadIds] = useState<Set<string>>(new Set());
+  const ref = useRef<HTMLDivElement>(null);
+
+  const isResident =
+    roles.includes("resident") ||
+    roles.includes("admin") ||
+    roles.includes("mayor") ||
+    roles.includes("tourism_chief") ||
+    roles.includes("area_manager") ||
+    roles.includes("isa_super_admin") ||
+    roles.includes("isa_consultant");
+
+  const audienceFilter = isResident
+    ? ["residents", "both"]
+    : ["tourists", "both"];
+
+  // FIX MEDIO: Convertimos el array a string para estabilizar la referencia en memoria
+  // y evitar desconexiones constantes del WebSocket.
+  const rolesKey = roles.join(",");
+
+  useEffect(() => {
+    let isMounted = true; // Escudo protector contra fugas de memoria
+
+    const load = async () => {
+      let query = supabase
+        .from("notifications")
+        .select("id,title,body,link,audience,created_at,user_id")
+        .order("created_at", { ascending: false })
+        .limit(30);
+
+      if (user) {
+        query = query.or(`user_id.eq.${user.id},and(user_id.is.null,audience.in.(${audienceFilter.join(",")}))`);
+      } else {
+        query = query.is("user_id", null).in("audience", audienceFilter);
+      }
+      
+      const { data } = await query;
+      
+      if (isMounted) {
+        setItems((data as Notif[]) || []);
+      }
+
+      if (user && isMounted) {
+        const { data: reads } = await supabase
+          .from("notification_reads")
+          .select("notification_id")
+          .eq("user_id", user.id);
+          
+        if (isMounted) {
+          setReadIds(new Set((reads || []).map((r: { notification_id: string }) => r.notification_id)));
+        }
+      } else if (isMounted) {
+        setReadIds(new Set(getGuestReads()));
+      }
+    };
+
+    load();
+
+    const ch = supabase
+      .channel("notif_bell")
+      .on("postgres_changes", { event: "*", schema: "public", table: "notifications" }, () => {
+        if (isMounted) load();
+      })
+      .subscribe();
+
+    return () => {
+      isMounted = false; // Bloquea actualizaciones de estado si el componente se desmonta
+      supabase.removeChannel(ch); // Cierra el WebSocket de Supabase
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, rolesKey]); // <-- FIX Aplicado en el array de dependencias
+
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    if (open) document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
+  }, [open]);
+
+  const unread = items.filter((n) => !readIds.has(n.id));
+  const unreadCount = unread.length;
+
+  const markRead = async (id: string) => {
+    setReadIds((s) => new Set(s).add(id));
+    if (user) {
+      await supabase.from("notification_reads").upsert(
+        { user_id: user.id, notification_id: id },
+        { onConflict: "user_id,notification_id" }
+      );
+    } else {
+      addGuestRead(id);
+    }
+  };
+
+  const markAllRead = async () => {
+    const ids = unread.map((n) => n.id);
+    setReadIds((s) => {
+      const ns = new Set(s);
+      ids.forEach((i) => ns.add(i));
+      return ns;
+    });
+    if (user && ids.length) {
+      await supabase
+        .from("notification_reads")
+        .upsert(
+          ids.map((id) => ({ user_id: user.id, notification_id: id })),
+          { onConflict: "user_id,notification_id" }
+        );
+    } else {
+      ids.forEach(addGuestRead);
+    }
+  };
+
+  const onItemClick = async (n: Notif) => {
+    await markRead(n.id);
+    if (n.link) {
+      // SOLUCIÓN: Preservar SPA abriendo http en nueva pestaña
+      if (n.link.startsWith("http")) {
+        window.open(n.link, "_blank", "noopener,noreferrer");
+      } else if (n.link.startsWith("tel:") || n.link.startsWith("mailto:")) {
+        window.location.href = n.link;
+      } else {
+        nav(n.link);
+      }
+    }
+    setOpen(false);
+  };
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        aria-label="Notificaciones"
+        className="relative inline-flex items-center justify-center w-9 h-9 rounded-xl hover:bg-isa-light transition-colors"
+      >
+        <Bell strokeWidth={1.8} className="w-5 h-5 text-isa-navy" />
+        {unreadCount > 0 && (
+          <span
+            className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 rounded-full bg-muno-red text-white text-[10px] font-extrabold grid place-items-center ring-2 ring-card"
+            aria-label={`${unreadCount} no leídas`}
+          >
+            {unreadCount > 9 ? "9+" : unreadCount}
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <div className="absolute right-0 mt-2 w-[320px] max-w-[92vw] bg-card border rounded-[16px] shadow-xl z-50 overflow-hidden animate-fade-in">
+          <div className="px-4 py-3 border-b flex items-center justify-between bg-isa-light/40">
+            <div className="font-extrabold text-isa-navy text-sm">Notificaciones</div>
+            <div className="flex items-center gap-2">
+              {unreadCount > 0 && (
+                <button onClick={markAllRead} className="text-[11px] font-bold text-muno-blue">
+                  Marcar todo leído
+                </button>
+              )}
+              <button onClick={() => setOpen(false)} aria-label="Cerrar">
+                <X strokeWidth={2} className="w-4 h-4 text-isa-navy" />
+              </button>
+            </div>
+          </div>
+          <div className="max-h-[60vh] overflow-y-auto">
+            {items.length === 0 ? (
+              <div className="px-4 py-8 text-center text-[12px] text-muted-foreground">
+                Sin notificaciones por ahora.
+              </div>
+            ) : (
+              <ul>
+                {items.map((n) => {
+                  const isUnread = !readIds.has(n.id);
+                  return (
+                    <li key={n.id}>
+                      <button
+                        onClick={() => onItemClick(n)}
+                        className={`w-full text-left px-4 py-3 border-b hover:bg-isa-light/40 transition-colors ${
+                          isUnread ? "bg-isa-light/20" : ""
+                        }`}
+                      >
+                        <div className="flex items-start gap-2">
+                          {isUnread && (
+                            <span className="mt-1.5 w-2 h-2 rounded-full bg-muno-red shrink-0" />
+                          )}
+                          <div className="min-w-0 flex-1">
+                            <div className="font-extrabold text-isa-navy text-[13px] leading-tight">{n.title}</div>
+                            <div className="text-[11px] text-muted-foreground mt-0.5">
+                              {new Date(n.created_at).toLocaleString("es-AR", { dateStyle: "short", timeStyle: "short" })}
+                            </div>
+                            {n.body && (
+                              <p className="text-[12px] text-isa-navy/80 mt-1 line-clamp-2">{n.body}</p>
+                            )}
+                          </div>
+                        </div>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+</file>
+
 <file path="src/components/ProtectedRoute.tsx">
 import { Navigate, useLocation } from "react-router-dom";
 import { useAuth, routeForRoles } from "@/context/AuthContext";
@@ -23907,412 +23954,6 @@ export default function ProtectedRoute({
   }
 
   return <>{children}</>;
-}
-</file>
-
-<file path="src/context/AuthContext.tsx">
-import { createContext, useContext, useEffect, useState, ReactNode } from "react";
-import { supabase } from "@/integrations/supabase/client";
-import type { Session, User } from "@supabase/supabase-js";
-
-export type AppRole =
-  | "tourist"
-  | "resident"
-  | "merchant"
-  | "admin"
-  | "area_manager"
-  | "isa_consultant"
-  | "isa_super_admin"
-  | "tourism_chief"
-  | "mayor";
-
-interface AuthCtx {
-  user: User | null;
-  session: Session | null;
-  roles: AppRole[];
-  area: string | null;
-  loading: boolean;
-  signOut: () => Promise<void>;
-}
-
-const Ctx = createContext<AuthCtx>({
-  user: null,
-  session: null,
-  roles: [],
-  area: null,
-  loading: true,
-  signOut: async () => {},
-});
-
-export function AuthProvider({ children }: { children: ReactNode }) {
-  const [session, setSession] = useState<Session | null>(null);
-  const [user, setUser] = useState<User | null>(null);
-  const [roles, setRoles] = useState<AppRole[]>([]);
-  const [area, setArea] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    // Set up listener FIRST
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => {
-      setSession(s);
-      setUser(s?.user ?? null);
-      if (s?.user) {
-        // Defer to avoid deadlock
-        setTimeout(() => loadRoles(s.user.id), 0);
-      } else {
-        setRoles([]);
-        setArea(null);
-      }
-    });
-
-    // THEN check existing session
-    supabase.auth.getSession().then(({ data: { session: s } }) => {
-      setSession(s);
-      setUser(s?.user ?? null);
-      if (s?.user) loadRoles(s.user.id);
-      setLoading(false);
-    });
-
-    return () => sub.subscription.unsubscribe();
-  }, []);
-
-  const loadRoles = async (uid: string) => {
-    const { data } = await supabase
-      .from("user_roles")
-      .select("role, area")
-      .eq("user_id", uid)
-      .eq("active", true); // Corrección quirúrgica P0: impide bypass de roles inactivos
-
-    // Tipado estricto para eliminar el error de 'any'
-    const rows = (data || []) as { role: AppRole; area: string | null }[];
-    
-    setRoles(rows.map((r) => r.role));
-    const mgr = rows.find((r) => r.role === "area_manager" && r.area);
-    setArea(mgr?.area ?? null);
-  };
-
-  const signOut = async () => {
-    // 1. Destruimos la sesión en el backend
-    await supabase.auth.signOut();
-    
-    // 2. Limpieza profunda global de la memoria del navegador (Red Team Fix)
-    localStorage.removeItem("muno.inscripciones.v1");
-    localStorage.removeItem("muno.guest.notif.reads");
-    localStorage.removeItem("supabase.auth.token");
-  };
-
-  return (
-    <Ctx.Provider value={{ user, session, roles, area, loading, signOut }}>
-      {children}
-    </Ctx.Provider>
-  );
-}
-
-// Silenciamos la advertencia de react-refresh de forma segura para las exportaciones del Contexto
-// eslint-disable-next-line react-refresh/only-export-components
-export const useAuth = () => useContext(Ctx);
-
-// eslint-disable-next-line react-refresh/only-export-components
-export function routeForRoles(roles: AppRole[]): string {
-  if (roles.includes("isa_super_admin")) return "/isa/global";
-  if (roles.includes("isa_consultant")) return "/isa/panel";
-  if (
-    roles.includes("admin") || 
-    roles.includes("area_manager") || 
-    roles.includes("mayor") || 
-    roles.includes("tourism_chief")
-  ) return "/admin/dashboard";
-  
-  return "/";
-}
-</file>
-
-<file path="src/pages/admin/AdminColaboradores.tsx">
-import { useEffect, useState, ReactNode, useCallback, useRef } from "react";
-import { supabase } from "@/integrations/supabase/client";
-import { useAuth } from "@/context/AuthContext";
-import { logActivity } from "@/lib/audit";
-import { toast } from "sonner";
-import { UserPlus, Power, Users, X, Copy } from "lucide-react";
-// 1. SOLUCIÓN QUIRÚRGICA: Importar el control de acceso centralizado
-import { can } from "@/security/can";
-import { PERMISSIONS } from "@/security/permissions";
-
-// --- TIPOS ESTRICTOS (Eliminan los 9 errores de ESLint) ---
-type Row = {
-  id: string;
-  user_id: string;
-  role: string;
-  area: string | null;
-  active: boolean;
-  created_at: string;
-  email?: string; // Sin null para consistencia de interfaz
-  full_name?: string; // Sin null para consistencia de interfaz
-};
-
-interface DBUserRole {
-  id: string;
-  user_id: string;
-  role: string;
-  area: string | null;
-  active: boolean;
-  created_at: string;
-}
-
-interface DBProfile {
-  id: string;
-  email?: string;
-  full_name?: string;
-}
-
-interface EdgeFunctionResponse {
-  error?: string;
-  [key: string]: unknown;
-}
-
-export default function AdminColaboradores() {
-  const { roles, area } = useAuth();
-  
-  // 2. Evaluaciones de seguridad refactorizadas
-  const isTourismChief = roles.includes("tourism_chief");
-  const isMayor = roles.includes("mayor");
-  const isAdmin = roles.includes("admin");
-  
-  const myArea = area || (isTourismChief ? "Turismo" : isMayor || isAdmin ? "Intendencia" : null);
-  
-  // SOLUCIÓN QUIRÚRGICA: Uso de la directiva centralizada de seguridad
-  const canManage = can(roles, area, PERMISSIONS.USERS_MANAGE);
-
-  const [rows, setRows] = useState<Row[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [creating, setCreating] = useState(false);
-
-  // 1. SOLUCIÓN: Usamos useRef para mantener la referencia viva en memoria
-  const isMounted = useRef(true);
-
-  // 2. Quitamos el parámetro booleano tramposo del useCallback
-  const load = useCallback(async () => {
-    if (!myArea) { 
-      if (isMounted.current) setLoading(false); 
-      return; 
-    }
-    
-    if (isMounted.current) setLoading(true);
-    
-    try {
-      // FIX N+1: Resource Embedding
-      const q = supabase
-        .from("user_roles")
-        .select(`
-          id,
-          user_id,
-          role,
-          area,
-          active,
-          created_at,
-          profiles ( email, full_name )
-        `)
-        .eq("role", "resident");
-
-      const { data: urData } = isAdmin || isMayor ? await q : await q.eq("area", myArea);
-      
-      if (isMounted.current) {
-        // Tipado estricto para eliminar el error de 'any'
-        type JoinedData = {
-          id: string;
-          user_id: string;
-          role: string;
-          area: string | null;
-          active: boolean;
-          created_at: string;
-          profiles: { email: string | null; full_name: string | null } | null;
-        };
-
-        const rawData = (urData || []) as unknown as JoinedData[];
-
-        const formattedRows: Row[] = rawData.map((r) => ({
-          id: r.id,
-          user_id: r.user_id,
-          role: r.role,
-          area: r.area,
-          active: r.active,
-          created_at: r.created_at,
-          email: r.profiles?.email || undefined,
-          full_name: r.profiles?.full_name || undefined,
-        }));
-        
-        setRows(formattedRows);
-      }
-    } catch (error) {
-      console.error("Error al cargar colaboradores:", error);
-      toast.error("Error al cargar colaboradores");
-    } finally {
-      if (isMounted.current) setLoading(false);
-    }
-  }, [myArea, isAdmin, isMayor]);
-
-  useEffect(() => { 
-    isMounted.current = true;
-    load(); 
-    
-    return () => {
-      // 4. Cuando el componente muere, apagamos la referencia
-      isMounted.current = false;
-    };
-  }, [load]);
-
-  const toggleActive = async (r: Row) => {
-    // Objeto limpio sin casteos 'any'
-    const updatePayload = { active: !r.active };
-    
-    const { error } = await supabase.from("user_roles").update(updatePayload).eq("id", r.id);
-    
-    if (error) { 
-      toast.error("No se pudo actualizar"); 
-      return; 
-    }
-    
-    toast.success(r.active ? "Acceso desactivado" : "Acceso reactivado");
-    logActivity(r.active ? "Desactivar colaborador" : "Reactivar colaborador", { entity: "user_roles", entity_id: r.id, meta: { email: r.email } });
-    load();
-  };
-
-  if (!canManage) {
-    return <div className="bg-white border rounded-[16px] p-6 text-center text-sm text-muted-foreground">Acceso reservado al equipo municipal.</div>;
-  }
-
-  return (
-    <div className="space-y-5">
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-isa-navy text-white grid place-items-center"><Users strokeWidth={1.5} className="w-5 h-5" /></div>
-          <div>
-            <div className="font-extrabold text-isa-navy">Mi Equipo</div>
-            <p className="text-xs text-muted-foreground">
-              Colaboradores de tu área{myArea ? ` (${myArea})` : ""}. Sólo gestionás los que dependen de vos.
-            </p>
-          </div>
-        </div>
-        <button
-          onClick={() => setCreating(true)}
-          className="inline-flex items-center gap-2 bg-isa-navy text-white rounded-[12px] px-4 py-2.5 text-[13px] font-bold min-h-[44px]"
-        >
-          <UserPlus className="w-4 h-4" /> Agregar colaborador
-        </button>
-      </div>
-
-      <div className="bg-white border rounded-[16px] divide-y">
-        {loading && <div className="p-6 text-sm text-muted-foreground text-center">Cargando…</div>}
-        {!loading && rows.length === 0 && (
-          <div className="p-6 text-sm text-muted-foreground text-center">Aún no agregaste colaboradores en tu equipo.</div>
-        )}
-        {rows.map((r) => (
-          <div key={r.id} className="px-4 py-3 flex items-center gap-3 flex-wrap">
-            <div className="flex-1 min-w-0">
-              <div className="font-bold text-isa-navy truncate">{r.full_name || r.email || "—"}</div>
-              <div className="text-[12px] text-muted-foreground truncate">{r.email}</div>
-              <div className="text-[11px] text-muted-foreground mt-0.5">Colaborador · {r.area || "—"} · alta {new Date(r.created_at).toLocaleDateString("es-AR")}</div>
-            </div>
-            <span className={`isa-chip ${r.active ? "bg-muno-teal/15 text-muno-teal" : "bg-muted text-muted-foreground"}`}>{r.active ? "Activo" : "Inactivo"}</span>
-            <button onClick={() => toggleActive(r)} className="text-xs font-bold text-[hsl(var(--muno-red))] inline-flex items-center gap-1">
-              <Power className="w-3 h-3" /> {r.active ? "Desactivar" : "Activar"}
-            </button>
-          </div>
-        ))}
-      </div>
-
-      {creating && myArea && (
-        <CreateCollaboratorDialog
-          area={myArea}
-          onClose={() => setCreating(false)}
-          onCreated={() => { setCreating(false); load(); }}
-        />
-      )}
-    </div>
-  );
-}
-
-function CreateCollaboratorDialog({ area, onClose, onCreated }: { area: string; onClose: () => void; onCreated: () => void }) {
-  const [fullName, setFullName] = useState("");
-  const [email, setEmail] = useState("");
-  const [dni, setDni] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [credentials, setCredentials] = useState<{ email: string; password: string } | null>(null);
-
-  const submit = async () => {
-    if (fullName.trim().length < 2) { toast.error("Ingresá el nombre completo"); return; }
-    if (!email.includes("@")) { toast.error("Email inválido"); return; }
-    if (!/^\d{7,9}$/.test(dni.replace(/\D/g, ""))) { toast.error("DNI inválido (7-9 dígitos)"); return; }
-    
-    setBusy(true);
-    
-    const { data, error } = await supabase.functions.invoke("invite-staff", {
-      body: { full_name: fullName.trim(), email: email.trim().toLowerCase(), dni, role: "resident", area },
-    });
-    
-    setBusy(false);
-    
-    // 4. Tipado seguro para la respuesta del edge function
-    const responseData = data as EdgeFunctionResponse | null;
-    
-    if (error || responseData?.error) {
-      toast.error("No se pudo crear: " + (error?.message || responseData?.error));
-      return;
-    }
-    
-    logActivity("Agregar colaborador", { entity: "user_roles", meta: { email, area } });
-    setCredentials({ email: email.trim().toLowerCase(), password: dni });
-    toast.success("Colaborador agregado");
-  };
-
-  if (credentials) {
-    return (
-      <Modal title="Credenciales generadas" onClose={() => { setCredentials(null); onCreated(); }}>
-        <p className="text-[13px] text-isa-navy mb-3">Compartí estos datos con la persona para su primer ingreso:</p>
-        <div className="rounded-xl border bg-muted/30 p-3 space-y-2 text-sm">
-          <div className="flex items-center justify-between gap-2"><span className="font-bold">Usuario</span><span className="text-muted-foreground truncate">{credentials.email}</span></div>
-          <div className="flex items-center justify-between gap-2"><span className="font-bold">Contraseña</span><span className="font-mono text-isa-navy">{credentials.password}</span></div>
-        </div>
-        <button
-          onClick={() => { navigator.clipboard.writeText(`Usuario: ${credentials.email}\nContraseña: ${credentials.password}`); toast.success("Copiado"); }}
-          className="mt-3 w-full inline-flex items-center justify-center gap-2 border rounded-[12px] py-2.5 text-sm font-bold"
-        >
-          <Copy className="w-4 h-4" /> Copiar
-        </button>
-        <button onClick={() => { setCredentials(null); onCreated(); }} className="mt-2 w-full bg-isa-navy text-white rounded-[12px] py-2.5 text-sm font-bold">Cerrar</button>
-      </Modal>
-    );
-  }
-
-  return (
-    <Modal title={`Agregar colaborador · ${area}`} onClose={onClose}>
-      <p className="text-[12px] text-muted-foreground mb-3">Se crea la cuenta automáticamente. La contraseña inicial será el DNI.</p>
-      <label className="text-xs font-bold text-muted-foreground">Nombre completo</label>
-      <input value={fullName} onChange={(e) => setFullName(e.target.value)} className="mt-1 mb-3 w-full px-3 py-2.5 rounded-xl border bg-background text-sm min-h-[44px]" />
-      <label className="text-xs font-bold text-muted-foreground">Email</label>
-      <input value={email} onChange={(e) => setEmail(e.target.value)} className="mt-1 mb-3 w-full px-3 py-2.5 rounded-xl border bg-background text-sm min-h-[44px]" />
-      <label className="text-xs font-bold text-muted-foreground">DNI</label>
-      <input value={dni} onChange={(e) => setDni(e.target.value)} inputMode="numeric" className="mt-1 mb-3 w-full px-3 py-2.5 rounded-xl border bg-background text-sm min-h-[44px]" />
-      <button disabled={busy} onClick={submit} className="mt-2 w-full bg-isa-navy text-white rounded-[12px] py-2.5 text-sm font-bold min-h-[44px] disabled:opacity-60">
-        {busy ? "Creando…" : "Crear colaborador"}
-      </button>
-    </Modal>
-  );
-}
-
-// 5. Reemplazando 'any' con ReactNode y tipado correcto para un Modal
-function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
-  return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
-      <div className="bg-white rounded-[16px] p-5 max-w-md w-full">
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="font-extrabold text-isa-navy">{title}</h3>
-          <button onClick={onClose} className="w-8 h-8 grid place-items-center rounded-lg hover:bg-muted"><X className="w-4 h-4" /></button>
-        </div>
-        {children}
-      </div>
-    </div>
-  );
 }
 </file>
 
@@ -24629,6 +24270,425 @@ interface ModalProps {
 }
 
 function Modal({ title, onClose, children }: ModalProps) {
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
+      <div className="bg-white rounded-[16px] p-5 max-w-md w-full">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="font-extrabold text-isa-navy">{title}</h3>
+          <button onClick={onClose} className="w-8 h-8 grid place-items-center rounded-lg hover:bg-muted"><X className="w-4 h-4" /></button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="src/context/AuthContext.tsx">
+import { createContext, useContext, useEffect, useState, ReactNode } from "react";
+import { supabase } from "@/integrations/supabase/client";
+import type { Session, User } from "@supabase/supabase-js";
+
+export type AppRole =
+  | "tourist"
+  | "resident"
+  | "merchant"
+  | "admin"
+  | "area_manager"
+  | "isa_consultant"
+  | "isa_super_admin"
+  | "tourism_chief"
+  | "mayor";
+
+interface AuthCtx {
+  user: User | null;
+  session: Session | null;
+  roles: AppRole[];
+  area: string | null;
+  loading: boolean;
+  signOut: () => Promise<void>;
+}
+
+const Ctx = createContext<AuthCtx>({
+  user: null,
+  session: null,
+  roles: [],
+  area: null,
+  loading: true,
+  signOut: async () => {},
+});
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [session, setSession] = useState<Session | null>(null);
+  const [user, setUser] = useState<User | null>(null);
+  const [roles, setRoles] = useState<AppRole[]>([]);
+  const [area, setArea] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  // Declaramos loadRoles antes del useEffect para poder usar await de forma segura
+  const loadRoles = async (uid: string) => {
+    const { data } = await supabase
+      .from("user_roles")
+      .select("role, area")
+      .eq("user_id", uid)
+      .eq("active", true); // Corrección quirúrgica P0: impide bypass de roles inactivos
+
+    // Tipado estricto para eliminar el error de 'any'
+    const rows = (data || []) as { role: AppRole; area: string | null }[];
+    
+    setRoles(rows.map((r) => r.role));
+    const mgr = rows.find((r) => r.role === "area_manager" && r.area);
+    setArea(mgr?.area ?? null);
+  };
+
+  useEffect(() => {
+    // FIX BAJO: Control de estados zombi (Token Rotation y Multi-tab)
+    const { data: sub } = supabase.auth.onAuthStateChange((event, s) => {
+      if (event === "TOKEN_REFRESHED") return;
+      if (event === "SIGNED_OUT" && !s) {
+        setSession(null);
+        setUser(null);
+        setRoles([]);
+        setArea(null);
+      } else {
+        setSession(s);
+        setUser(s?.user ?? null);
+        if (s?.user) {
+          setTimeout(() => loadRoles(s.user.id), 0);
+        }
+      }
+    });
+
+    // FIX ALTO: Condición de carrera (Race Condition) en la carga inicial
+    supabase.auth.getSession().then(async ({ data: { session: s } }) => {
+      setSession(s);
+      setUser(s?.user ?? null);
+      if (s?.user) {
+        await loadRoles(s.user.id);
+      }
+      setLoading(false);
+    });
+
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  const signOut = async () => {
+    // 1. Destruimos la sesión en el backend
+    await supabase.auth.signOut();
+    
+    // 2. Limpieza profunda global de la memoria del navegador (Red Team Fix)
+    localStorage.removeItem("muno.inscripciones.v1");
+    localStorage.removeItem("muno.guest.notif.reads");
+    localStorage.removeItem("supabase.auth.token");
+  };
+
+  return (
+    <Ctx.Provider value={{ user, session, roles, area, loading, signOut }}>
+      {children}
+    </Ctx.Provider>
+  );
+}
+
+// Silenciamos la advertencia de react-refresh de forma segura para las exportaciones del Contexto
+// eslint-disable-next-line react-refresh/only-export-components
+export const useAuth = () => useContext(Ctx);
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function routeForRoles(roles: AppRole[]): string {
+  if (roles.includes("isa_super_admin")) return "/isa/global";
+  if (roles.includes("isa_consultant")) return "/isa/panel";
+  if (
+    roles.includes("admin") || 
+    roles.includes("area_manager") || 
+    roles.includes("mayor") || 
+    roles.includes("tourism_chief")
+  ) return "/admin/dashboard";
+  
+  return "/";
+}
+</file>
+
+<file path="src/pages/admin/AdminColaboradores.tsx">
+import { useEffect, useState, ReactNode, useCallback, useRef } from "react";
+import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/context/AuthContext";
+import { logActivity } from "@/lib/audit";
+import { toast } from "sonner";
+import { UserPlus, Power, Users, X, Copy } from "lucide-react";
+// 1. SOLUCIÓN QUIRÚRGICA: Importar el control de acceso centralizado
+import { can } from "@/security/can";
+import { PERMISSIONS } from "@/security/permissions";
+
+// --- TIPOS ESTRICTOS (Eliminan los 9 errores de ESLint) ---
+type Row = {
+  id: string;
+  user_id: string;
+  role: string;
+  area: string | null;
+  active: boolean;
+  created_at: string;
+  email?: string;
+  full_name?: string;
+};
+
+interface DBUserRole {
+  id: string;
+  user_id: string;
+  role: string;
+  area: string | null;
+  active: boolean;
+  created_at: string;
+}
+
+interface DBProfile {
+  id: string;
+  email?: string;
+  full_name?: string;
+}
+
+interface EdgeFunctionResponse {
+  error?: string;
+  [key: string]: unknown;
+}
+
+export default function AdminColaboradores() {
+  const { roles, area } = useAuth();
+  
+  // 2. Evaluaciones de seguridad refactorizadas
+  const isTourismChief = roles.includes("tourism_chief");
+  const isMayor = roles.includes("mayor");
+  const isAdmin = roles.includes("admin");
+  
+  const myArea = area || (isTourismChief ? "Turismo" : isMayor || isAdmin ? "Intendencia" : null);
+  
+  // SOLUCIÓN QUIRÚRGICA: Uso de la directiva centralizada de seguridad
+  const canManage = can(roles, area, PERMISSIONS.USERS_MANAGE);
+
+  const [rows, setRows] = useState<Row[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+
+  // 1. SOLUCIÓN: Usamos useRef para mantener la referencia viva en memoria
+  const isMounted = useRef(true);
+
+  // 2. Quitamos el parámetro booleano tramposo del useCallback
+  const load = useCallback(async () => {
+    if (!myArea) { 
+      if (isMounted.current) setLoading(false); 
+      return; 
+    }
+    
+    if (isMounted.current) setLoading(true);
+    
+    try {
+      // FIX N+1: Resource Embedding
+      const q = supabase
+        .from("user_roles")
+        .select(`
+          id,
+          user_id,
+          role,
+          area,
+          active,
+          created_at,
+          profiles ( email, full_name )
+        `)
+        .eq("role", "resident");
+
+      const { data: urData } = isAdmin || isMayor ? await q : await q.eq("area", myArea);
+      
+      if (isMounted.current) {
+        // Tipado estricto para eliminar el error de 'any'
+        type JoinedData = {
+          id: string;
+          user_id: string;
+          role: string;
+          area: string | null;
+          active: boolean;
+          created_at: string;
+          profiles: { email: string | null; full_name: string | null } | null;
+        };
+
+        const rawData = (urData || []) as unknown as JoinedData[];
+
+        const formattedRows: Row[] = rawData.map((r) => ({
+          id: r.id,
+          user_id: r.user_id,
+          role: r.role,
+          area: r.area,
+          active: r.active,
+          created_at: r.created_at,
+          email: r.profiles?.email || undefined,
+          full_name: r.profiles?.full_name || undefined,
+        }));
+        
+        setRows(formattedRows);
+      }
+    } catch (error) {
+      console.error("Error al cargar colaboradores:", error);
+      toast.error("Error al cargar colaboradores");
+    } finally {
+      if (isMounted.current) setLoading(false);
+    }
+  }, [myArea, isAdmin, isMayor]);
+
+  useEffect(() => { 
+    isMounted.current = true;
+    load(); 
+    
+    return () => {
+      // 4. Cuando el componente muere, apagamos la referencia
+      isMounted.current = false;
+    };
+  }, [load]);
+
+  const toggleActive = async (r: Row) => {
+    // Objeto limpio sin casteos 'any'
+    const updatePayload = { active: !r.active };
+    
+    const { error } = await supabase.from("user_roles").update(updatePayload).eq("id", r.id);
+    
+    if (error) { 
+      toast.error("No se pudo actualizar"); 
+      return; 
+    }
+    
+    toast.success(r.active ? "Acceso desactivado" : "Acceso reactivado");
+    logActivity(r.active ? "Desactivar colaborador" : "Reactivar colaborador", { entity: "user_roles", entity_id: r.id, meta: { email: r.email } });
+    load();
+  };
+
+  if (!canManage) {
+    return <div className="bg-white border rounded-[16px] p-6 text-center text-sm text-muted-foreground">Acceso reservado al equipo municipal.</div>;
+  }
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-isa-navy text-white grid place-items-center"><Users strokeWidth={1.5} className="w-5 h-5" /></div>
+          <div>
+            <div className="font-extrabold text-isa-navy">Mi Equipo</div>
+            <p className="text-xs text-muted-foreground">
+              Colaboradores de tu área{myArea ? ` (${myArea})` : ""}. Sólo gestionás los que dependen de vos.
+            </p>
+          </div>
+        </div>
+        <button
+          onClick={() => setCreating(true)}
+          className="inline-flex items-center gap-2 bg-isa-navy text-white rounded-[12px] px-4 py-2.5 text-[13px] font-bold min-h-[44px]"
+        >
+          <UserPlus className="w-4 h-4" /> Agregar colaborador
+        </button>
+      </div>
+
+      <div className="bg-white border rounded-[16px] divide-y">
+        {loading && <div className="p-6 text-sm text-muted-foreground text-center">Cargando…</div>}
+        {!loading && rows.length === 0 && (
+          <div className="p-6 text-sm text-muted-foreground text-center">Aún no agregaste colaboradores en tu equipo.</div>
+        )}
+        {rows.map((r) => (
+          <div key={r.id} className="px-4 py-3 flex items-center gap-3 flex-wrap">
+            <div className="flex-1 min-w-0">
+              <div className="font-bold text-isa-navy truncate">{r.full_name || r.email || "—"}</div>
+              <div className="text-[12px] text-muted-foreground truncate">{r.email}</div>
+              <div className="text-[11px] text-muted-foreground mt-0.5">Colaborador · {r.area || "—"} · alta {new Date(r.created_at).toLocaleDateString("es-AR")}</div>
+            </div>
+            <span className={`isa-chip ${r.active ? "bg-muno-teal/15 text-muno-teal" : "bg-muted text-muted-foreground"}`}>{r.active ? "Activo" : "Inactivo"}</span>
+            <button onClick={() => toggleActive(r)} className="text-xs font-bold text-[hsl(var(--muno-red))] inline-flex items-center gap-1">
+              <Power className="w-3 h-3" /> {r.active ? "Desactivar" : "Activar"}
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {creating && myArea && (
+        <CreateCollaboratorDialog
+          area={myArea}
+          onClose={() => setCreating(false)}
+          onCreated={() => { setCreating(false); load(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function CreateCollaboratorDialog({ area, onClose, onCreated }: { area: string; onClose: () => void; onCreated: () => void }) {
+  const [fullName, setFullName] = useState("");
+  const [email, setEmail] = useState("");
+  const [dni, setDni] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [credentials, setCredentials] = useState<{ email: string; password: string } | null>(null);
+
+  // FIX ALTO: Manejo de errores por microcortes de red móvil
+  const submit = async () => {
+    if (fullName.trim().length < 2) { toast.error("Ingresá el nombre completo"); return; }
+    if (!email.includes("@")) { toast.error("Email inválido"); return; }
+    if (!/^\d{7,9}$/.test(dni.replace(/\D/g, ""))) { toast.error("DNI inválido (7-9 dígitos)"); return; }
+    
+    setBusy(true);
+    
+    try {
+      const { data, error } = await supabase.functions.invoke("invite-staff", {
+        body: { full_name: fullName.trim(), email: email.trim().toLowerCase(), dni, role: "resident", area },
+      });
+      
+      const funcError = error || (data as EdgeFunctionResponse)?.error;
+      
+      if (funcError) {
+        toast.error("No se pudo crear: " + (error?.message || funcError));
+        setBusy(false);
+        return;
+      }
+      
+      logActivity("Agregar colaborador", { entity: "user_roles", meta: { email, area } });
+      setCredentials({ email: email.trim().toLowerCase(), password: dni });
+      toast.success("Colaborador agregado");
+    } catch (err) {
+      console.error(err);
+      toast.error("Fallo en la comunicación con el servidor. Verificá tu red móvil.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (credentials) {
+    return (
+      <Modal title="Credenciales generadas" onClose={() => { setCredentials(null); onCreated(); }}>
+        <p className="text-[13px] text-isa-navy mb-3">Compartí estos datos con la persona para su primer ingreso:</p>
+        <div className="rounded-xl border bg-muted/30 p-3 space-y-2 text-sm">
+          <div className="flex items-center justify-between gap-2"><span className="font-bold">Usuario</span><span className="text-muted-foreground truncate">{credentials.email}</span></div>
+          <div className="flex items-center justify-between gap-2"><span className="font-bold">Contraseña</span><span className="font-mono text-isa-navy">{credentials.password}</span></div>
+        </div>
+        <button
+          onClick={() => { navigator.clipboard.writeText(`Usuario: ${credentials.email}\nContraseña: ${credentials.password}`); toast.success("Copiado"); }}
+          className="mt-3 w-full inline-flex items-center justify-center gap-2 border rounded-[12px] py-2.5 text-sm font-bold"
+        >
+          <Copy className="w-4 h-4" /> Copiar
+        </button>
+        <button onClick={() => { setCredentials(null); onCreated(); }} className="mt-2 w-full bg-isa-navy text-white rounded-[12px] py-2.5 text-sm font-bold">Cerrar</button>
+      </Modal>
+    );
+  }
+
+  return (
+    <Modal title={`Agregar colaborador · ${area}`} onClose={onClose}>
+      <p className="text-[12px] text-muted-foreground mb-3">Se crea la cuenta automáticamente. La contraseña inicial será el DNI.</p>
+      <label className="text-xs font-bold text-muted-foreground">Nombre completo</label>
+      <input value={fullName} onChange={(e) => setFullName(e.target.value)} className="mt-1 mb-3 w-full px-3 py-2.5 rounded-xl border bg-background text-sm min-h-[44px]" />
+      <label className="text-xs font-bold text-muted-foreground">Email</label>
+      <input value={email} onChange={(e) => setEmail(e.target.value)} className="mt-1 mb-3 w-full px-3 py-2.5 rounded-xl border bg-background text-sm min-h-[44px]" />
+      <label className="text-xs font-bold text-muted-foreground">DNI</label>
+      <input value={dni} onChange={(e) => setDni(e.target.value)} inputMode="numeric" className="mt-1 mb-3 w-full px-3 py-2.5 rounded-xl border bg-background text-sm min-h-[44px]" />
+      <button disabled={busy} onClick={submit} className="mt-2 w-full bg-isa-navy text-white rounded-[12px] py-2.5 text-sm font-bold min-h-[44px] disabled:opacity-60">
+        {busy ? "Creando…" : "Crear colaborador"}
+      </button>
+    </Modal>
+  );
+}
+
+// 5. Reemplazando 'any' con ReactNode y tipado correcto para un Modal
+function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
       <div className="bg-white rounded-[16px] p-5 max-w-md w-full">

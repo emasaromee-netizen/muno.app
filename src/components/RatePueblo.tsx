@@ -17,6 +17,16 @@ export default function RatePueblo() {
   const [saving, setSaving] = useState(false);
   const [done, setDone] = useState(false);
 
+  // FIX MEDIO: Bloquear el widget si el usuario no tiene sesión iniciada
+  if (!user) {
+    return (
+      <div className="isa-card p-5 text-center space-y-2">
+        <div className="font-extrabold text-isa-navy">¿Te gustó el pueblo?</div>
+        <p className="text-xs text-muted-foreground">Iniciá sesión para valorar tu experiencia y ayudar al municipio.</p>
+      </div>
+    );
+  }
+
   const submit = async () => {
     if (!rating) {
       toast.error("Elegí una calificación");
@@ -31,7 +41,7 @@ export default function RatePueblo() {
     
     const payload: InsertRating = {
       municipality_id,
-      user_id: user?.id || null,
+      user_id: user.id, // TypeScript ahora sabe que user.id existe sí o sí
       rating,
       comment: comment.trim() || null,
     };
@@ -41,7 +51,12 @@ export default function RatePueblo() {
     setSaving(false);
     
     if (error) {
-      toast.error("No se pudo enviar la valoración");
+      // Bonus UI: Si salta la restricción UNIQUE que pusimos en SQL, avisamos bien
+      if (error.code === '23505') {
+        toast.error("Ya enviaste una valoración para este municipio.");
+      } else {
+        toast.error("No se pudo enviar la valoración");
+      }
     } else {
       setDone(true);
       toast.success("¡Gracias por puntuar el pueblo!");

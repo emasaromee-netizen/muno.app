@@ -38,31 +38,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [area, setArea] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    // Set up listener FIRST
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => {
-      setSession(s);
-      setUser(s?.user ?? null);
-      if (s?.user) {
-        // Defer to avoid deadlock
-        setTimeout(() => loadRoles(s.user.id), 0);
-      } else {
-        setRoles([]);
-        setArea(null);
-      }
-    });
-
-    // THEN check existing session
-    supabase.auth.getSession().then(({ data: { session: s } }) => {
-      setSession(s);
-      setUser(s?.user ?? null);
-      if (s?.user) loadRoles(s.user.id);
-      setLoading(false);
-    });
-
-    return () => sub.subscription.unsubscribe();
-  }, []);
-
+  // Declaramos loadRoles antes del useEffect para poder usar await de forma segura
   const loadRoles = async (uid: string) => {
     const { data } = await supabase
       .from("user_roles")
@@ -77,6 +53,37 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const mgr = rows.find((r) => r.role === "area_manager" && r.area);
     setArea(mgr?.area ?? null);
   };
+
+  useEffect(() => {
+    // FIX BAJO: Control de estados zombi (Token Rotation y Multi-tab)
+    const { data: sub } = supabase.auth.onAuthStateChange((event, s) => {
+      if (event === "TOKEN_REFRESHED") return;
+      if (event === "SIGNED_OUT" && !s) {
+        setSession(null);
+        setUser(null);
+        setRoles([]);
+        setArea(null);
+      } else {
+        setSession(s);
+        setUser(s?.user ?? null);
+        if (s?.user) {
+          setTimeout(() => loadRoles(s.user.id), 0);
+        }
+      }
+    });
+
+    // FIX ALTO: Condición de carrera (Race Condition) en la carga inicial
+    supabase.auth.getSession().then(async ({ data: { session: s } }) => {
+      setSession(s);
+      setUser(s?.user ?? null);
+      if (s?.user) {
+        await loadRoles(s.user.id);
+      }
+      setLoading(false);
+    });
+
+    return () => sub.subscription.unsubscribe();
+  }, []);
 
   const signOut = async () => {
     // 1. Destruimos la sesión en el backend

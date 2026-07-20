@@ -53,6 +53,10 @@ export default function NotificationsBell() {
     ? ["residents", "both"]
     : ["tourists", "both"];
 
+  // FIX MEDIO: Convertimos el array a string para estabilizar la referencia en memoria
+  // y evitar desconexiones constantes del WebSocket.
+  const rolesKey = roles.join(",");
+
   useEffect(() => {
     let isMounted = true; // Escudo protector contra fugas de memoria
 
@@ -103,7 +107,7 @@ export default function NotificationsBell() {
       supabase.removeChannel(ch); // Cierra el WebSocket de Supabase
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id, roles]);
+  }, [user?.id, rolesKey]); // <-- FIX Aplicado en el array de dependencias
 
   useEffect(() => {
     const onClick = (e: MouseEvent) => {

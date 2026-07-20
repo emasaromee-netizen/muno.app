@@ -16,8 +16,8 @@ type Row = {
   area: string | null;
   active: boolean;
   created_at: string;
-  email?: string; // Sin null para consistencia de interfaz
-  full_name?: string; // Sin null para consistencia de interfaz
+  email?: string;
+  full_name?: string;
 };
 
 interface DBUserRole {
@@ -209,6 +209,7 @@ function CreateCollaboratorDialog({ area, onClose, onCreated }: { area: string; 
   const [busy, setBusy] = useState(false);
   const [credentials, setCredentials] = useState<{ email: string; password: string } | null>(null);
 
+  // FIX ALTO: Manejo de errores por microcortes de red móvil
   const submit = async () => {
     if (fullName.trim().length < 2) { toast.error("Ingresá el nombre completo"); return; }
     if (!email.includes("@")) { toast.error("Email inválido"); return; }
@@ -216,23 +217,28 @@ function CreateCollaboratorDialog({ area, onClose, onCreated }: { area: string; 
     
     setBusy(true);
     
-    const { data, error } = await supabase.functions.invoke("invite-staff", {
-      body: { full_name: fullName.trim(), email: email.trim().toLowerCase(), dni, role: "resident", area },
-    });
-    
-    setBusy(false);
-    
-    // 4. Tipado seguro para la respuesta del edge function
-    const responseData = data as EdgeFunctionResponse | null;
-    
-    if (error || responseData?.error) {
-      toast.error("No se pudo crear: " + (error?.message || responseData?.error));
-      return;
+    try {
+      const { data, error } = await supabase.functions.invoke("invite-staff", {
+        body: { full_name: fullName.trim(), email: email.trim().toLowerCase(), dni, role: "resident", area },
+      });
+      
+      const funcError = error || (data as EdgeFunctionResponse)?.error;
+      
+      if (funcError) {
+        toast.error("No se pudo crear: " + (error?.message || funcError));
+        setBusy(false);
+        return;
+      }
+      
+      logActivity("Agregar colaborador", { entity: "user_roles", meta: { email, area } });
+      setCredentials({ email: email.trim().toLowerCase(), password: dni });
+      toast.success("Colaborador agregado");
+    } catch (err) {
+      console.error(err);
+      toast.error("Fallo en la comunicación con el servidor. Verificá tu red móvil.");
+    } finally {
+      setBusy(false);
     }
-    
-    logActivity("Agregar colaborador", { entity: "user_roles", meta: { email, area } });
-    setCredentials({ email: email.trim().toLowerCase(), password: dni });
-    toast.success("Colaborador agregado");
   };
 
   if (credentials) {

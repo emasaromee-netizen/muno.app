@@ -157,7 +157,14 @@ export default function AdminContenido() {
       blob = photoFile;
     }
     const path = `${user.id}/content-${Date.now()}.jpg`;
-    const { error } = await supabase.storage.from("avatars").upload(path, blob, { upsert: true, contentType: "image/jpeg" });
+    
+    // 🟠 FIX ALTO SRE: Forzamos cache local para evitar desbordes de Egress
+    const { error } = await supabase.storage.from("avatars").upload(path, blob, { 
+      upsert: true, 
+      contentType: "image/jpeg",
+      cacheControl: "31536000" // 1 año en caché de disco del cliente móvil
+    });
+    
     if (error) return null;
     const { data } = supabase.storage.from("avatars").getPublicUrl(path);
     return data.publicUrl;

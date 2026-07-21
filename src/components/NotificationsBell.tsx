@@ -100,8 +100,7 @@ export default function NotificationsBell() {
     load();
 
     // 🔴 FIX CRÍTICO SRE: Prevención de Tormenta de Difusión (Broadcast Storm)
-    // Usamos filtros a nivel de base de datos para saltarnos la validación unihilo de RLS de Supabase Realtime
-    
+    // Extraemos el 'payload.new' directamente de la memoria del socket. Cero lecturas a disco.
     if (municipalityId) {
       const muniChannel = supabase
         .channel(`notif_muni_${municipalityId}`)
@@ -111,9 +110,16 @@ export default function NotificationsBell() {
             event: "INSERT",
             schema: "public",
             table: "notifications",
-            filter: `municipality_id=eq.${municipalityId}` // Filtro mágico en servidor
+            filter: `municipality_id=eq.${municipalityId}`
           },
-          () => { if (isMounted) load(); }
+          (payload) => { 
+            if (!isMounted) return;
+            const newNotif = payload.new as Notif;
+            // Filtro local de seguridad adicional
+            if (!newNotif.user_id || newNotif.user_id === userId) {
+              setItems((prev) => [newNotif, ...prev].slice(0, 30));
+            }
+          }
         )
         .subscribe();
       channels.push(muniChannel);
@@ -128,9 +134,13 @@ export default function NotificationsBell() {
             event: "INSERT",
             schema: "public",
             table: "notifications",
-            filter: `user_id=eq.${userId}` // Filtro mágico en servidor
+            filter: `user_id=eq.${userId}`
           },
-          () => { if (isMounted) load(); }
+          (payload) => { 
+            if (!isMounted) return;
+            const newNotif = payload.new as Notif;
+            setItems((prev) => [newNotif, ...prev].slice(0, 30));
+          }
         )
         .subscribe();
       channels.push(userChannel);

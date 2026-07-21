@@ -270,6 +270,7 @@ supabase/
     20260718120000_auditoria_big4_fixes.sql
     20260720111500_fix_trigger_handle_new_user_null.sql
     20260720130000_sre_titanium_indexes.sql
+    20260721024200_sre_audit_fixes.sql
   config.toml
 .env.example
 .gitignore
@@ -7090,6 +7091,49 @@ END;
 $$;
 </file>
 
+<file path="supabase/migrations/20260721024200_sre_audit_fixes.sql">
+-- 🔴 FIX CRÍTICO 1: Reescribir el RPC para evitar la Explosión Cartesiana
+-- Destruimos la función anterior porque cambió la estructura de retorno
+DROP FUNCTION IF EXISTS get_municipality_counts();
+
+-- Creamos la versión optimizada con subconsultas aisladas (O(N) en lugar de O(N^4))
+CREATE OR REPLACE FUNCTION get_municipality_counts()
+RETURNS TABLE(
+    municipality_id uuid, 
+    name text, 
+    profiles_count bigint, 
+    businesses_count bigint, 
+    claims_count bigint, 
+    announcements_count bigint
+) AS $$
+BEGIN
+  RETURN QUERY
+  SELECT
+    m.id, 
+    m.name,
+    (SELECT count(*) FROM public.profiles p WHERE p.municipality_id = m.id) as profiles_count,
+    (SELECT count(*) FROM public.businesses b WHERE b.municipality_id = m.id) as businesses_count,
+    (SELECT count(*) FROM public.claims c WHERE c.municipality_id = m.id) as claims_count,
+    (SELECT count(*) FROM public.staff_announcements sa WHERE sa.municipality_id = m.id) as announcements_count
+  FROM public.municipalities m;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- 🔴 FIX CRÍTICO 2: Índices compuestos faltantes en Claims (Reclamos)
+CREATE INDEX IF NOT EXISTS idx_claims_created_desc ON public.claims (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_claims_muni_created_desc ON public.claims (municipality_id, created_at DESC);
+
+-- 🔴 FIX CRÍTICO 3: Arreglar el RLS de Registrations que anulaba la Primary Key
+DROP POLICY IF EXISTS "registrations_public_insert" ON public.registrations;
+CREATE POLICY "registrations_public_insert" ON public.registrations FOR INSERT 
+WITH CHECK (
+  EXISTS (
+    SELECT 1 FROM public.content_items 
+    WHERE content_items.id = registrations.event_id::uuid
+  )
+);
+</file>
+
 <file path=".env.example">
 # Variables de entorno - MUNO
 # Copiá este archivo como .env y completá los valores reales.
@@ -12264,580 +12308,6 @@ export default function AdminMetricasInput() {
           )}
         </>
       )}
-    </div>
-  );
-}
-</file>
-
-<file path="src/pages/admin/AdminReclamos.tsx">
-import { useEffect, useState, useRef, useCallback } from "react";
-import { Camera, X, CheckCircle2, Clock, AlertCircle, MapPin, Users, MessageSquare, Plus, Trash2, Pencil, Save, FileText, Loader2 } from "lucide-react";
-import { Link } from "react-router-dom";
-import { toast } from "sonner";
-import { supabase } from "@/integrations/supabase/client";
-import { logActivity } from "@/lib/audit";
-import { useAuth } from "@/context/AuthContext";
-
-import { CLAIM_AREAS } from "@/data/mock";
-
-const CUADRILLAS = ["Cuadrilla A · Alumbrado", "Cuadrilla B · Bacheo", "Cuadrilla C · Limpieza", "Cuadrilla D · Espacios verdes"];
-
-type ClaimStatus = "Pendiente" | "En curso" | "Cerrado";
-const STATUS_LIST: ClaimStatus[] = ["Pendiente", "En curso", "Cerrado"];
-const STATUS_LABEL: Record<string, string> = {
-  "Pendiente": "Pendiente de revisión",
-  "En curso": "En curso",
-  "Cerrado": "Resuelto",
-};
-const STATUS_STYLE: Record<string, string> = {
-  "Pendiente": "bg-muno-amber/15 text-[hsl(var(--muno-amber))]",
-  "En curso": "bg-muno-blue/15 text-muno-blue",
-  "Cerrado": "bg-muno-teal/15 text-muno-teal",
-};
-// Selectores de color del modal: Rojo / Amarillo / Verde
-const STATUS_DOT: Record<string, string> = {
-  "Pendiente": "bg-red-500",
-  "En curso": "bg-amber-400",
-  "Cerrado": "bg-emerald-500",
-};
-const STATUS_BTN: Record<string, string> = {
-  "Pendiente": "border-red-500 bg-red-500/10 text-red-700",
-  "En curso": "border-amber-500 bg-amber-400/15 text-amber-800",
-  "Cerrado": "border-emerald-500 bg-emerald-500/10 text-emerald-700",
-};
-
-type Claim = {
-  id: string;
-  user_id: string;
-  category: string;
-  area: string | null;
-  status: ClaimStatus;
-  address: string | null;
-  description: string | null;
-  evidence_photos: string[] | null;
-  resolution_note: string | null;
-  resolution_photos: string[] | null;
-  resolved_at: string | null;
-  created_at: string;
-};
-
-type Canned = { id: string; label: string; body: string; enabled: boolean };
-
-// Interfaces estrictas para eliminar 'any'
-interface ClaimUpdate {
-  status: ClaimStatus;
-  resolution_note?: string;
-  resolution_photos?: string[];
-  resolved_at?: string;
-}
-
-interface NotificationPayload {
-  title: string;
-  body: string;
-  link: string;
-  audience: string;
-  source_type: string;
-  source_id: string;
-  user_id: string;
-}
-
-interface CannedPayload {
-  label: string;
-  body: string;
-  enabled: boolean;
-  municipality_id?: string;
-}
-
-export default function AdminReclamos() {
-  const [items, setItems] = useState<Claim[]>([]);
-  const [active, setActive] = useState<Claim | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [showTpl, setShowTpl] = useState(false);
-  const [areaFilter, setAreaFilter] = useState<string>("");
-  const [statusFilter, setStatusFilter] = useState<string>("");
-
-  const loadClaims = useCallback(async (isMounted = true) => {
-    setLoading(true);
-    try {
-      const { data } = await supabase
-        .from("claims")
-        .select("*")
-        .order("created_at", { ascending: false })
-        .limit(200);
-        
-      if (isMounted) {
-        setItems((data as Claim[]) || []);
-        setLoading(false);
-      }
-    } catch (err) {
-      console.error("Error al cargar reclamos:", err);
-      if (isMounted) setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    let isMounted = true;
-    loadClaims(isMounted);
-    return () => { isMounted = false; };
-  }, [loadClaims]);
-
-  const update = (c: Claim) => setItems((p) => p.map((x) => x.id === c.id ? c : x));
-
-  return (
-    <div className="space-y-5">
-      <div className="flex items-center justify-between gap-3 flex-wrap">
-        <h2 className="font-display text-isa-navy text-[20px] font-extrabold">Bandeja de Reclamos</h2>
-        <button
-          onClick={() => setShowTpl(true)}
-          className="inline-flex items-center gap-1.5 text-xs font-bold bg-isa-navy text-white rounded-[14px] px-3 py-2 min-h-[40px]"
-        >
-          <FileText className="w-3.5 h-3.5" /> Respuestas predeterminadas
-        </button>
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-xs font-bold text-muted-foreground">Área:</span>
-        <button onClick={() => setAreaFilter("")} className={`px-3 py-1 rounded-full text-xs font-bold border ${!areaFilter ? "bg-isa-navy text-white border-isa-navy" : "bg-card"}`}>Todas</button>
-        {CLAIM_AREAS.map((a) => (
-          <button key={a} onClick={() => setAreaFilter(a)} className={`px-3 py-1 rounded-full text-xs font-bold border ${areaFilter === a ? "bg-isa-navy text-white border-isa-navy" : "bg-card"}`}>{a}</button>
-        ))}
-        <span className="mx-2 h-4 w-px bg-border" />
-        <span className="text-xs font-bold text-muted-foreground">Estado:</span>
-        {["", ...STATUS_LIST].map((s) => (
-          <button key={s || "all"} onClick={() => setStatusFilter(s)} className={`inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-bold border ${statusFilter === s ? "bg-isa-navy text-white border-isa-navy" : "bg-card"}`}>
-            {s && <span className={`w-2 h-2 rounded-full ${STATUS_DOT[s]}`} />}
-            {s || "Todos"}
-          </button>
-        ))}
-      </div>
-
-      {loading && (
-        <div className="text-center text-sm text-muted-foreground py-10 inline-flex items-center gap-2 justify-center w-full">
-          <Loader2 className="w-4 h-4 animate-spin" /> Cargando…
-        </div>
-      )}
-
-      {(() => {
-        const filtered = items.filter((r) => (!areaFilter || r.area === areaFilter) && (!statusFilter || r.status === statusFilter));
-        if (!loading && filtered.length === 0) {
-          return (
-            <div className="isa-card p-6 text-center text-sm text-muted-foreground">
-              No hay reclamos {areaFilter ? `en ${areaFilter}` : ""} {statusFilter ? `· ${statusFilter}` : ""}.
-            </div>
-          );
-        }
-        return (
-          <>
-            {/* Vista Escritorio */}
-            <div className="isa-card overflow-hidden hidden lg:block">
-              <table className="w-full text-sm">
-                <thead className="bg-muted text-isa-navy">
-                  <tr>
-                    <th className="text-left p-3">Ticket</th>
-                    <th className="text-left p-3">Categoría</th>
-                    <th className="text-left p-3">Área</th>
-                    <th className="text-left p-3">Fecha</th>
-                    <th className="text-left p-3">Estado</th>
-                    <th className="p-3"></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filtered.map((r) => {
-                    const short = r.id.slice(0, 4).toUpperCase();
-                    return (
-                      <tr key={r.id} className="border-t hover:bg-muted/40 transition-colors">
-                        <td className="p-3 font-bold">
-                          <Link to={`/reclamos/${encodeURIComponent(r.id)}`} className="hover:underline">#MUNO-{short}</Link>
-                        </td>
-                        <td className="p-3">{r.category}</td>
-                        <td className="p-3 text-xs"><span className="px-2 py-1 rounded-full bg-muted">{r.area || "—"}</span></td>
-                        <td className="p-3 text-muted-foreground">{new Date(r.created_at).toLocaleDateString("es-AR")}</td>
-                        <td className="p-3">
-                          <span className={`isa-chip inline-flex items-center gap-1 ${STATUS_STYLE[r.status]}`}>
-                            <span className={`w-2 h-2 rounded-full ${STATUS_DOT[r.status]}`} />
-                            {STATUS_LABEL[r.status] || r.status}
-                          </span>
-                        </td>
-                        <td className="p-3 text-right">
-                          <button onClick={() => setActive(r)} className="text-xs font-bold text-muno-blue hover:underline">Gestionar</button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </>
-        );
-      })()}
-
-      {/* Vista Móvil */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 lg:hidden">
-        {items.map((r) => {
-          const Icon = r.status === "Cerrado" ? CheckCircle2 : r.status === "En curso" ? Clock : AlertCircle;
-          const short = r.id.slice(0, 4).toUpperCase();
-          return (
-            <article key={r.id} className="isa-card p-4 space-y-2">
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <Link to={`/reclamos/${encodeURIComponent(r.id)}`} className="font-extrabold text-isa-navy text-sm hover:underline">#MUNO-{short}</Link>
-                  <div className="text-xs text-muted-foreground mt-0.5">{r.category} · {new Date(r.created_at).toLocaleDateString("es-AR")}</div>
-                </div>
-                <span className={`isa-chip ${STATUS_STYLE[r.status]} inline-flex items-center gap-1 shrink-0`}>
-                  <Icon className="w-3 h-3" /> {STATUS_LABEL[r.status] || r.status}
-                </span>
-              </div>
-              {r.description && <p className="text-xs text-muted-foreground line-clamp-2">{r.description}</p>}
-              <button
-                onClick={() => setActive(r)}
-                className="w-full mt-1 bg-isa-navy text-isa-white rounded-[20px] py-2 text-xs font-bold inline-flex items-center justify-center gap-1.5"
-              >
-                <MessageSquare className="w-3.5 h-3.5" /> Gestionar
-              </button>
-            </article>
-          );
-        })}
-      </div>
-
-      {active && <ManageDialog claim={active} onClose={() => setActive(null)} onSaved={(c) => { update(c); setActive(null); }} />}
-      {showTpl && <TemplatesDialog onClose={() => setShowTpl(false)} />}
-    </div>
-  );
-}
-
-function ManageDialog({ claim, onClose, onSaved }: { claim: Claim; onClose: () => void; onSaved: (c: Claim) => void }) {
-  const [status, setStatus] = useState<ClaimStatus>(claim.status);
-  const [response, setResponse] = useState(claim.resolution_note || "");
-  const [photo, setPhoto] = useState<string | null>(claim.resolution_photos?.[0] || null);
-  const [crew, setCrew] = useState<string>("");
-  const [canned, setCanned] = useState<Canned[]>([]);
-  const [saving, setSaving] = useState(false);
-  const fileRef = useRef<HTMLInputElement>(null);
-  const mapHref = `https://maps.google.com/?q=${encodeURIComponent(claim.address || "San Francisco del Monte de Oro")}`;
-  const short = claim.id.slice(0, 4).toUpperCase();
-  const photos = claim.evidence_photos || [];
-
-  useEffect(() => {
-    let isMounted = true;
-    const fetchCanned = async () => {
-      const { data } = await supabase.from("claim_canned_responses").select("id,label,body,enabled").eq("enabled", true);
-      if (isMounted) setCanned((data as Canned[]) || []);
-    };
-    fetchCanned();
-    return () => { isMounted = false; };
-  }, []);
-
-  const onUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0];
-    if (f) setPhoto(URL.createObjectURL(f));
-  };
-
-  const save = async () => {
-    if (status === "Cerrado" && !response.trim()) {
-      toast.error("Para cerrar el reclamo, escribí una respuesta.");
-      return;
-    }
-    setSaving(true);
-    
-    const updatePayload: ClaimUpdate = { status };
-    if (status === "Cerrado") {
-      updatePayload.resolution_note = response.trim();
-      if (photo) updatePayload.resolution_photos = [photo];
-      updatePayload.resolved_at = new Date().toISOString();
-    } else if (response.trim()) {
-      updatePayload.resolution_note = response.trim();
-    }
-    
-    const { data, error } = await supabase.from("claims").update(updatePayload).eq("id", claim.id).select("*").single();
-    if (error || !data) {
-      setSaving(false);
-      toast.error("No se pudo guardar", { description: error?.message });
-      return;
-    }
-    
-    if (response.trim() || status !== claim.status) {
-      const areaLabel = claim.area || "tu área";
-      const body =
-        status === "Cerrado"
-          ? `Tu reclamo en ${areaLabel} fue resuelto.`
-          : status === "En curso"
-          ? `Tu reclamo en ${areaLabel} está en curso.`
-          : `Tu reclamo en ${areaLabel} ha sido respondido.`;
-          
-      const notifPayload: NotificationPayload = {
-        title: `Reclamo #MUNO-${claim.id.slice(0, 4).toUpperCase()}`,
-        body,
-        link: `/reclamos/${claim.id}`,
-        audience: "residents",
-        source_type: "claim",
-        source_id: claim.id,
-        user_id: claim.user_id,
-      };
-      
-      await supabase.from("notifications").insert(notifPayload);
-    }
-    setSaving(false);
-    toast.success("Reclamo actualizado · Vecino notificado");
-    logActivity(
-      status === "Cerrado" ? "Cerrar reclamo" : `Actualizar reclamo · ${status}`,
-      { entity: "claim", entity_id: claim.id, meta: { crew, status, area: claim.area } }
-    );
-    onSaved(data as Claim);
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
-      <div className="isa-card p-5 max-w-lg w-full max-h-[90vh] overflow-y-auto">
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <div className="text-xs text-muted-foreground">Ticket</div>
-            <h3 className="font-extrabold text-isa-navy">#MUNO-{short}</h3>
-          </div>
-          <button onClick={onClose} className="w-8 h-8 grid place-items-center rounded-lg hover:bg-muted"><X className="w-4 h-4" /></button>
-        </div>
-
-        {photos[0] && <img src={photos[0]} className="w-full h-32 object-cover rounded-xl mb-3" />}
-        {claim.description && <p className="text-sm text-muted-foreground mb-3">{claim.description}</p>}
-
-        {claim.address && (
-          <a href={mapHref} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-[12px] font-bold text-muno-blue mb-4">
-            <MapPin className="w-3.5 h-3.5" /> {claim.address}
-          </a>
-        )}
-
-        <label className="text-xs font-bold text-muted-foreground flex items-center gap-1"><Users className="w-3 h-3" /> Cuadrilla</label>
-        <select value={crew} onChange={(e) => setCrew(e.target.value)} className="mt-1 mb-4 w-full px-3 py-2.5 rounded-xl border bg-background text-sm min-h-[44px]">
-          <option value="">Sin asignar</option>
-          {CUADRILLAS.map((c) => <option key={c} value={c}>{c}</option>)}
-        </select>
-
-        {claim.area && (
-          <div className="mb-3 inline-flex items-center gap-1.5 text-[11px] font-bold px-2 py-1 rounded-full bg-muted text-isa-navy">
-            Área asignada: {claim.area}
-          </div>
-        )}
-
-        <label className="text-xs font-bold text-muted-foreground">Estado del ticket</label>
-        <div className="flex gap-2 mt-1 mb-4">
-          {STATUS_LIST.map((s) => (
-            <button
-              key={s}
-              onClick={() => setStatus(s)}
-              className={`flex-1 px-3 py-2 rounded-[20px] text-xs font-bold min-h-[44px] inline-flex items-center justify-center gap-1.5 border-2 transition-all ${
-                status === s ? STATUS_BTN[s] : "bg-card border-border text-muted-foreground"
-              }`}
-            >
-              <span className={`w-2.5 h-2.5 rounded-full ${STATUS_DOT[s]}`} />
-              {STATUS_LABEL[s]}
-            </button>
-          ))}
-        </div>
-
-        <label className="text-xs font-bold text-muted-foreground flex items-center gap-1"><MessageSquare className="w-3 h-3" /> Respuesta predeterminada</label>
-        <select
-          onChange={(e) => {
-            const c = canned.find((x) => x.id === e.target.value);
-            if (c) setResponse(c.body);
-          }}
-          defaultValue=""
-          className="mt-1 mb-3 w-full px-3 py-2.5 rounded-xl border bg-background text-sm min-h-[44px]"
-        >
-          <option value="">— Elegí una plantilla —</option>
-          {canned.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
-        </select>
-
-        <label className="text-xs font-bold text-muted-foreground">Respuesta Oficial del Área</label>
-        <textarea value={response} onChange={(e) => setResponse(e.target.value)} rows={4} placeholder="Escribí o seleccioná una respuesta predefinida…" className="mt-1 w-full px-3 py-2 rounded-xl border bg-background text-sm mb-3 resize-none" />
-
-        {status === "Cerrado" && (
-          <>
-            <label className="text-xs font-bold text-muted-foreground">Foto del trabajo realizado (opcional)</label>
-            <div className="mt-1 mb-3">
-              {photo ? (
-                <div className="relative">
-                  <img src={photo} className="w-full h-40 object-cover rounded-xl" />
-                  <button onClick={() => setPhoto(null)} className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/60 text-white grid place-items-center"><X className="w-4 h-4" /></button>
-                </div>
-              ) : (
-                <button onClick={() => fileRef.current?.click()} className="w-full h-32 rounded-xl border-2 border-dashed grid place-items-center text-muted-foreground">
-                  <div className="text-center"><Camera className="w-6 h-6 mx-auto" /><div className="text-xs mt-1">Subir foto</div></div>
-                </button>
-              )}
-              <input ref={fileRef} type="file" accept="image/*" hidden onChange={onUpload} />
-            </div>
-          </>
-        )}
-
-        <button onClick={save} disabled={saving} className="w-full bg-isa-navy text-isa-white rounded-[20px] py-3 font-bold inline-flex items-center justify-center gap-2 disabled:opacity-60">
-          {saving && <Loader2 className="w-4 h-4 animate-spin" />} Guardar cambios
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function TemplatesDialog({ onClose }: { onClose: () => void }) {
-  const { user } = useAuth();
-  const [items, setItems] = useState<Canned[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [editing, setEditing] = useState<Canned | null>(null);
-  const [label, setLabel] = useState("");
-  const [body, setBody] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  const loadTpl = useCallback(async (isMounted = true) => {
-    setLoading(true);
-    try {
-      const { data } = await supabase
-        .from("claim_canned_responses")
-        .select("*")
-        .order("created_at", { ascending: false });
-      if (isMounted) {
-        setItems((data as Canned[]) || []);
-        setLoading(false);
-      }
-    } catch (err) {
-      console.error("Error al cargar plantillas:", err);
-      if (isMounted) setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    let isMounted = true;
-    loadTpl(isMounted);
-    return () => { isMounted = false; };
-  }, [loadTpl]);
-
-  const startNew = () => {
-    setEditing({ id: "", label: "", body: "", enabled: true });
-    setLabel("");
-    setBody("");
-  };
-  const startEdit = (c: Canned) => {
-    setEditing(c);
-    setLabel(c.label);
-    setBody(c.body);
-  };
-
-  const save = async () => {
-    if (!label.trim() || !body.trim()) {
-      toast.error("Completá título y contenido");
-      return;
-    }
-    setBusy(true);
-    
-    let municipality_id: string | null = null;
-    if (user?.id) {
-      const { data: prof } = await supabase
-        .from("profiles")
-        .select("municipality_id")
-        .eq("id", user.id)
-        .maybeSingle();
-      municipality_id = prof?.municipality_id || null;
-    }
-
-    const payload: CannedPayload = { 
-      label: label.trim(), 
-      body: body.trim(), 
-      enabled: true 
-    };
-    
-    if (municipality_id) {
-      payload.municipality_id = municipality_id;
-    }
-
-    const res = editing && editing.id
-      ? await supabase.from("claim_canned_responses").update(payload).eq("id", editing.id)
-      : await supabase.from("claim_canned_responses").insert(payload);
-      
-    setBusy(false);
-    
-    if (res.error) {
-      toast.error("No se pudo guardar", { description: res.error.message });
-      return;
-    }
-    toast.success("Plantilla guardada");
-    setEditing(null);
-    loadTpl();
-  };
-
-  const remove = async (id: string) => {
-    if (!window.confirm("¿Eliminar esta plantilla?")) return;
-    const { error } = await supabase.from("claim_canned_responses").delete().eq("id", id);
-    if (error) {
-      toast.error("No se pudo eliminar");
-      return;
-    }
-    setItems((xs) => xs.filter((x) => x.id !== id));
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
-      <div className="isa-card p-5 max-w-lg w-full max-h-[90vh] overflow-y-auto">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="font-extrabold text-isa-navy inline-flex items-center gap-2">
-            <FileText className="w-4 h-4" /> Respuestas predeterminadas
-          </h3>
-          <button onClick={onClose} className="w-8 h-8 grid place-items-center rounded-lg hover:bg-muted"><X className="w-4 h-4" /></button>
-        </div>
-
-        {editing ? (
-          <div className="space-y-3">
-            <input
-              value={label}
-              onChange={(e) => setLabel(e.target.value)}
-              placeholder="Título corto · Ej: Bache reparado"
-              className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm"
-            />
-            <textarea
-              value={body}
-              onChange={(e) => setBody(e.target.value)}
-              rows={5}
-              placeholder="Texto de la respuesta…"
-              className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm resize-none"
-            />
-            <div className="flex gap-2">
-              <button onClick={() => setEditing(null)} className="flex-1 px-3 py-2.5 rounded-[14px] border font-bold text-sm">Cancelar</button>
-              <button onClick={save} disabled={busy} className="flex-1 px-3 py-2.5 rounded-[14px] bg-isa-navy text-white font-bold text-sm inline-flex items-center justify-center gap-1 disabled:opacity-60">
-                {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
-                Guardar
-              </button>
-            </div>
-          </div>
-        ) : (
-          <>
-            <button onClick={startNew} className="w-full mb-3 inline-flex items-center justify-center gap-1.5 bg-isa-navy text-white rounded-[14px] py-2.5 text-sm font-bold">
-              <Plus className="w-4 h-4" /> Nueva plantilla
-            </button>
-            {loading && <div className="text-sm text-muted-foreground text-center py-4">Cargando…</div>}
-            {!loading && items.length === 0 && (
-              <div className="text-sm text-muted-foreground text-center py-6 border border-dashed rounded-xl">
-                Aún no hay plantillas. Creá la primera para responder más rápido.
-              </div>
-            )}
-            <ul className="space-y-2">
-              {items.map((c) => (
-                <li key={c.id} className="border rounded-xl p-3 bg-background">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0 flex-1">
-                      <div className="font-bold text-isa-navy text-sm">{c.label}</div>
-                      <p className="text-xs text-muted-foreground line-clamp-2 mt-0.5">{c.body}</p>
-                    </div>
-                    <div className="flex gap-1 shrink-0">
-                      <button onClick={() => startEdit(c)} className="w-8 h-8 grid place-items-center rounded-lg hover:bg-muted text-isa-navy">
-                        <Pencil className="w-3.5 h-3.5" />
-                      </button>
-                      <button onClick={() => remove(c.id)} className="w-8 h-8 grid place-items-center rounded-lg hover:bg-muno-red/10 text-muno-red">
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </>
-        )}
-      </div>
     </div>
   );
 }
@@ -18308,6 +17778,594 @@ function ChartCard({ title, children, className = "" }: ChartCardProps) {
 }
 </file>
 
+<file path="src/pages/admin/AdminReclamos.tsx">
+import { useEffect, useState, useRef, useCallback } from "react";
+import { Camera, X, CheckCircle2, Clock, AlertCircle, MapPin, Users, MessageSquare, Plus, Trash2, Pencil, Save, FileText, Loader2 } from "lucide-react";
+import { Link } from "react-router-dom";
+import { toast } from "sonner";
+import { supabase } from "@/integrations/supabase/client";
+import { logActivity } from "@/lib/audit";
+import { useAuth } from "@/context/AuthContext";
+
+import { CLAIM_AREAS } from "@/data/mock";
+
+const CUADRILLAS = ["Cuadrilla A · Alumbrado", "Cuadrilla B · Bacheo", "Cuadrilla C · Limpieza", "Cuadrilla D · Espacios verdes"];
+
+type ClaimStatus = "Pendiente" | "En curso" | "Cerrado";
+const STATUS_LIST: ClaimStatus[] = ["Pendiente", "En curso", "Cerrado"];
+const STATUS_LABEL: Record<string, string> = {
+  "Pendiente": "Pendiente de revisión",
+  "En curso": "En curso",
+  "Cerrado": "Resuelto",
+};
+const STATUS_STYLE: Record<string, string> = {
+  "Pendiente": "bg-muno-amber/15 text-[hsl(var(--muno-amber))]",
+  "En curso": "bg-muno-blue/15 text-muno-blue",
+  "Cerrado": "bg-muno-teal/15 text-muno-teal",
+};
+const STATUS_DOT: Record<string, string> = {
+  "Pendiente": "bg-red-500",
+  "En curso": "bg-amber-400",
+  "Cerrado": "bg-emerald-500",
+};
+const STATUS_BTN: Record<string, string> = {
+  "Pendiente": "border-red-500 bg-red-500/10 text-red-700",
+  "En curso": "border-amber-500 bg-amber-400/15 text-amber-800",
+  "Cerrado": "border-emerald-500 bg-emerald-500/10 text-emerald-700",
+};
+
+type Claim = {
+  id: string;
+  user_id: string;
+  category: string;
+  area: string | null;
+  status: ClaimStatus;
+  address: string | null;
+  description: string | null;
+  evidence_photos: string[] | null;
+  resolution_note: string | null;
+  resolution_photos: string[] | null;
+  resolved_at: string | null;
+  created_at: string;
+};
+
+type Canned = { id: string; label: string; body: string; enabled: boolean };
+
+interface ClaimUpdate {
+  status: ClaimStatus;
+  resolution_note?: string;
+  resolution_photos?: string[];
+  resolved_at?: string;
+}
+
+interface NotificationPayload {
+  title: string;
+  body: string;
+  link: string;
+  audience: string;
+  source_type: string;
+  source_id: string;
+  user_id: string;
+}
+
+interface CannedPayload {
+  label: string;
+  body: string;
+  enabled: boolean;
+  municipality_id?: string;
+}
+
+export default function AdminReclamos() {
+  const { user } = useAuth();
+  const [items, setItems] = useState<Claim[]>([]);
+  const [active, setActive] = useState<Claim | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [showTpl, setShowTpl] = useState(false);
+  const [areaFilter, setAreaFilter] = useState<string>("");
+  const [statusFilter, setStatusFilter] = useState<string>("");
+
+  // 🔴 FIX CRÍTICO SRE: Filtrado en Base de Datos (Zero Seq Scans)
+  const loadClaims = useCallback(async (isMounted = true) => {
+    if (!user) return;
+    setLoading(true);
+    try {
+      // 1. Obtener la jurisdicción (Multi-tenant BOLA fix)
+      const { data: userRole } = await supabase
+        .from("user_roles")
+        .select("municipality_id")
+        .eq("user_id", user.id)
+        .eq("active", true)
+        .maybeSingle();
+
+      const muniId = userRole?.municipality_id;
+
+      // 2. Construir la consulta con filtros directos al motor SQL
+      let q = supabase
+        .from("claims")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(200);
+
+      if (muniId) q = q.eq("municipality_id", muniId);
+      if (areaFilter) q = q.eq("area", areaFilter);
+      if (statusFilter) q = q.eq("status", statusFilter as ClaimStatus);
+        
+      const { data } = await q;
+        
+      if (isMounted) {
+        setItems((data as Claim[]) || []);
+        setLoading(false);
+      }
+    } catch (err) {
+      console.error("Error al cargar reclamos:", err);
+      if (isMounted) setLoading(false);
+    }
+  }, [user, areaFilter, statusFilter]); // Re-ejecuta solo si cambian los filtros
+
+  useEffect(() => {
+    let isMounted = true;
+    loadClaims(isMounted);
+    return () => { isMounted = false; };
+  }, [loadClaims]);
+
+  const update = (c: Claim) => setItems((p) => p.map((x) => x.id === c.id ? c : x));
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <h2 className="font-display text-isa-navy text-[20px] font-extrabold">Bandeja de Reclamos</h2>
+        <button
+          onClick={() => setShowTpl(true)}
+          className="inline-flex items-center gap-1.5 text-xs font-bold bg-isa-navy text-white rounded-[14px] px-3 py-2 min-h-[40px]"
+        >
+          <FileText className="w-3.5 h-3.5" /> Respuestas predeterminadas
+        </button>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-bold text-muted-foreground">Área:</span>
+        <button onClick={() => setAreaFilter("")} className={`px-3 py-1 rounded-full text-xs font-bold border ${!areaFilter ? "bg-isa-navy text-white border-isa-navy" : "bg-card"}`}>Todas</button>
+        {CLAIM_AREAS.map((a) => (
+          <button key={a} onClick={() => setAreaFilter(a)} className={`px-3 py-1 rounded-full text-xs font-bold border ${areaFilter === a ? "bg-isa-navy text-white border-isa-navy" : "bg-card"}`}>{a}</button>
+        ))}
+        <span className="mx-2 h-4 w-px bg-border" />
+        <span className="text-xs font-bold text-muted-foreground">Estado:</span>
+        {["", ...STATUS_LIST].map((s) => (
+          <button key={s || "all"} onClick={() => setStatusFilter(s)} className={`inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-bold border ${statusFilter === s ? "bg-isa-navy text-white border-isa-navy" : "bg-card"}`}>
+            {s && <span className={`w-2 h-2 rounded-full ${STATUS_DOT[s]}`} />}
+            {s || "Todos"}
+          </button>
+        ))}
+      </div>
+
+      {loading && (
+        <div className="text-center text-sm text-muted-foreground py-10 inline-flex items-center gap-2 justify-center w-full">
+          <Loader2 className="w-4 h-4 animate-spin" /> Cargando…
+        </div>
+      )}
+
+      {!loading && items.length === 0 && (
+        <div className="isa-card p-6 text-center text-sm text-muted-foreground">
+          No hay reclamos {areaFilter ? `en ${areaFilter}` : ""} {statusFilter ? `· ${statusFilter}` : ""}.
+        </div>
+      )}
+
+      {!loading && items.length > 0 && (
+        <>
+          {/* Vista Escritorio */}
+          <div className="isa-card overflow-hidden hidden lg:block">
+            <table className="w-full text-sm">
+              <thead className="bg-muted text-isa-navy">
+                <tr>
+                  <th className="text-left p-3">Ticket</th>
+                  <th className="text-left p-3">Categoría</th>
+                  <th className="text-left p-3">Área</th>
+                  <th className="text-left p-3">Fecha</th>
+                  <th className="text-left p-3">Estado</th>
+                  <th className="p-3"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((r) => {
+                  const short = r.id.slice(0, 4).toUpperCase();
+                  return (
+                    <tr key={r.id} className="border-t hover:bg-muted/40 transition-colors">
+                      <td className="p-3 font-bold">
+                        <Link to={`/reclamos/${encodeURIComponent(r.id)}`} className="hover:underline">#MUNO-{short}</Link>
+                      </td>
+                      <td className="p-3">{r.category}</td>
+                      <td className="p-3 text-xs"><span className="px-2 py-1 rounded-full bg-muted">{r.area || "—"}</span></td>
+                      <td className="p-3 text-muted-foreground">{new Date(r.created_at).toLocaleDateString("es-AR")}</td>
+                      <td className="p-3">
+                        <span className={`isa-chip inline-flex items-center gap-1 ${STATUS_STYLE[r.status]}`}>
+                          <span className={`w-2 h-2 rounded-full ${STATUS_DOT[r.status]}`} />
+                          {STATUS_LABEL[r.status] || r.status}
+                        </span>
+                      </td>
+                      <td className="p-3 text-right">
+                        <button onClick={() => setActive(r)} className="text-xs font-bold text-muno-blue hover:underline">Gestionar</button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Vista Móvil */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 lg:hidden">
+            {items.map((r) => {
+              const Icon = r.status === "Cerrado" ? CheckCircle2 : r.status === "En curso" ? Clock : AlertCircle;
+              const short = r.id.slice(0, 4).toUpperCase();
+              return (
+                <article key={r.id} className="isa-card p-4 space-y-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <Link to={`/reclamos/${encodeURIComponent(r.id)}`} className="font-extrabold text-isa-navy text-sm hover:underline">#MUNO-{short}</Link>
+                      <div className="text-xs text-muted-foreground mt-0.5">{r.category} · {new Date(r.created_at).toLocaleDateString("es-AR")}</div>
+                    </div>
+                    <span className={`isa-chip ${STATUS_STYLE[r.status]} inline-flex items-center gap-1 shrink-0`}>
+                      <Icon className="w-3 h-3" /> {STATUS_LABEL[r.status] || r.status}
+                    </span>
+                  </div>
+                  {r.description && <p className="text-xs text-muted-foreground line-clamp-2">{r.description}</p>}
+                  <button
+                    onClick={() => setActive(r)}
+                    className="w-full mt-1 bg-isa-navy text-isa-white rounded-[20px] py-2 text-xs font-bold inline-flex items-center justify-center gap-1.5"
+                  >
+                    <MessageSquare className="w-3.5 h-3.5" /> Gestionar
+                  </button>
+                </article>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {active && <ManageDialog claim={active} onClose={() => setActive(null)} onSaved={(c) => { update(c); setActive(null); }} />}
+      {showTpl && <TemplatesDialog onClose={() => setShowTpl(false)} />}
+    </div>
+  );
+}
+
+function ManageDialog({ claim, onClose, onSaved }: { claim: Claim; onClose: () => void; onSaved: (c: Claim) => void }) {
+  const [status, setStatus] = useState<ClaimStatus>(claim.status);
+  const [response, setResponse] = useState(claim.resolution_note || "");
+  const [photo, setPhoto] = useState<string | null>(claim.resolution_photos?.[0] || null);
+  const [crew, setCrew] = useState<string>("");
+  const [canned, setCanned] = useState<Canned[]>([]);
+  const [saving, setSaving] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const mapHref = `https://maps.google.com/?q=${encodeURIComponent(claim.address || "San Francisco del Monte de Oro")}`;
+  const short = claim.id.slice(0, 4).toUpperCase();
+  const photos = claim.evidence_photos || [];
+
+  useEffect(() => {
+    let isMounted = true;
+    const fetchCanned = async () => {
+      const { data } = await supabase.from("claim_canned_responses").select("id,label,body,enabled").eq("enabled", true);
+      if (isMounted) setCanned((data as Canned[]) || []);
+    };
+    fetchCanned();
+    return () => { isMounted = false; };
+  }, []);
+
+  const onUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    if (f) setPhoto(URL.createObjectURL(f));
+  };
+
+  const save = async () => {
+    if (status === "Cerrado" && !response.trim()) {
+      toast.error("Para cerrar el reclamo, escribí una respuesta.");
+      return;
+    }
+    setSaving(true);
+    
+    const updatePayload: ClaimUpdate = { status };
+    if (status === "Cerrado") {
+      updatePayload.resolution_note = response.trim();
+      if (photo) updatePayload.resolution_photos = [photo];
+      updatePayload.resolved_at = new Date().toISOString();
+    } else if (response.trim()) {
+      updatePayload.resolution_note = response.trim();
+    }
+    
+    const { data, error } = await supabase.from("claims").update(updatePayload).eq("id", claim.id).select("*").single();
+    if (error || !data) {
+      setSaving(false);
+      toast.error("No se pudo guardar", { description: error?.message });
+      return;
+    }
+    
+    if (response.trim() || status !== claim.status) {
+      const areaLabel = claim.area || "tu área";
+      const body =
+        status === "Cerrado"
+          ? `Tu reclamo en ${areaLabel} fue resuelto.`
+          : status === "En curso"
+          ? `Tu reclamo en ${areaLabel} está en curso.`
+          : `Tu reclamo en ${areaLabel} ha sido respondido.`;
+          
+      const notifPayload: NotificationPayload = {
+        title: `Reclamo #MUNO-${claim.id.slice(0, 4).toUpperCase()}`,
+        body,
+        link: `/reclamos/${claim.id}`,
+        audience: "residents",
+        source_type: "claim",
+        source_id: claim.id,
+        user_id: claim.user_id,
+      };
+      
+      await supabase.from("notifications").insert(notifPayload);
+    }
+    setSaving(false);
+    toast.success("Reclamo actualizado · Vecino notificado");
+    logActivity(
+      status === "Cerrado" ? "Cerrar reclamo" : `Actualizar reclamo · ${status}`,
+      { entity: "claim", entity_id: claim.id, meta: { crew, status, area: claim.area } }
+    );
+    onSaved(data as Claim);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
+      <div className="isa-card p-5 max-w-lg w-full max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <div className="text-xs text-muted-foreground">Ticket</div>
+            <h3 className="font-extrabold text-isa-navy">#MUNO-{short}</h3>
+          </div>
+          <button onClick={onClose} className="w-8 h-8 grid place-items-center rounded-lg hover:bg-muted"><X className="w-4 h-4" /></button>
+        </div>
+
+        {photos[0] && <img src={photos[0]} className="w-full h-32 object-cover rounded-xl mb-3" />}
+        {claim.description && <p className="text-sm text-muted-foreground mb-3">{claim.description}</p>}
+
+        {claim.address && (
+          <a href={mapHref} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-[12px] font-bold text-muno-blue mb-4">
+            <MapPin className="w-3.5 h-3.5" /> {claim.address}
+          </a>
+        )}
+
+        <label className="text-xs font-bold text-muted-foreground flex items-center gap-1"><Users className="w-3 h-3" /> Cuadrilla</label>
+        <select value={crew} onChange={(e) => setCrew(e.target.value)} className="mt-1 mb-4 w-full px-3 py-2.5 rounded-xl border bg-background text-sm min-h-[44px]">
+          <option value="">Sin asignar</option>
+          {CUADRILLAS.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+
+        {claim.area && (
+          <div className="mb-3 inline-flex items-center gap-1.5 text-[11px] font-bold px-2 py-1 rounded-full bg-muted text-isa-navy">
+            Área asignada: {claim.area}
+          </div>
+        )}
+
+        <label className="text-xs font-bold text-muted-foreground">Estado del ticket</label>
+        <div className="flex gap-2 mt-1 mb-4">
+          {STATUS_LIST.map((s) => (
+            <button
+              key={s}
+              onClick={() => setStatus(s)}
+              className={`flex-1 px-3 py-2 rounded-[20px] text-xs font-bold min-h-[44px] inline-flex items-center justify-center gap-1.5 border-2 transition-all ${
+                status === s ? STATUS_BTN[s] : "bg-card border-border text-muted-foreground"
+              }`}
+            >
+              <span className={`w-2.5 h-2.5 rounded-full ${STATUS_DOT[s]}`} />
+              {STATUS_LABEL[s]}
+            </button>
+          ))}
+        </div>
+
+        <label className="text-xs font-bold text-muted-foreground flex items-center gap-1"><MessageSquare className="w-3 h-3" /> Respuesta predeterminada</label>
+        <select
+          onChange={(e) => {
+            const c = canned.find((x) => x.id === e.target.value);
+            if (c) setResponse(c.body);
+          }}
+          defaultValue=""
+          className="mt-1 mb-3 w-full px-3 py-2.5 rounded-xl border bg-background text-sm min-h-[44px]"
+        >
+          <option value="">— Elegí una plantilla —</option>
+          {canned.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+        </select>
+
+        <label className="text-xs font-bold text-muted-foreground">Respuesta Oficial del Área</label>
+        <textarea value={response} onChange={(e) => setResponse(e.target.value)} rows={4} placeholder="Escribí o seleccioná una respuesta predefinida…" className="mt-1 w-full px-3 py-2 rounded-xl border bg-background text-sm mb-3 resize-none" />
+
+        {status === "Cerrado" && (
+          <>
+            <label className="text-xs font-bold text-muted-foreground">Foto del trabajo realizado (opcional)</label>
+            <div className="mt-1 mb-3">
+              {photo ? (
+                <div className="relative">
+                  <img src={photo} className="w-full h-40 object-cover rounded-xl" />
+                  <button onClick={() => setPhoto(null)} className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/60 text-white grid place-items-center"><X className="w-4 h-4" /></button>
+                </div>
+              ) : (
+                <button onClick={() => fileRef.current?.click()} className="w-full h-32 rounded-xl border-2 border-dashed grid place-items-center text-muted-foreground">
+                  <div className="text-center"><Camera className="w-6 h-6 mx-auto" /><div className="text-xs mt-1">Subir foto</div></div>
+                </button>
+              )}
+              <input ref={fileRef} type="file" accept="image/*" hidden onChange={onUpload} />
+            </div>
+          </>
+        )}
+
+        <button onClick={save} disabled={saving} className="w-full bg-isa-navy text-isa-white rounded-[20px] py-3 font-bold inline-flex items-center justify-center gap-2 disabled:opacity-60">
+          {saving && <Loader2 className="w-4 h-4 animate-spin" />} Guardar cambios
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function TemplatesDialog({ onClose }: { onClose: () => void }) {
+  const { user } = useAuth();
+  const [items, setItems] = useState<Canned[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState<Canned | null>(null);
+  const [label, setLabel] = useState("");
+  const [body, setBody] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const loadTpl = useCallback(async (isMounted = true) => {
+    setLoading(true);
+    try {
+      const { data } = await supabase
+        .from("claim_canned_responses")
+        .select("*")
+        .order("created_at", { ascending: false });
+      if (isMounted) {
+        setItems((data as Canned[]) || []);
+        setLoading(false);
+      }
+    } catch (err) {
+      console.error("Error al cargar plantillas:", err);
+      if (isMounted) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    let isMounted = true;
+    loadTpl(isMounted);
+    return () => { isMounted = false; };
+  }, [loadTpl]);
+
+  const startNew = () => {
+    setEditing({ id: "", label: "", body: "", enabled: true });
+    setLabel("");
+    setBody("");
+  };
+  const startEdit = (c: Canned) => {
+    setEditing(c);
+    setLabel(c.label);
+    setBody(c.body);
+  };
+
+  const save = async () => {
+    if (!label.trim() || !body.trim()) {
+      toast.error("Completá título y contenido");
+      return;
+    }
+    setBusy(true);
+    
+    let municipality_id: string | null = null;
+    if (user?.id) {
+      const { data: prof } = await supabase
+        .from("profiles")
+        .select("municipality_id")
+        .eq("id", user.id)
+        .maybeSingle();
+      municipality_id = prof?.municipality_id || null;
+    }
+
+    const payload: CannedPayload = { 
+      label: label.trim(), 
+      body: body.trim(), 
+      enabled: true 
+    };
+    
+    if (municipality_id) {
+      payload.municipality_id = municipality_id;
+    }
+
+    const res = editing && editing.id
+      ? await supabase.from("claim_canned_responses").update(payload).eq("id", editing.id)
+      : await supabase.from("claim_canned_responses").insert(payload);
+      
+    setBusy(false);
+    
+    if (res.error) {
+      toast.error("No se pudo guardar", { description: res.error.message });
+      return;
+    }
+    toast.success("Plantilla guardada");
+    setEditing(null);
+    loadTpl();
+  };
+
+  const remove = async (id: string) => {
+    if (!window.confirm("¿Eliminar esta plantilla?")) return;
+    const { error } = await supabase.from("claim_canned_responses").delete().eq("id", id);
+    if (error) {
+      toast.error("No se pudo eliminar");
+      return;
+    }
+    setItems((xs) => xs.filter((x) => x.id !== id));
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
+      <div className="isa-card p-5 max-w-lg w-full max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-extrabold text-isa-navy inline-flex items-center gap-2">
+            <FileText className="w-4 h-4" /> Respuestas predeterminadas
+          </h3>
+          <button onClick={onClose} className="w-8 h-8 grid place-items-center rounded-lg hover:bg-muted"><X className="w-4 h-4" /></button>
+        </div>
+
+        {editing ? (
+          <div className="space-y-3">
+            <input
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              placeholder="Título corto · Ej: Bache reparado"
+              className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm"
+            />
+            <textarea
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              rows={5}
+              placeholder="Texto de la respuesta…"
+              className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm resize-none"
+            />
+            <div className="flex gap-2">
+              <button onClick={() => setEditing(null)} className="flex-1 px-3 py-2.5 rounded-[14px] border font-bold text-sm">Cancelar</button>
+              <button onClick={save} disabled={busy} className="flex-1 px-3 py-2.5 rounded-[14px] bg-isa-navy text-white font-bold text-sm inline-flex items-center justify-center gap-1 disabled:opacity-60">
+                {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                Guardar
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <button onClick={startNew} className="w-full mb-3 inline-flex items-center justify-center gap-1.5 bg-isa-navy text-white rounded-[14px] py-2.5 text-sm font-bold">
+              <Plus className="w-4 h-4" /> Nueva plantilla
+            </button>
+            {loading && <div className="text-sm text-muted-foreground text-center py-4">Cargando…</div>}
+            {!loading && items.length === 0 && (
+              <div className="text-sm text-muted-foreground text-center py-6 border border-dashed rounded-xl">
+                Aún no hay plantillas. Creá la primera para responder más rápido.
+              </div>
+            )}
+            <ul className="space-y-2">
+              {items.map((c) => (
+                <li key={c.id} className="border rounded-xl p-3 bg-background">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="font-bold text-isa-navy text-sm">{c.label}</div>
+                      <p className="text-xs text-muted-foreground line-clamp-2 mt-0.5">{c.body}</p>
+                    </div>
+                    <div className="flex gap-1 shrink-0">
+                      <button onClick={() => startEdit(c)} className="w-8 h-8 grid place-items-center rounded-lg hover:bg-muted text-isa-navy">
+                        <Pencil className="w-3.5 h-3.5" />
+                      </button>
+                      <button onClick={() => remove(c.id)} className="w-8 h-8 grid place-items-center rounded-lg hover:bg-muno-red/10 text-muno-red">
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+</file>
+
 <file path="src/pages/admin/AdminTareas.tsx">
 import { useState } from "react";
 import { area_tasks, AREAS, type Area, type AreaTask, collaborators } from "@/data/mock";
@@ -19414,432 +19472,6 @@ export default function IntendenteDashboard() {
           <p className="text-xs text-muted-foreground mt-1">KPIs y conclusión estratégica.</p>
         </Link>
       </section>
-    </div>
-  );
-}
-</file>
-
-<file path="src/pages/admin/Turismo.tsx">
-import { useEffect, useRef, useState, useCallback } from "react";
-import { supabase } from "@/integrations/supabase/client";
-import { useAuth } from "@/context/AuthContext";
-import { toast } from "sonner";
-import { Camera, Loader2, Plus, Star, Upload, Wallet } from "lucide-react";
-
-type Category = "gastronomy" | "event" | "lodging" | "nature" | "commerce";
-
-interface DBBusiness {
-  id: string;
-  name: string;
-  zone: string | null;
-  photo_url: string | null;
-  address: string | null;
-  enabled: boolean;
-  tax_expires_at: string | null;
-  municipality_id: string | null;
-}
-
-const CATS: { id: Category; label: string }[] = [
-  { id: "gastronomy", label: "Gastronomía" },
-  { id: "event", label: "Eventos" },
-  { id: "lodging", label: "Hospedaje" },
-  { id: "nature", label: "Atractivos" },
-];
-
-// 🟠 FIX ALTO SRE: Helper de compresión de imágenes en el cliente (reduce el payload y ancho de banda en un 90%)
-const compressImage = (file: File): Promise<Blob> => {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.src = URL.createObjectURL(file);
-    img.onload = () => {
-      URL.revokeObjectURL(img.src);
-      const canvas = document.createElement("canvas");
-      // Tamaño máximo ideal para vistas turísticas en móviles y desktop
-      const MAX_WIDTH = 1280;
-      const MAX_HEIGHT = 720;
-      let width = img.width;
-      let height = img.height;
-
-      if (width > height) {
-        if (width > MAX_WIDTH) { 
-          height *= MAX_WIDTH / width; 
-          width = MAX_WIDTH; 
-        }
-      } else {
-        if (height > MAX_HEIGHT) { 
-          width *= MAX_HEIGHT / height; 
-          height = MAX_HEIGHT; 
-        }
-      }
-
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return reject(new Error("Canvas context is null"));
-      
-      ctx.drawImage(img, 0, 0, width, height);
-      canvas.toBlob(
-        (blob) => blob ? resolve(blob) : reject(new Error("Compression output blob is null")), 
-        "image/jpeg", 
-        0.80 // 80% de calidad es un equilibrio perfecto entre nitidez y peso para turismo
-      );
-    };
-    img.onerror = (err) => reject(err);
-  });
-};
-
-function FormularioCarga() {
-  const { user } = useAuth();
-  const fileRef = useRef<HTMLInputElement>(null);
-  const [category, setCategory] = useState<Category>("gastronomy");
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
-  const [photo, setPhoto] = useState<string | null>(null);
-  const [uploading, setUploading] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [drag, setDrag] = useState(false);
-
-  const upload = async (file: File) => {
-    if (!user) {
-      toast.error("Iniciá sesión para subir fotos");
-      return;
-    }
-    setUploading(true);
-    
-    try {
-      // Aplicar compresión asíncrona antes de subir
-      const compressedBlob = await compressImage(file);
-      const ext = "jpg"; // Forzamos jpg por la compresión del canvas
-      const path = `tourism/${user.id}/${Date.now()}.${ext}`;
-      
-      const { error } = await supabase.storage.from("avatars").upload(path, compressedBlob, { 
-        upsert: true,
-        contentType: "image/jpeg"
-      });
-      
-      if (error) {
-        toast.error("Error subiendo foto");
-        setUploading(false);
-        return;
-      }
-      
-      const { data } = supabase.storage.from("avatars").getPublicUrl(path);
-      setPhoto(data.publicUrl);
-    } catch (err) {
-      console.error(err);
-      toast.error("No se pudo procesar la imagen localmente");
-    } finally {
-      setUploading(false);
-    }
-  };
-
-  const onDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setDrag(false);
-    const f = e.dataTransfer.files?.[0];
-    if (f) upload(f);
-  };
-
-  const save = async () => {
-    if (!title.trim()) {
-      toast.error("El nombre es obligatorio");
-      return;
-    }
-    setSaving(true);
-    
-    // Blindaje Multi-Tenant
-    let municipality_id = null;
-    if (user?.id) {
-      const { data: prof } = await supabase.from("profiles").select("municipality_id").eq("id", user.id).maybeSingle();
-      municipality_id = prof?.municipality_id;
-    }
-
-    const { error } = await supabase.from("tourism_items").insert({
-      category,
-      title: title.trim(),
-      description: description.trim() || null,
-      photo_url: photo,
-      published: true,
-      created_by: user?.id,
-      ...(municipality_id ? { municipality_id } : {})
-    });
-    
-    setSaving(false);
-    if (error) {
-      toast.error("Error: " + error.message);
-      return;
-    }
-    toast.success("Publicado en la guía turística");
-    setTitle("");
-    setDescription("");
-    setPhoto(null);
-  };
-
-  return (
-    <div className="bg-white rounded-[16px] border p-5 space-y-4">
-      <div className="flex items-center gap-2">
-        <Plus className="w-4 h-4 text-isa-navy" />
-        <h3 className="font-extrabold text-isa-navy text-sm">Nuevo ítem turístico</h3>
-      </div>
-
-      <div className="flex gap-2 flex-wrap">
-        {CATS.map((c) => (
-          <button
-            key={c.id}
-            type="button"
-            onClick={() => setCategory(c.id)}
-            className={`px-3 py-2 rounded-[10px] text-[12px] font-bold opacity-100 ${
-              category === c.id ? "bg-isa-navy text-white" : "border text-isa-navy"
-            }`}
-          >
-            {c.label}
-          </button>
-        ))}
-      </div>
-
-      <input
-        value={title}
-        onChange={(e) => setTitle(e.target.value)}
-        placeholder="Nombre"
-        className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm"
-      />
-      <textarea
-        value={description}
-        onChange={(e) => setDescription(e.target.value)}
-        rows={3}
-        placeholder="Descripción"
-        className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm resize-none"
-      />
-
-      {/* Dropzone */}
-      <div
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDrag(true);
-        }}
-        onDragLeave={() => setDrag(false)}
-        onDrop={onDrop}
-        onClick={() => fileRef.current?.click()}
-        className={`cursor-pointer border-2 border-dashed rounded-[14px] p-5 text-center transition-colors ${
-          drag ? "border-isa-navy bg-isa-light" : "border-muted-foreground/30 bg-muted/30"
-        }`}
-      >
-        {photo ? (
-          <div className="flex items-center gap-3 justify-center">
-            <img src={photo} className="w-16 h-16 rounded-lg object-cover" alt="" />
-            <span className="text-xs text-muted-foreground">Foto cargada · click para reemplazar</span>
-          </div>
-        ) : uploading ? (
-          <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground">
-            <Loader2 className="w-4 h-4 animate-spin" /> Subiendo...
-          </div>
-        ) : (
-          <div className="flex flex-col items-center gap-1.5 text-muted-foreground">
-            <Upload className="w-5 h-5" />
-            <div className="text-xs font-bold text-isa-navy">Arrastrá una foto o hacé click</div>
-            <div className="text-[11px]">JPG, PNG · compresión inteligente activa</div>
-          </div>
-        )}
-        <input
-          ref={fileRef}
-          type="file"
-          accept="image/*"
-          hidden
-          onChange={(e) => e.target.files?.[0] && upload(e.target.files[0])}
-        />
-      </div>
-
-      <button
-        onClick={save}
-        disabled={saving}
-        className="inline-flex items-center gap-2 bg-isa-navy text-white rounded-[12px] px-4 py-2.5 text-[13px] font-bold opacity-100 disabled:opacity-60"
-      >
-        {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Camera className="w-4 h-4" />}
-        Guardar y publicar
-      </button>
-    </div>
-  );
-}
-
-function TablaComerciosHacienda() {
-  const { user } = useAuth();
-  const [rows, setRows] = useState<DBBusiness[]>([]);
-  const [featuredIds, setFeaturedIds] = useState<Set<string>>(new Set());
-  const [loading, setLoading] = useState(true);
-
-  // 1. Candado en memoria para validación sincrónica
-  const isMounted = useRef(true);
-
-  // 2. Remoción del falso booleano
-  const load = useCallback(async () => {
-    if (!user?.id) return;
-    if (isMounted.current) setLoading(true);
-
-    try {
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("municipality_id")
-        .eq("id", user.id)
-        .maybeSingle();
-
-      const muniId = profile?.municipality_id;
-
-      let bq = supabase
-        .from("businesses")
-        .select("id,name,zone,address,enabled,tax_expires_at,photo_url,municipality_id")
-        .order("name");
-
-      if (muniId) bq = bq.eq("municipality_id", muniId);
-
-      const { data: biz } = await bq;
-
-      let tq = supabase
-        .from("tourism_items")
-        .select("business_id,featured")
-        .eq("featured", true);
-
-      if (muniId) tq = tq.eq("municipality_id", muniId);
-
-      const { data: feats } = await tq;
-
-      // 3. Verificamos el .current antes de setear variables de estado
-      if (isMounted.current) {
-        setRows((biz as DBBusiness[]) || []);
-        const featArray = (feats || []) as { business_id: string | null }[];
-        setFeaturedIds(new Set(featArray.map((f) => f.business_id).filter(Boolean) as string[]));
-        setLoading(false);
-      }
-    } catch (error) {
-      console.error("Error al cargar comercios para turismo:", error);
-      if (isMounted.current) setLoading(false);
-    }
-  }, [user?.id]);
-
-  useEffect(() => {
-    isMounted.current = true;
-    load();
-    return () => { 
-      // 4. Apagamos la referencia si el componente se desmonta
-      isMounted.current = false; 
-    };
-  }, [load]);
-
-  const featurar = async (b: DBBusiness) => {
-    if (featuredIds.has(b.id)) {
-      const { data: existing } = await supabase
-        .from("tourism_items")
-        .select("id")
-        .eq("business_id", b.id)
-        .maybeSingle();
-        
-      if (existing?.id) {
-        await supabase.from("tourism_items").update({ featured: false }).eq("id", existing.id);
-      }
-      toast.success("Quitado de destacados");
-    } else {
-      const { error } = await supabase.from("tourism_items").insert({
-        category: "commerce",
-        title: b.name,
-        description: b.address || "",
-        photo_url: b.photo_url,
-        location: b.zone || b.address || null,
-        business_id: b.id,
-        featured: true,
-        published: true,
-        created_by: user?.id,
-        municipality_id: b.municipality_id
-      });
-      
-      if (error) {
-        toast.error("No se pudo destacar: " + error.message);
-        return;
-      }
-      toast.success(`${b.name} destacado en la guía`);
-    }
-    load();
-  };
-
-  return (
-    <div className="bg-white rounded-[16px] border overflow-hidden">
-      <div className="p-4 border-b flex items-center gap-2">
-        <Wallet className="w-4 h-4 text-isa-navy" />
-        <h3 className="font-extrabold text-isa-navy text-sm">Comercios desde Hacienda</h3>
-      </div>
-
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead className="bg-muted/40 text-[11px] uppercase tracking-wider text-muted-foreground">
-            <tr>
-              <th className="text-left px-4 py-2.5 font-bold">Comercio</th>
-              <th className="text-left px-4 py-2.5 font-bold">Zona</th>
-              <th className="text-left px-4 py-2.5 font-bold">Habilitado</th>
-              <th className="text-right px-4 py-2.5 font-bold">Acciones</th>
-            </tr>
-          </thead>
-          <tbody>
-            {loading && (
-              <tr>
-                <td colSpan={4} className="px-4 py-6 text-center text-muted-foreground text-xs">
-                  Cargando...
-                </td>
-              </tr>
-            )}
-            {!loading && rows.length === 0 && (
-              <tr>
-                <td colSpan={4} className="px-4 py-6 text-center text-muted-foreground text-xs">
-                  Sin comercios registrados.
-                </td>
-              </tr>
-            )}
-            {rows.map((b) => {
-              const featured = featuredIds.has(b.id);
-              return (
-                <tr key={b.id} className="border-t">
-                  <td className="px-4 py-2.5 font-bold text-isa-navy">{b.name}</td>
-                  <td className="px-4 py-2.5 text-muted-foreground">{b.zone || b.address || "—"}</td>
-                  <td className="px-4 py-2.5">
-                    <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${
-                      b.enabled ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"
-                    }`}>
-                      {b.enabled ? "SI" : "NO"}
-                    </span>
-                  </td>
-                  <td className="px-4 py-2.5 text-right">
-                    <button
-                      onClick={() => featurar(b)}
-                      className={`inline-flex items-center gap-1.5 text-[11px] font-bold px-3 py-1.5 rounded-full opacity-100 ${
-                        featured ? "bg-amber-400 text-isa-navy" : "border text-isa-navy hover:bg-isa-light"
-                      }`}
-                    >
-                      <Star className="w-3 h-3" /> {featured ? "Destacado" : "Destacar en Guía"}
-                    </button>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-export default function Turismo() {
-  return (
-    <div className="space-y-5">
-      <header>
-        <h2 className="font-display font-extrabold text-isa-navy text-[22px] leading-tight">
-          Panel de Turismo
-        </h2>
-        <p className="text-sm text-muted-foreground mt-1">
-          Cargá contenido turístico y conectá comercios desde Hacienda.
-        </p>
-      </header>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        <FormularioCarga />
-        <TablaComerciosHacienda />
-      </div>
     </div>
   );
 }
@@ -21679,423 +21311,6 @@ export default function Lugares() {
 }
 </file>
 
-<file path="src/pages/Reclamos.tsx">
-import { useState, useRef, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
-import { claim_categories, CLAIM_AREAS } from "@/data/mock";
-import * as Icons from "lucide-react";
-import { CheckCircle2, ArrowRight, ArrowLeft, Upload, X, Loader2 } from "lucide-react";
-import { supabase } from "@/integrations/supabase/client";
-import { useAuth } from "@/context/AuthContext";
-import { toast } from "sonner";
-
-// Interfaz estricta para eliminar los errores 'any' de categoría
-interface ClaimCategory {
-  id: string;
-  label: string;
-  icon: string;
-  area?: string;
-}
-
-// Interfaz para el payload de inserción de Supabase
-interface ClaimPayload {
-  user_id: string;
-  category: string;
-  area: string;
-  address: string;
-  description: string;
-  evidence_photos: string[];
-  status: "Pendiente" | "En curso" | "Cerrado"; // SOLUCIÓN TS: Tipado literal exacto de Supabase
-}
-
-const STEPS = ["Categoría", "Fotos", "Ubicación", "Resumen"] as const;
-
-// 🔴 FIX CRÍTICO SRE: Función de compresión de imágenes asíncrona en cliente
-const compressImage = (file: File): Promise<Blob> => {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.src = URL.createObjectURL(file);
-    img.onload = () => {
-      URL.revokeObjectURL(img.src);
-      const canvas = document.createElement("canvas");
-      // Redimensionar a Full HD máximo
-      const MAX_WIDTH = 1920;
-      const MAX_HEIGHT = 1080;
-      let width = img.width;
-      let height = img.height;
-
-      if (width > height) {
-        if (width > MAX_WIDTH) {
-          height *= MAX_WIDTH / width;
-          width = MAX_WIDTH;
-        }
-      } else {
-        if (height > MAX_HEIGHT) {
-          width *= MAX_HEIGHT / height;
-          height = MAX_HEIGHT;
-        }
-      }
-
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return reject(new Error("Canvas context is null"));
-      ctx.drawImage(img, 0, 0, width, height);
-      // Comprimir a JPEG al 75%
-      canvas.toBlob(
-        (blob) => {
-          if (blob) {
-            resolve(blob);
-          } else {
-            reject(new Error("Compression output blob is null"));
-          }
-        },
-        "image/jpeg",
-        0.75
-      );
-    };
-    img.onerror = (err) => reject(err);
-  });
-};
-
-export default function Reclamos() {
-  const navigate = useNavigate();
-  const { user } = useAuth();
-  const [step, setStep] = useState(0);
-  const [category, setCategory] = useState<ClaimCategory | null>(null);
-  const [area, setArea] = useState<string>("");
-  const [photos, setPhotos] = useState<string[]>([]);
-  const [photoFiles, setPhotoFiles] = useState<File[]>([]); 
-  const [progress, setProgress] = useState(0);
-  const [location, setLocation] = useState("");
-  const [description, setDescription] = useState("");
-  const [ticket, setTicket] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  
-  const fileRef = useRef<HTMLInputElement>(null);
-  
-  // SOLUCIÓN: Referencias para atrapar y limpiar timers y evitar Memory Leaks
-  const progressIntervalRef = useRef<number | null>(null);
-  const progressTimeoutRef = useRef<number | null>(null);
-  const resetTimeoutRef = useRef<number | null>(null);
-
-  // Escoba de memoria: limpia los intervalos si el usuario abandona la pantalla
-  useEffect(() => {
-    return () => {
-      if (progressIntervalRef.current) window.clearInterval(progressIntervalRef.current);
-      if (progressTimeoutRef.current) window.clearTimeout(progressTimeoutRef.current);
-      if (resetTimeoutRef.current) window.clearTimeout(resetTimeoutRef.current);
-    };
-  }, []);
-
-  const addPhoto = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []).slice(0, 3 - photos.length);
-    setProgress(0);
-    
-    // Limpiamos intervalos previos por si el usuario sube fotos muy rápido
-    if (progressIntervalRef.current) window.clearInterval(progressIntervalRef.current);
-    if (progressTimeoutRef.current) window.clearTimeout(progressTimeoutRef.current);
-
-    progressIntervalRef.current = window.setInterval(() => setProgress((p) => Math.min(100, p + 12)), 60);
-    
-    progressTimeoutRef.current = window.setTimeout(() => {
-      if (progressIntervalRef.current) window.clearInterval(progressIntervalRef.current);
-      setProgress(100);
-      const urls = files.map((f) => URL.createObjectURL(f));
-      setPhotos((prev) => [...prev, ...urls].slice(0, 3));
-      setPhotoFiles((prev) => [...prev, ...files].slice(0, 3)); 
-      
-      resetTimeoutRef.current = window.setTimeout(() => setProgress(0), 400);
-    }, 600);
-  };
-
-  const submit = async () => {
-    if (!user) {
-      toast.error("Iniciá sesión para enviar un reclamo");
-      navigate("/auth/login");
-      return;
-    }
-    setSaving(true);
-
-    const uploadedUrls: string[] = [];
-    for (let i = 0; i < photoFiles.length; i++) {
-      const file = photoFiles[i];
-      const fileExt = "jpg"; // Forzamos formato por la compresión
-      const filePath = `claims/${user.id}/${Date.now()}-${i}.${fileExt}`;
-      
-      try {
-        // Ejecutamos la compresión asíncrona reduciendo drásticamente el payload
-        const compressedBlob = await compressImage(file);
-        
-        const { error: uploadError } = await supabase.storage
-          .from("avatars") 
-          .upload(filePath, compressedBlob, { 
-            contentType: "image/jpeg",
-            cacheControl: "31536000",
-            upsert: true
-          });
-
-        if (uploadError) {
-          setSaving(false);
-          toast.error(`Error de conexión al subir la imagen ${i + 1}`);
-          return;
-        }
-
-        const { data: urlData } = supabase.storage.from("avatars").getPublicUrl(filePath);
-        uploadedUrls.push(urlData.publicUrl);
-      } catch (err) {
-        setSaving(false);
-        toast.error("Error al procesar la imagen en tu dispositivo.");
-        console.error(err);
-        return;
-      }
-    }
-
-    const finalArea = area || category?.area || "";
-    const isOtro = category?.id === "otro";
-    const finalLocation = location || (isOtro ? "Ubicación automática (GPS del dispositivo)" : "");
-    
-    const payload: ClaimPayload = {
-      user_id: user.id,
-      category: category?.label || category?.id || "General",
-      area: finalArea,
-      address: finalLocation,
-      description: description || `${category?.label} - ${finalLocation}`,
-      evidence_photos: uploadedUrls, 
-      status: "Pendiente",
-    };
-
-    const { data, error } = await supabase
-      .from("claims")
-      .insert(payload)
-      .select("id")
-      .single();
-      
-    setSaving(false);
-    
-    if (error || !data) {
-      toast.error("No se pudo enviar", { description: error?.message });
-      return;
-    }
-    const short = data.id.slice(0, 4).toUpperCase();
-    setTicket(`#MUNO-${short}`);
-    toast.success(`Reclamo registrado · Asignado a ${finalArea}`);
-  };
-
-  const reset = () => {
-    setStep(0); setCategory(null); setArea(""); setPhotos([]); setPhotoFiles([]); setLocation(""); setDescription(""); setTicket(null);
-  };
-
-  if (ticket) {
-    return (
-      <div className="max-w-md mx-auto isa-card p-10 text-center animate-scale-in">
-        <div className="w-20 h-20 rounded-full bg-muno-teal/15 text-muno-teal grid place-items-center mx-auto">
-          <CheckCircle2 strokeWidth={1.5} className="w-12 h-12" />
-        </div>
-        <h2 className="text-2xl font-extrabold text-isa-navy mt-4">¡Reclamo enviado!</h2>
-        <p className="text-sm text-muted-foreground mt-2">Estado inicial: <b>Pendiente de revisión</b>.</p>
-        <div className="mt-6 p-5 rounded-2xl bg-isa-light">
-          <div className="text-xs uppercase font-bold text-muted-foreground tracking-wider">Ticket</div>
-          <div className="text-3xl font-extrabold text-isa-navy mt-1">{ticket}</div>
-        </div>
-        <div className="mt-6 grid grid-cols-2 gap-3">
-          <button onClick={reset} className="bg-card border rounded-[20px] py-3 font-bold text-isa-navy">Nuevo</button>
-          <button onClick={() => navigate("/mi-cuenta")} className="bg-isa-navy text-isa-white rounded-[20px] py-3 font-bold">Mis incidentes</button>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="max-w-3xl mx-auto space-y-6">
-      <div className="flex items-center gap-2">
-        {STEPS.map((s, i) => {
-          const skipped = category?.id === "otro" && (i === 1 || i === 2);
-          return (
-            <div key={s} className="flex-1 flex items-center gap-2">
-              <div className={`flex-1 h-2 rounded-full ${skipped ? "bg-muted opacity-40" : i <= step ? "bg-muno-teal" : "bg-muted"}`} />
-            </div>
-          );
-        })}
-      </div>
-      <div className="text-sm font-bold text-muted-foreground">Paso {step + 1} de 4 · {STEPS[step]}{category?.id === "otro" && step === 0 && " (sin fotos ni ubicación manual)"}</div>
-
-      <div className="isa-card p-6 min-h-[320px]">
-        {step === 0 && (
-          <div className="space-y-5">
-            <div>
-              <div className="text-sm font-bold text-isa-navy mb-2">Tipo de incidente</div>
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-                {claim_categories.map((cRaw) => {
-                  const c = cRaw as ClaimCategory;
-                  // SOLUCIÓN TS: Extracción segura de la key del módulo Icons
-                  const Icon = (Icons[c.icon as keyof typeof Icons] as React.ElementType) || Icons.Circle;
-                  const active = category?.id === c.id;
-                  return (
-                    <button
-                      key={c.id}
-                      onClick={() => { setCategory(c); if (!area) setArea(c.area || ""); }}
-                      className={`p-5 rounded-2xl border-2 flex flex-col items-center gap-2 transition-all ${
-                        active ? "border-isa-navy bg-accent" : "border-border hover:border-isa-dusty"
-                      }`}
-                    >
-                      <Icon strokeWidth={1.5} className="w-8 h-8 text-isa-navy" />
-                      <span className="font-bold text-sm text-isa-navy">{c.label}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {category?.id === "otro" && (
-              <div className="space-y-3 animate-fade-in p-4 rounded-2xl border-2 border-isa-navy/20 bg-isa-light/30">
-                <div>
-                  <label className="text-sm font-bold text-isa-navy">¿A qué área corresponde? <span className="text-destructive">*</span></label>
-                  <select
-                    value={area}
-                    onChange={(e) => setArea(e.target.value)}
-                    className="mt-2 w-full px-4 py-3 rounded-xl border bg-background outline-none focus:ring-2 focus:ring-isa-navy text-sm"
-                  >
-                    <option value="">— Seleccioná un área —</option>
-                    {CLAIM_AREAS.map((a) => <option key={a} value={a}>{a}</option>)}
-                  </select>
-                  <p className="text-xs text-muted-foreground mt-1">Se enviará al Jefe del área seleccionada.</p>
-                </div>
-                <div>
-                  <label className="text-sm font-bold text-isa-navy">Motivo del reclamo <span className="text-destructive">*</span></label>
-                  <textarea
-                    value={description}
-                    onChange={(e) => setDescription(e.target.value)}
-                    rows={4}
-                    placeholder="Detallá brevemente el motivo del reclamo (este formulario es 100% informativo, no requiere fotos)."
-                    className="mt-2 w-full px-4 py-3 rounded-xl border bg-background outline-none focus:ring-2 focus:ring-isa-navy text-sm resize-none"
-                  />
-                  <p className="text-xs text-muted-foreground mt-1">No es necesario adjuntar fotos para reclamos derivados a otras áreas.</p>
-                </div>
-              </div>
-            )}
-            {category && category.id !== "otro" && (
-              <div className="text-xs text-muted-foreground p-3 rounded-xl bg-muted/40">
-                Área asignada automáticamente: <strong className="text-isa-navy">{area || category.area}</strong>
-              </div>
-            )}
-          </div>
-        )}
-
-        {step === 1 && (
-          <div className="space-y-4">
-            <div className="grid grid-cols-3 gap-3">
-              {[0, 1, 2].map((i) => {
-                const url = photos[i];
-                return (
-                  <div key={`photo-slot-${i}`} className="aspect-square rounded-2xl border-2 border-dashed bg-muted overflow-hidden relative">
-                    {url ? (
-                      <>
-                        <img src={url} className="w-full h-full object-cover" alt="Evidencia" />
-                        <button 
-                          onClick={() => {
-                            setPhotos(photos.filter((_, j) => j !== i));
-                            setPhotoFiles(photoFiles.filter((_, j) => j !== i));
-                          }} 
-                          className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/60 text-white grid place-items-center"
-                        >
-                          <X className="w-4 h-4" />
-                        </button>
-                      </>
-                    ) : (
-                      <button onClick={() => fileRef.current?.click()} className="w-full h-full grid place-items-center text-muted-foreground">
-                        <Upload strokeWidth={1.5} />
-                      </button>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-            <input ref={fileRef} type="file" accept="image/*" hidden multiple onChange={addPhoto} />
-            {progress > 0 && (
-              <div className="h-2 rounded-full bg-muted overflow-hidden">
-                <div className="h-full bg-muno-teal transition-all" style={{ width: `${progress}%` }} />
-              </div>
-            )}
-            <p className="text-xs text-muted-foreground">Subí entre 1 y 3 fotos del problema (opcional).</p>
-          </div>
-        )}
-
-        {step === 2 && (
-          <div className="space-y-3">
-            <label className="text-sm font-bold text-isa-navy">Describí la ubicación</label>
-            <textarea
-              value={location}
-              onChange={(e) => setLocation(e.target.value)}
-              rows={3}
-              placeholder="Ej: Calle Belgrano 450, frente a la plaza."
-              className="w-full px-4 py-3 rounded-xl border bg-background outline-none focus:ring-2 focus:ring-isa-navy resize-none"
-            />
-            <label className="text-sm font-bold text-isa-navy">Detalle del incidente (opcional)</label>
-            <textarea
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              rows={3}
-              placeholder="Contanos qué pasó, hace cuánto, etc."
-              className="w-full px-4 py-3 rounded-xl border bg-background outline-none focus:ring-2 focus:ring-isa-navy resize-none"
-            />
-          </div>
-        )}
-
-        {step === 3 && (
-          <div className="space-y-4">
-            <h3 className="font-extrabold text-isa-navy text-lg">Revisá tu reclamo</h3>
-            <div className="space-y-2 text-sm">
-              <div className="flex justify-between border-b py-2"><span className="text-muted-foreground">Categoría</span><span className="font-bold">{category?.label}</span></div>
-              <div className="flex justify-between border-b py-2"><span className="text-muted-foreground">Área responsable</span><span className="font-bold">{area}</span></div>
-              <div className="flex justify-between border-b py-2"><span className="text-muted-foreground">Fotos</span><span className="font-bold">{photos.length}</span></div>
-              {category?.id !== "otro" && (
-                <div className="border-b py-2"><div className="text-muted-foreground mb-1">Ubicación</div><div className="font-semibold">{location}</div></div>
-              )}
-              {category?.id === "otro" && (
-                <div className="border-b py-2"><div className="text-muted-foreground mb-1">Ubicación</div><div className="font-semibold text-xs">📍 Capturada automáticamente por GPS al adjuntar foto en tiempo real</div></div>
-              )}
-              {description && <div className="border-b py-2"><div className="text-muted-foreground mb-1">Detalle</div><div className="font-semibold">{description}</div></div>}
-            </div>
-          </div>
-        )}
-      </div>
-
-      <div className="flex justify-between">
-        <button
-          onClick={() => {
-            const prev = category?.id === "otro" && step === 3 ? 0 : Math.max(0, step - 1);
-            setStep(prev);
-          }}
-          disabled={step === 0}
-          className="px-5 py-2.5 rounded-[20px] font-bold border bg-card disabled:opacity-30 flex items-center gap-2"
-        >
-          <ArrowLeft className="w-4 h-4" /> Atrás
-        </button>
-        {step < 3 ? (
-          <button
-            onClick={() => {
-              // Si la categoría es "Otro", saltar fotos y ubicación → ir directo al resumen
-              const next = category?.id === "otro" && step === 0 ? 3 : step + 1;
-              setStep(next);
-            }}
-            disabled={(step === 0 && (!category || (category.id === "otro" ? (!area || !description.trim()) : !(category.area || area)))) || (step === 2 && !location)}
-            className="px-5 py-2.5 rounded-[20px] font-bold bg-isa-navy text-isa-white disabled:opacity-40 flex items-center gap-2"
-          >
-            Siguiente <ArrowRight className="w-4 h-4" />
-          </button>
-        ) : (
-          <button onClick={submit} disabled={saving} className="px-6 py-2.5 rounded-[20px] font-bold bg-muno-teal text-white inline-flex items-center gap-2 disabled:opacity-60">
-            {saving && <Loader2 className="w-4 h-4 animate-spin" />}
-            Enviar reclamo
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-</file>
-
 <file path="src/App.tsx">
 import React, { Component, ErrorInfo, ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -23372,343 +22587,846 @@ function Modal({ title, onClose, children }: ModalProps) {
 }
 </file>
 
-<file path="src/pages/MiCuenta.tsx">
-import { useEffect, useRef, useState, useMemo } from "react";
-import { useAuth } from "@/context/AuthContext";
-import { useNavigate } from "react-router-dom";
-import { Mail, Phone, User, Store, LogOut, Camera, Loader2 } from "lucide-react";
-import MisInscripciones from "@/components/MisInscripciones";
-import RatePueblo from "@/components/RatePueblo";
-import MisFavoritos from "@/components/MisFavoritos";
+<file path="src/pages/admin/Turismo.tsx">
+import { useEffect, useRef, useState, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
+import { Camera, Loader2, Plus, Star, Upload, Wallet } from "lucide-react";
 
-// 1. Interfaces Estrictas para limpiar los 'any'
-interface UserProfile {
-  full_name?: string | null;
-  email?: string | null;
-  phone?: string | null;
-  avatar_url?: string | null;
-  cuit?: string | null;
-}
+type Category = "gastronomy" | "event" | "lodging" | "nature" | "commerce";
 
-interface BusinessProfile {
+interface DBBusiness {
   id: string;
   name: string;
-  tax_expires_at: string | null;
-  tax_amount: number | null;
+  zone: string | null;
+  photo_url: string | null;
+  address: string | null;
   enabled: boolean;
+  tax_expires_at: string | null;
+  municipality_id: string | null;
 }
 
-// 🟠 FIX ALTO SRE: Helper de compresión y recorte de Avatares en el cliente
-const compressAvatar = (file: File): Promise<Blob> => {
+const CATS: { id: Category; label: string }[] = [
+  { id: "gastronomy", label: "Gastronomía" },
+  { id: "event", label: "Eventos" },
+  { id: "lodging", label: "Hospedaje" },
+  { id: "nature", label: "Atractivos" },
+];
+
+// 🟠 FIX ALTO SRE: Helper de compresión de imágenes en el cliente (reduce el payload y ancho de banda en un 90%)
+const compressImage = (file: File): Promise<Blob> => {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.src = URL.createObjectURL(file);
     img.onload = () => {
       URL.revokeObjectURL(img.src);
       const canvas = document.createElement("canvas");
-      // Avatares no necesitan ser mayores a 400x400 px
-      const MAX_WIDTH = 400;
-      const MAX_HEIGHT = 400;
+      // Tamaño máximo ideal para vistas turísticas en móviles y desktop
+      const MAX_WIDTH = 1280;
+      const MAX_HEIGHT = 720;
       let width = img.width;
       let height = img.height;
+
       if (width > height) {
-        if (width > MAX_WIDTH) { height *= MAX_WIDTH / width; width = MAX_WIDTH; }
+        if (width > MAX_WIDTH) { 
+          height *= MAX_WIDTH / width; 
+          width = MAX_WIDTH; 
+        }
       } else {
-        if (height > MAX_HEIGHT) { width *= MAX_HEIGHT / height; height = MAX_HEIGHT; }
+        if (height > MAX_HEIGHT) { 
+          width *= MAX_HEIGHT / height; 
+          height = MAX_HEIGHT; 
+        }
       }
+
       canvas.width = width;
       canvas.height = height;
       const ctx = canvas.getContext("2d");
       if (!ctx) return reject(new Error("Canvas context is null"));
+      
       ctx.drawImage(img, 0, 0, width, height);
-      // Compresión balanceada a 85% JPEG
-      canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("Compression output blob is null")), "image/jpeg", 0.85);
+      canvas.toBlob(
+        (blob) => blob ? resolve(blob) : reject(new Error("Compression output blob is null")), 
+        "image/jpeg", 
+        0.80 // 80% de calidad es un equilibrio perfecto entre nitidez y peso para turismo
+      );
     };
     img.onerror = (err) => reject(err);
   });
 };
 
-export default function MiCuenta() {
-  const { user, roles, signOut } = useAuth();
-  const navigate = useNavigate();
-
-  const profileLabel = useMemo(() => {
-    if (roles.includes("isa_super_admin")) return "ISA Super Admin";
-    if (roles.includes("isa_consultant")) return "Consultor ISA";
-    if (roles.includes("admin")) return "Administrador";
-    if (roles.includes("mayor")) return "Intendente";
-    if (roles.includes("tourism_chief")) return "Jefe de Turismo";
-    if (roles.includes("area_manager")) return "Jefe de Área";
-    if (roles.includes("resident")) return "Vecino";
-
-    return "Turista";
-  }, [roles]);
-
-  const isTourist = roles.length === 0 || roles.includes("tourist");
-
-  const [profile, setProfile] = useState<UserProfile | null>(null);
-  const [uploading, setUploading] = useState(false);
-  const [cuitDraft, setCuitDraft] = useState("");
-  const [savingCuit, setSavingCuit] = useState(false);
-  const [business, setBusiness] = useState<BusinessProfile | null>(null);
+function FormularioCarga() {
+  const { user } = useAuth();
   const fileRef = useRef<HTMLInputElement>(null);
+  const [category, setCategory] = useState<Category>("gastronomy");
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [photo, setPhoto] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [drag, setDrag] = useState(false);
 
-  // 2. Efecto blindado: Carga de Perfil
-  useEffect(() => {
-    let isMounted = true;
-    if (!user) return;
-
-    const fetchProfile = async () => {
-      try {
-        const { data } = await supabase
-          .from("profiles")
-          .select("full_name,email,phone,avatar_url,cuit")
-          .eq("id", user.id)
-          .maybeSingle();
-
-        if (isMounted && data) {
-          const p = data as UserProfile;
-          setProfile(p);
-          setCuitDraft(p.cuit || "");
-        }
-      } catch (err) {
-        console.error("Error cargando perfil", err);
-      }
-    };
-
-    fetchProfile();
-    return () => { isMounted = false; };
-  }, [user]);
-
-  // 3. Efecto blindado: Carga de Comercio (Hacienda)
-  useEffect(() => {
-    let isMounted = true;
-    const cuit = profile?.cuit?.trim();
-    
-    if (!cuit) {
-      setBusiness(null);
+  const upload = async (file: File) => {
+    if (!user) {
+      toast.error("Iniciá sesión para subir fotos");
       return;
     }
-
-    const fetchBusiness = async () => {
-      try {
-        const { data } = await supabase
-          .from("businesses")
-          .select("id,name,tax_expires_at,tax_amount,enabled")
-          .eq("cuit", cuit)
-          .maybeSingle();
-
-        if (isMounted) {
-          setBusiness((data as BusinessProfile) || null);
-        }
-      } catch (err) {
-        console.error("Error cargando comercio", err);
-      }
-    };
-
-    fetchBusiness();
-    return () => { isMounted = false; };
-  }, [profile?.cuit]);
-
-  const saveCuit = async () => {
-    if (!user) return;
-    setSavingCuit(true);
-    
-    const { error } = await supabase
-      .from("profiles")
-      .update({ cuit: cuitDraft.trim() || null })
-      .eq("id", user.id);
-      
-    setSavingCuit(false);
-    
-    if (error) {
-      toast.error("No se pudo guardar el CUIT");
-    } else {
-      toast.success("CUIT guardado");
-      setProfile((p) => ({ ...(p || {}), cuit: cuitDraft.trim() || null }));
-    }
-  };
-
-  const onPick = () => fileRef.current?.click();
-
-  const onUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !user) return;
     setUploading(true);
     
     try {
-      // 🟠 Compresión SRE activada antes del upload
-      const compressedBlob = await compressAvatar(file);
-      const ext = "jpg"; // Forzamos formato por la compresión Canvas
-      const path = `${user.id}/avatar-${Date.now()}.${ext}`;
+      // Aplicar compresión asíncrona antes de subir
+      const compressedBlob = await compressImage(file);
+      const ext = "jpg"; // Forzamos jpg por la compresión del canvas
+      const path = `tourism/${user.id}/${Date.now()}.${ext}`;
       
-      const { error: upErr } = await supabase.storage.from("profiles").upload(path, compressedBlob, { 
-        upsert: true,
-        contentType: "image/jpeg" 
+      const { error } = await supabase.storage.from("avatars").upload(path, compressedBlob, { 
+        upsert: true, 
+        contentType: "image/jpeg",
+       cacheControl: "31536000" 
       });
       
-      if (upErr) {
-        toast.error("No se pudo subir la foto de perfil");
+      if (error) {
+        toast.error("Error subiendo foto");
         setUploading(false);
         return;
       }
       
-      const { data: pub } = supabase.storage.from("profiles").getPublicUrl(path);
-      const url = pub.publicUrl;
-      
-      const { error: updErr } = await supabase.from("profiles").update({ avatar_url: url }).eq("id", user.id);
-      
-      if (updErr) {
-        toast.error("No se guardó la foto en tu perfil");
-      } else {
-        setProfile((p) => ({ ...(p || {}), avatar_url: url }));
-        toast.success("Foto de perfil actualizada");
-      }
+      const { data } = supabase.storage.from("avatars").getPublicUrl(path);
+      setPhoto(data.publicUrl);
     } catch (err) {
       console.error(err);
-      toast.error("Error al procesar el avatar en el celular");
+      toast.error("No se pudo procesar la imagen localmente");
     } finally {
       setUploading(false);
     }
   };
 
-  const handleSignOut = async () => {
-    await signOut();
-    toast.success("Sesión cerrada");
-    navigate("/auth/login");
+  const onDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDrag(false);
+    const f = e.dataTransfer.files?.[0];
+    if (f) upload(f);
   };
 
-  const displayName = profile?.full_name || user?.email?.split("@")[0] || "Usuario MUNO";
-  const displayEmail = profile?.email || user?.email || "—";
-  const displayPhone = profile?.phone || "—";
-  const initial = (displayName[0] || "V").toUpperCase();
+  const save = async () => {
+    if (!title.trim()) {
+      toast.error("El nombre es obligatorio");
+      return;
+    }
+    setSaving(true);
+    
+    // Blindaje Multi-Tenant
+    let municipality_id = null;
+    if (user?.id) {
+      const { data: prof } = await supabase.from("profiles").select("municipality_id").eq("id", user.id).maybeSingle();
+      municipality_id = prof?.municipality_id;
+    }
+
+    const { error } = await supabase.from("tourism_items").insert({
+      category,
+      title: title.trim(),
+      description: description.trim() || null,
+      photo_url: photo,
+      published: true,
+      created_by: user?.id,
+      ...(municipality_id ? { municipality_id } : {})
+    });
+    
+    setSaving(false);
+    if (error) {
+      toast.error("Error: " + error.message);
+      return;
+    }
+    toast.success("Publicado en la guía turística");
+    setTitle("");
+    setDescription("");
+    setPhoto(null);
+  };
 
   return (
-    <div className="space-y-5">
-      <div className="isa-card p-6 flex items-center gap-4">
-        <div className="relative">
-          {profile?.avatar_url ? (
-            <img src={profile.avatar_url} alt="Foto de perfil" className="w-16 h-16 rounded-2xl object-cover" />
-          ) : (
-            <div className="w-16 h-16 rounded-2xl bg-isa-navy text-isa-white grid place-items-center text-2xl font-extrabold">{initial}</div>
-          )}
-          {user && (
-            <button
-              onClick={onPick}
-              disabled={uploading}
-              aria-label="Cambiar foto"
-              className="absolute -bottom-1 -right-1 w-7 h-7 rounded-full bg-isa-navy text-white grid place-items-center shadow-md disabled:opacity-50"
-            >
-              {uploading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Camera className="w-3.5 h-3.5" />}
-            </button>
-          )}
-          <input ref={fileRef} type="file" accept="image/*" hidden onChange={onUpload} />
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="text-xl font-extrabold text-isa-navy truncate">{displayName}</div>
-          <div className="text-sm text-muted-foreground"> Perfil: {profileLabel} </div>
-        </div>
+    <div className="bg-white rounded-[16px] border p-5 space-y-4">
+      <div className="flex items-center gap-2">
+        <Plus className="w-4 h-4 text-isa-navy" />
+        <h3 className="font-extrabold text-isa-navy text-sm">Nuevo ítem turístico</h3>
       </div>
 
-      <div className="isa-card p-5">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex items-start gap-3">
-            <div className="w-10 h-10 rounded-xl bg-muno-blue/10 text-muno-blue grid place-items-center"><Store strokeWidth={1.5} /></div>
-            <div>
-              <div className="font-extrabold text-isa-navy">Mi Comercio</div>
-              <div className="text-xs text-muted-foreground">Próximamente vas a poder vincular un comercio mediante tu CUIT.</div>
-            </div>
-          </div>
+      <div className="flex gap-2 flex-wrap">
+        {CATS.map((c) => (
           <button
-            disabled
-            className="relative w-12 h-7 rounded-full bg-muted shrink-0 opacity-60 cursor-not-allowed"
-            aria-label="Mi Comercio (próximamente)"
+            key={c.id}
+            type="button"
+            onClick={() => setCategory(c.id)}
+            className={`px-3 py-2 rounded-[10px] text-[12px] font-bold opacity-100 ${
+              category === c.id ? "bg-isa-navy text-white" : "border text-isa-navy"
+            }`}
           >
-            <span className="absolute top-1 left-1 w-5 h-5 bg-white rounded-full" />
+            {c.label}
           </button>
-        </div>
-      </div>
-
-      <div className="isa-card p-6 space-y-4">
-        <h3 className="font-extrabold text-isa-navy">Datos personales</h3>
-        {[
-          { icon: User, label: "Nombre", value: displayName },
-          { icon: Mail, label: "Email", value: displayEmail },
-          { icon: Phone, label: "Teléfono", value: displayPhone },
-        ].map((f) => (
-          <div key={f.label} className="flex items-center gap-3 py-2 border-b last:border-0">
-            <f.icon strokeWidth={1.5} className="w-5 h-5 text-muted-foreground" />
-            <div className="flex-1">
-              <div className="text-xs text-muted-foreground">{f.label}</div>
-              <div className="font-semibold text-isa-navy">{f.value}</div>
-            </div>
-          </div>
         ))}
       </div>
 
-      {user && (
-        <div className="isa-card p-5 space-y-3">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-muno-blue/10 text-muno-blue grid place-items-center"><Store strokeWidth={1.5} /></div>
+      <input
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        placeholder="Nombre"
+        className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm"
+      />
+      <textarea
+        value={description}
+        onChange={(e) => setDescription(e.target.value)}
+        rows={3}
+        placeholder="Descripción"
+        className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm resize-none"
+      />
+
+      {/* Dropzone */}
+      <div
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDrag(true);
+        }}
+        onDragLeave={() => setDrag(false)}
+        onDrop={onDrop}
+        onClick={() => fileRef.current?.click()}
+        className={`cursor-pointer border-2 border-dashed rounded-[14px] p-5 text-center transition-colors ${
+          drag ? "border-isa-navy bg-isa-light" : "border-muted-foreground/30 bg-muted/30"
+        }`}
+      >
+        {photo ? (
+          <div className="flex items-center gap-3 justify-center">
+            <img src={photo} className="w-16 h-16 rounded-lg object-cover" alt="" />
+            <span className="text-xs text-muted-foreground">Foto cargada · click para reemplazar</span>
+          </div>
+        ) : uploading ? (
+          <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="w-4 h-4 animate-spin" /> Subiendo...
+          </div>
+        ) : (
+          <div className="flex flex-col items-center gap-1.5 text-muted-foreground">
+            <Upload className="w-5 h-5" />
+            <div className="text-xs font-bold text-isa-navy">Arrastrá una foto o hacé click</div>
+            <div className="text-[11px]">JPG, PNG · compresión inteligente activa</div>
+          </div>
+        )}
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/*"
+          hidden
+          onChange={(e) => e.target.files?.[0] && upload(e.target.files[0])}
+        />
+      </div>
+
+      <button
+        onClick={save}
+        disabled={saving}
+        className="inline-flex items-center gap-2 bg-isa-navy text-white rounded-[12px] px-4 py-2.5 text-[13px] font-bold opacity-100 disabled:opacity-60"
+      >
+        {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Camera className="w-4 h-4" />}
+        Guardar y publicar
+      </button>
+    </div>
+  );
+}
+
+function TablaComerciosHacienda() {
+  const { user } = useAuth();
+  const [rows, setRows] = useState<DBBusiness[]>([]);
+  const [featuredIds, setFeaturedIds] = useState<Set<string>>(new Set());
+  const [loading, setLoading] = useState(true);
+
+  // 1. Candado en memoria para validación sincrónica
+  const isMounted = useRef(true);
+
+  // 2. Remoción del falso booleano
+  const load = useCallback(async () => {
+    if (!user?.id) return;
+    if (isMounted.current) setLoading(true);
+
+    try {
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("municipality_id")
+        .eq("id", user.id)
+        .maybeSingle();
+
+      const muniId = profile?.municipality_id;
+
+      let bq = supabase
+        .from("businesses")
+        .select("id,name,zone,address,enabled,tax_expires_at,photo_url,municipality_id")
+        .order("name");
+
+      if (muniId) bq = bq.eq("municipality_id", muniId);
+
+      const { data: biz } = await bq;
+
+      let tq = supabase
+        .from("tourism_items")
+        .select("business_id,featured")
+        .eq("featured", true);
+
+      if (muniId) tq = tq.eq("municipality_id", muniId);
+
+      const { data: feats } = await tq;
+
+      // 3. Verificamos el .current antes de setear variables de estado
+      if (isMounted.current) {
+        setRows((biz as DBBusiness[]) || []);
+        const featArray = (feats || []) as { business_id: string | null }[];
+        setFeaturedIds(new Set(featArray.map((f) => f.business_id).filter(Boolean) as string[]));
+        setLoading(false);
+      }
+    } catch (error) {
+      console.error("Error al cargar comercios para turismo:", error);
+      if (isMounted.current) setLoading(false);
+    }
+  }, [user?.id]);
+
+  useEffect(() => {
+    isMounted.current = true;
+    load();
+    return () => { 
+      // 4. Apagamos la referencia si el componente se desmonta
+      isMounted.current = false; 
+    };
+  }, [load]);
+
+  const featurar = async (b: DBBusiness) => {
+    if (featuredIds.has(b.id)) {
+      const { data: existing } = await supabase
+        .from("tourism_items")
+        .select("id")
+        .eq("business_id", b.id)
+        .maybeSingle();
+        
+      if (existing?.id) {
+        await supabase.from("tourism_items").update({ featured: false }).eq("id", existing.id);
+      }
+      toast.success("Quitado de destacados");
+    } else {
+      const { error } = await supabase.from("tourism_items").insert({
+        category: "commerce",
+        title: b.name,
+        description: b.address || "",
+        photo_url: b.photo_url,
+        location: b.zone || b.address || null,
+        business_id: b.id,
+        featured: true,
+        published: true,
+        created_by: user?.id,
+        municipality_id: b.municipality_id
+      });
+      
+      if (error) {
+        toast.error("No se pudo destacar: " + error.message);
+        return;
+      }
+      toast.success(`${b.name} destacado en la guía`);
+    }
+    load();
+  };
+
+  return (
+    <div className="bg-white rounded-[16px] border overflow-hidden">
+      <div className="p-4 border-b flex items-center gap-2">
+        <Wallet className="w-4 h-4 text-isa-navy" />
+        <h3 className="font-extrabold text-isa-navy text-sm">Comercios desde Hacienda</h3>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="bg-muted/40 text-[11px] uppercase tracking-wider text-muted-foreground">
+            <tr>
+              <th className="text-left px-4 py-2.5 font-bold">Comercio</th>
+              <th className="text-left px-4 py-2.5 font-bold">Zona</th>
+              <th className="text-left px-4 py-2.5 font-bold">Habilitado</th>
+              <th className="text-right px-4 py-2.5 font-bold">Acciones</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading && (
+              <tr>
+                <td colSpan={4} className="px-4 py-6 text-center text-muted-foreground text-xs">
+                  Cargando...
+                </td>
+              </tr>
+            )}
+            {!loading && rows.length === 0 && (
+              <tr>
+                <td colSpan={4} className="px-4 py-6 text-center text-muted-foreground text-xs">
+                  Sin comercios registrados.
+                </td>
+              </tr>
+            )}
+            {rows.map((b) => {
+              const featured = featuredIds.has(b.id);
+              return (
+                <tr key={b.id} className="border-t">
+                  <td className="px-4 py-2.5 font-bold text-isa-navy">{b.name}</td>
+                  <td className="px-4 py-2.5 text-muted-foreground">{b.zone || b.address || "—"}</td>
+                  <td className="px-4 py-2.5">
+                    <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${
+                      b.enabled ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"
+                    }`}>
+                      {b.enabled ? "SI" : "NO"}
+                    </span>
+                  </td>
+                  <td className="px-4 py-2.5 text-right">
+                    <button
+                      onClick={() => featurar(b)}
+                      className={`inline-flex items-center gap-1.5 text-[11px] font-bold px-3 py-1.5 rounded-full opacity-100 ${
+                        featured ? "bg-amber-400 text-isa-navy" : "border text-isa-navy hover:bg-isa-light"
+                      }`}
+                    >
+                      <Star className="w-3 h-3" /> {featured ? "Destacado" : "Destacar en Guía"}
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+export default function Turismo() {
+  return (
+    <div className="space-y-5">
+      <header>
+        <h2 className="font-display font-extrabold text-isa-navy text-[22px] leading-tight">
+          Panel de Turismo
+        </h2>
+        <p className="text-sm text-muted-foreground mt-1">
+          Cargá contenido turístico y conectá comercios desde Hacienda.
+        </p>
+      </header>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <FormularioCarga />
+        <TablaComerciosHacienda />
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="src/pages/Reclamos.tsx">
+import { useState, useRef, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
+import { claim_categories, CLAIM_AREAS } from "@/data/mock";
+import * as Icons from "lucide-react";
+import { CheckCircle2, ArrowRight, ArrowLeft, Upload, X, Loader2 } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/context/AuthContext";
+import { toast } from "sonner";
+
+// Interfaz estricta para eliminar los errores 'any' de categoría
+interface ClaimCategory {
+  id: string;
+  label: string;
+  icon: string;
+  area?: string;
+}
+
+// Interfaz para el payload de inserción de Supabase
+interface ClaimPayload {
+  user_id: string;
+  category: string;
+  area: string;
+  address: string;
+  description: string;
+  evidence_photos: string[];
+  status: "Pendiente" | "En curso" | "Cerrado"; // SOLUCIÓN TS: Tipado literal exacto de Supabase
+}
+
+const STEPS = ["Categoría", "Fotos", "Ubicación", "Resumen"] as const;
+
+// 🔴 FIX CRÍTICO SRE: Función de compresión de imágenes asíncrona en cliente
+const compressImage = (file: File): Promise<Blob> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.src = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(img.src);
+      const canvas = document.createElement("canvas");
+      // Redimensionar a Full HD máximo
+      const MAX_WIDTH = 1920;
+      const MAX_HEIGHT = 1080;
+      let width = img.width;
+      let height = img.height;
+
+      if (width > height) {
+        if (width > MAX_WIDTH) {
+          height *= MAX_WIDTH / width;
+          width = MAX_WIDTH;
+        }
+      } else {
+        if (height > MAX_HEIGHT) {
+          width *= MAX_HEIGHT / height;
+          height = MAX_HEIGHT;
+        }
+      }
+
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return reject(new Error("Canvas context is null"));
+      ctx.drawImage(img, 0, 0, width, height);
+      // Comprimir a JPEG al 75%
+      canvas.toBlob(
+        (blob) => {
+          if (blob) {
+            resolve(blob);
+          } else {
+            reject(new Error("Compression output blob is null"));
+          }
+        },
+        "image/jpeg",
+        0.75
+      );
+    };
+    img.onerror = (err) => reject(err);
+  });
+};
+
+export default function Reclamos() {
+  const navigate = useNavigate();
+  const { user } = useAuth();
+  const [step, setStep] = useState(0);
+  const [category, setCategory] = useState<ClaimCategory | null>(null);
+  const [area, setArea] = useState<string>("");
+  const [photos, setPhotos] = useState<string[]>([]);
+  const [photoFiles, setPhotoFiles] = useState<File[]>([]); 
+  const [progress, setProgress] = useState(0);
+  const [location, setLocation] = useState("");
+  const [description, setDescription] = useState("");
+  const [ticket, setTicket] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  
+  const fileRef = useRef<HTMLInputElement>(null);
+  
+  // SOLUCIÓN: Referencias para atrapar y limpiar timers y evitar Memory Leaks
+  const progressIntervalRef = useRef<number | null>(null);
+  const progressTimeoutRef = useRef<number | null>(null);
+  const resetTimeoutRef = useRef<number | null>(null);
+
+  // Escoba de memoria: limpia los intervalos si el usuario abandona la pantalla
+  useEffect(() => {
+    return () => {
+      if (progressIntervalRef.current) window.clearInterval(progressIntervalRef.current);
+      if (progressTimeoutRef.current) window.clearTimeout(progressTimeoutRef.current);
+      if (resetTimeoutRef.current) window.clearTimeout(resetTimeoutRef.current);
+    };
+  }, []);
+
+  const addPhoto = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []).slice(0, 3 - photos.length);
+    setProgress(0);
+    
+    // Limpiamos intervalos previos por si el usuario sube fotos muy rápido
+    if (progressIntervalRef.current) window.clearInterval(progressIntervalRef.current);
+    if (progressTimeoutRef.current) window.clearTimeout(progressTimeoutRef.current);
+
+    progressIntervalRef.current = window.setInterval(() => setProgress((p) => Math.min(100, p + 12)), 60);
+    
+    progressTimeoutRef.current = window.setTimeout(() => {
+      if (progressIntervalRef.current) window.clearInterval(progressIntervalRef.current);
+      setProgress(100);
+      const urls = files.map((f) => URL.createObjectURL(f));
+      setPhotos((prev) => [...prev, ...urls].slice(0, 3));
+      setPhotoFiles((prev) => [...prev, ...files].slice(0, 3)); 
+      
+      resetTimeoutRef.current = window.setTimeout(() => setProgress(0), 400);
+    }, 600);
+  };
+
+  const submit = async () => {
+    if (!user) {
+      toast.error("Iniciá sesión para enviar un reclamo");
+      navigate("/auth/login");
+      return;
+    }
+    setSaving(true);
+
+    let uploadedUrls: string[] = [];
+
+    // 🟠 FIX MEDIO SRE: Subida y compresión en Paralelo (Promise.all)
+    if (photoFiles.length > 0) {
+      try {
+        const uploadPromises = photoFiles.map(async (file, i) => {
+          const fileExt = "jpg";
+          const filePath = `claims/${user.id}/${Date.now()}-${i}.${fileExt}`;
+          const compressedBlob = await compressImage(file);
+          
+          const { error: uploadError } = await supabase.storage
+            .from("avatars") 
+            .upload(filePath, compressedBlob, { 
+              contentType: "image/jpeg",
+              cacheControl: "31536000", // 🟠 FIX ALTO SRE: Caché de 1 año para ahorrar Egress
+              upsert: true
+            });
+
+          if (uploadError) {
+            throw new Error(`Error al subir imagen ${i + 1}`);
+          }
+
+          const { data: urlData } = supabase.storage.from("avatars").getPublicUrl(filePath);
+          return urlData.publicUrl;
+        });
+
+        uploadedUrls = await Promise.all(uploadPromises);
+      } catch (err) {
+        setSaving(false);
+        toast.error(err instanceof Error ? err.message : "Error al procesar las imágenes.");
+        console.error(err);
+        return;
+      }
+    }
+
+    const finalArea = area || category?.area || "";
+    const isOtro = category?.id === "otro";
+    const finalLocation = location || (isOtro ? "Ubicación automática (GPS del dispositivo)" : "");
+    
+    const payload: ClaimPayload = {
+      user_id: user.id,
+      category: category?.label || category?.id || "General",
+      area: finalArea,
+      address: finalLocation,
+      description: description || `${category?.label} - ${finalLocation}`,
+      evidence_photos: uploadedUrls, 
+      status: "Pendiente",
+    };
+
+    const { data, error } = await supabase
+      .from("claims")
+      .insert(payload)
+      .select("id")
+      .single();
+      
+    setSaving(false);
+    
+    if (error || !data) {
+      toast.error("No se pudo enviar", { description: error?.message });
+      return;
+    }
+    const short = data.id.slice(0, 4).toUpperCase();
+    setTicket(`#MUNO-${short}`);
+    toast.success(`Reclamo registrado · Asignado a ${finalArea}`);
+  };
+
+  const reset = () => {
+    setStep(0); setCategory(null); setArea(""); setPhotos([]); setPhotoFiles([]); setLocation(""); setDescription(""); setTicket(null);
+  };
+
+  if (ticket) {
+    return (
+      <div className="max-w-md mx-auto isa-card p-10 text-center animate-scale-in">
+        <div className="w-20 h-20 rounded-full bg-muno-teal/15 text-muno-teal grid place-items-center mx-auto">
+          <CheckCircle2 strokeWidth={1.5} className="w-12 h-12" />
+        </div>
+        <h2 className="text-2xl font-extrabold text-isa-navy mt-4">¡Reclamo enviado!</h2>
+        <p className="text-sm text-muted-foreground mt-2">Estado inicial: <b>Pendiente de revisión</b>.</p>
+        <div className="mt-6 p-5 rounded-2xl bg-isa-light">
+          <div className="text-xs uppercase font-bold text-muted-foreground tracking-wider">Ticket</div>
+          <div className="text-3xl font-extrabold text-isa-navy mt-1">{ticket}</div>
+        </div>
+        <div className="mt-6 grid grid-cols-2 gap-3">
+          <button onClick={reset} className="bg-card border rounded-[20px] py-3 font-bold text-isa-navy">Nuevo</button>
+          <button onClick={() => navigate("/mi-cuenta")} className="bg-isa-navy text-isa-white rounded-[20px] py-3 font-bold">Mis incidentes</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-3xl mx-auto space-y-6">
+      <div className="flex items-center gap-2">
+        {STEPS.map((s, i) => {
+          const skipped = category?.id === "otro" && (i === 1 || i === 2);
+          return (
+            <div key={s} className="flex-1 flex items-center gap-2">
+              <div className={`flex-1 h-2 rounded-full ${skipped ? "bg-muted opacity-40" : i <= step ? "bg-muno-teal" : "bg-muted"}`} />
+            </div>
+          );
+        })}
+      </div>
+      <div className="text-sm font-bold text-muted-foreground">Paso {step + 1} de 4 · {STEPS[step]}{category?.id === "otro" && step === 0 && " (sin fotos ni ubicación manual)"}</div>
+
+      <div className="isa-card p-6 min-h-[320px]">
+        {step === 0 && (
+          <div className="space-y-5">
             <div>
-              <div className="font-extrabold text-isa-navy">Estado de tasas (Hacienda)</div>
-              <div className="text-[11px] text-muted-foreground">Vinculá tu CUIT para ver el estado de tu comercio.</div>
+              <div className="text-sm font-bold text-isa-navy mb-2">Tipo de incidente</div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+                {claim_categories.map((cRaw) => {
+                  const c = cRaw as ClaimCategory;
+                  // SOLUCIÓN TS: Extracción segura de la key del módulo Icons
+                  const Icon = (Icons[c.icon as keyof typeof Icons] as React.ElementType) || Icons.Circle;
+                  const active = category?.id === c.id;
+                  return (
+                    <button
+                      key={c.id}
+                      onClick={() => { setCategory(c); if (!area) setArea(c.area || ""); }}
+                      className={`p-5 rounded-2xl border-2 flex flex-col items-center gap-2 transition-all ${
+                        active ? "border-isa-navy bg-accent" : "border-border hover:border-isa-dusty"
+                      }`}
+                    >
+                      <Icon strokeWidth={1.5} className="w-8 h-8 text-isa-navy" />
+                      <span className="font-bold text-sm text-isa-navy">{c.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {category?.id === "otro" && (
+              <div className="space-y-3 animate-fade-in p-4 rounded-2xl border-2 border-isa-navy/20 bg-isa-light/30">
+                <div>
+                  <label className="text-sm font-bold text-isa-navy">¿A qué área corresponde? <span className="text-destructive">*</span></label>
+                  <select
+                    value={area}
+                    onChange={(e) => setArea(e.target.value)}
+                    className="mt-2 w-full px-4 py-3 rounded-xl border bg-background outline-none focus:ring-2 focus:ring-isa-navy text-sm"
+                  >
+                    <option value="">— Seleccioná un área —</option>
+                    {CLAIM_AREAS.map((a) => <option key={a} value={a}>{a}</option>)}
+                  </select>
+                  <p className="text-xs text-muted-foreground mt-1">Se enviará al Jefe del área seleccionada.</p>
+                </div>
+                <div>
+                  <label className="text-sm font-bold text-isa-navy">Motivo del reclamo <span className="text-destructive">*</span></label>
+                  <textarea
+                    value={description}
+                    onChange={(e) => setDescription(e.target.value)}
+                    rows={4}
+                    placeholder="Detallá brevemente el motivo del reclamo (este formulario es 100% informativo, no requiere fotos)."
+                    className="mt-2 w-full px-4 py-3 rounded-xl border bg-background outline-none focus:ring-2 focus:ring-isa-navy text-sm resize-none"
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">No es necesario adjuntar fotos para reclamos derivados a otras áreas.</p>
+                </div>
+              </div>
+            )}
+            {category && category.id !== "otro" && (
+              <div className="text-xs text-muted-foreground p-3 rounded-xl bg-muted/40">
+                Área asignada automáticamente: <strong className="text-isa-navy">{area || category.area}</strong>
+              </div>
+            )}
+          </div>
+        )}
+
+        {step === 1 && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-3 gap-3">
+              {[0, 1, 2].map((i) => {
+                const url = photos[i];
+                return (
+                  <div key={`photo-slot-${i}`} className="aspect-square rounded-2xl border-2 border-dashed bg-muted overflow-hidden relative">
+                    {url ? (
+                      <>
+                        <img src={url} className="w-full h-full object-cover" alt="Evidencia" />
+                        <button 
+                          onClick={() => {
+                            setPhotos(photos.filter((_, j) => j !== i));
+                            setPhotoFiles(photoFiles.filter((_, j) => j !== i));
+                          }} 
+                          className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/60 text-white grid place-items-center"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </>
+                    ) : (
+                      <button onClick={() => fileRef.current?.click()} className="w-full h-full grid place-items-center text-muted-foreground">
+                        <Upload strokeWidth={1.5} />
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <input ref={fileRef} type="file" accept="image/*" hidden multiple onChange={addPhoto} />
+            {progress > 0 && (
+              <div className="h-2 rounded-full bg-muted overflow-hidden">
+                <div className="h-full bg-muno-teal transition-all" style={{ width: `${progress}%` }} />
+              </div>
+            )}
+            <p className="text-xs text-muted-foreground">Subí entre 1 y 3 fotos del problema (opcional).</p>
+          </div>
+        )}
+
+        {step === 2 && (
+          <div className="space-y-3">
+            <label className="text-sm font-bold text-isa-navy">Describí la ubicación</label>
+            <textarea
+              value={location}
+              onChange={(e) => setLocation(e.target.value)}
+              rows={3}
+              placeholder="Ej: Calle Belgrano 450, frente a la plaza."
+              className="w-full px-4 py-3 rounded-xl border bg-background outline-none focus:ring-2 focus:ring-isa-navy resize-none"
+            />
+            <label className="text-sm font-bold text-isa-navy">Detalle del incidente (opcional)</label>
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              rows={3}
+              placeholder="Contanos qué pasó, hace cuánto, etc."
+              className="w-full px-4 py-3 rounded-xl border bg-background outline-none focus:ring-2 focus:ring-isa-navy resize-none"
+            />
+          </div>
+        )}
+
+        {step === 3 && (
+          <div className="space-y-4">
+            <h3 className="font-extrabold text-isa-navy text-lg">Revisá tu reclamo</h3>
+            <div className="space-y-2 text-sm">
+              <div className="flex justify-between border-b py-2"><span className="text-muted-foreground">Categoría</span><span className="font-bold">{category?.label}</span></div>
+              <div className="flex justify-between border-b py-2"><span className="text-muted-foreground">Área responsable</span><span className="font-bold">{area}</span></div>
+              <div className="flex justify-between border-b py-2"><span className="text-muted-foreground">Fotos</span><span className="font-bold">{photos.length}</span></div>
+              {category?.id !== "otro" && (
+                <div className="border-b py-2"><div className="text-muted-foreground mb-1">Ubicación</div><div className="font-semibold">{location}</div></div>
+              )}
+              {category?.id === "otro" && (
+                <div className="border-b py-2"><div className="text-muted-foreground mb-1">Ubicación</div><div className="font-semibold text-xs">📍 Capturada automáticamente por GPS al adjuntar foto en tiempo real</div></div>
+              )}
+              {description && <div className="border-b py-2"><div className="text-muted-foreground mb-1">Detalle</div><div className="font-semibold">{description}</div></div>}
             </div>
           </div>
-          <div className="flex gap-2">
-            <input
-              value={cuitDraft}
-              onChange={(e) => setCuitDraft(e.target.value)}
-              placeholder="CUIT (ej. 30-12345678-9)"
-              className="flex-1 px-3 py-2 rounded-xl border bg-background text-sm"
-            />
-            <button onClick={saveCuit} disabled={savingCuit} className="bg-isa-navy text-white rounded-xl px-4 text-sm font-bold disabled:opacity-60">
-              {savingCuit ? "…" : "Guardar"}
-            </button>
-          </div>
-          {profile?.cuit && !business && (
-            <div className="text-[12px] text-muted-foreground">No encontramos un comercio asociado a este CUIT.</div>
-          )}
-          {business && (() => {
-            const exp = business.tax_expires_at ? new Date(business.tax_expires_at) : null;
-            const overdue = exp && exp.getTime() < Date.now();
-            const soon = exp && !overdue && exp.getTime() - Date.now() < 15 * 86400000;
-            const status = overdue ? "Vencida" : soon ? "Por vencer" : "Al día";
-            const color = overdue ? "text-muno-red bg-muno-red/10" : soon ? "text-amber-700 bg-amber-100" : "text-muno-teal bg-muno-teal/10";
-            return (
-              <div className="rounded-xl border p-3 space-y-1">
-                <div className="font-bold text-isa-navy">{business.name}</div>
-                <div className="text-xs text-muted-foreground">
-                  Vencimiento: {exp ? exp.toLocaleDateString("es-AR") : "—"}
-                  {business.tax_amount ? ` · $${Number(business.tax_amount).toLocaleString("es-AR")}` : ""}
-                </div>
-                <span className={`inline-block text-[11px] font-bold px-2 py-0.5 rounded-full ${color}`}>{status}</span>
-                <div className="text-[11px] text-muted-foreground pt-1">Información a cargo de Hacienda. Para regularizar acercate a la oficina municipal.</div>
-              </div>
-            );
-          })()}
-        </div>
-      )}
+        )}
+      </div>
 
-      {isTourist && (
-        <>
-          <MisFavoritos />
-          <RatePueblo />
-        </>
-      )}
-
-      <MisInscripciones />
-
-      {user && (
+      <div className="flex justify-between">
         <button
-          onClick={handleSignOut}
-          className="w-full inline-flex items-center justify-center gap-2 bg-muno-red text-white rounded-[20px] py-3 font-bold text-sm hover:opacity-90"
+          onClick={() => {
+            const prev = category?.id === "otro" && step === 3 ? 0 : Math.max(0, step - 1);
+            setStep(prev);
+          }}
+          disabled={step === 0}
+          className="px-5 py-2.5 rounded-[20px] font-bold border bg-card disabled:opacity-30 flex items-center gap-2"
         >
-          <LogOut className="w-4 h-4" /> Cerrar sesión
+          <ArrowLeft className="w-4 h-4" /> Atrás
         </button>
-      )}
+        {step < 3 ? (
+          <button
+            onClick={() => {
+              // Si la categoría es "Otro", saltar fotos y ubicación → ir directo al resumen
+              const next = category?.id === "otro" && step === 0 ? 3 : step + 1;
+              setStep(next);
+            }}
+            disabled={(step === 0 && (!category || (category.id === "otro" ? (!area || !description.trim()) : !(category.area || area)))) || (step === 2 && !location)}
+            className="px-5 py-2.5 rounded-[20px] font-bold bg-isa-navy text-isa-white disabled:opacity-40 flex items-center gap-2"
+          >
+            Siguiente <ArrowRight className="w-4 h-4" />
+          </button>
+        ) : (
+          <button onClick={submit} disabled={saving} className="px-6 py-2.5 rounded-[20px] font-bold bg-muno-teal text-white inline-flex items-center gap-2 disabled:opacity-60">
+            {saving && <Loader2 className="w-4 h-4 animate-spin" />}
+            Enviar reclamo
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -24081,437 +23799,6 @@ export default function Turismo() {
         meta={{ lodging: lodgTarget?.name }}
         onClose={() => setLodgTarget(null)}
       />
-    </div>
-  );
-}
-</file>
-
-<file path="src/components/MisInscripciones.tsx">
-import { useEffect, useState } from "react";
-import { CalendarCheck, X, Users } from "lucide-react";
-import { listInscripciones, cancelInscripcion, type Inscripcion } from "@/lib/inscripciones";
-import { toast } from "sonner";
-import { supabase } from "@/integrations/supabase/client";
-import { useAuth } from "@/context/AuthContext";
-import type { Database } from "@/integrations/supabase/types";
-
-type RegistrationRow = Database["public"]["Tables"]["registrations"]["Row"];
-
-type Item = {
-  id: string;
-  titulo: string;
-  fecha: string;
-  tipo: string;
-  lugar?: string | null;
-  acompanantes: string[];
-  source: "db" | "local";
-};
-
-export default function MisInscripciones() {
-  const { user } = useAuth();
-  const [items, setItems] = useState<Item[]>([]);
-
-  const userId = user?.id;
-
-  useEffect(() => {
-    let isMounted = true; // Control de Memory Leak
-
-    const refresh = async () => {
-      const local: Item[] = listInscripciones().map((i: Inscripcion) => ({
-        id: i.id,
-        titulo: i.titulo,
-        fecha: i.fecha,
-        tipo: i.tipo,
-        lugar: i.lugar,
-        acompanantes: i.acompanantes,
-        source: "local",
-      }));
-
-      if (!userId) {
-        if (isMounted) setItems(local);
-        return;
-      }
-
-      try {
-        const { data } = await supabase
-          .from("registrations")
-          .select("id,event_title,event_date,event_type,event_place,companions")
-          .eq("user_id", userId)
-          .eq("status", "activa") // FIX: Filtramos las canceladas lógicamente
-          .order("created_at", { ascending: false })
-          .limit(50); // FIX 1.2: Límite de carga (evita Unbounded Payloads)
-
-        const db: Item[] = (data || []).map((r) => ({
-          id: r.id,
-          titulo: r.event_title,
-          fecha: r.event_date || "",
-          tipo: r.event_type || "",
-          lugar: r.event_place,
-          acompanantes: Array.isArray(r.companions) ? r.companions.map(String) : [],
-          source: "db",
-        }));
-
-        if (isMounted) {
-          const seen = new Set(db.map((d) => d.titulo + d.fecha));
-          setItems([...db, ...local.filter((l) => !seen.has(l.titulo + l.fecha))]);
-        }
-      } catch (error) {
-        console.error("Error al obtener inscripciones", error);
-      }
-    };
-
-    refresh();
-    
-    // 🟠 FIX ALTO 1: Escuchar eventos locales EXCLUSIVAMENTE (Ahorro de 50K Sockets)
-    const handleLocalEvent = () => refresh();
-    window.addEventListener("muno:inscripciones", handleLocalEvent);
-
-    return () => {
-      isMounted = false;
-      window.removeEventListener("muno:inscripciones", handleLocalEvent);
-    };
-  }, [userId]); 
-
-  const cancel = async (it: Item) => {
-    if (it.source === "db") {
-      // COMPLIANCE FIX: Soft Delete legal y tipado estrictamente
-      const { error } = await supabase
-        .from("registrations")
-        .update({ status: "cancelada", deleted_at: new Date().toISOString() })
-        .eq("id", it.id);
-        
-      if (error) {
-        toast.error("No se pudo cancelar");
-        return;
-      }
-    } else {
-      cancelInscripcion(it.id);
-    }
-    toast.success("Inscripción cancelada");
-    window.dispatchEvent(new Event("muno:inscripciones"));
-  };
-
-  return (
-    <section>
-      <div className="flex items-center justify-between mb-3">
-        <h2>Mis Inscripciones</h2>
-      </div>
-      <div className="isa-card p-5 space-y-3">
-        <div className="flex items-center gap-2">
-          <CalendarCheck className="w-5 h-5 text-isa-navy" strokeWidth={1.5} />
-          <h3 className="font-extrabold text-isa-navy">Talleres y eventos</h3>
-        </div>
-        {items.length === 0 ? (
-          <p className="text-sm text-muted-foreground">Aún no tienes inscripciones. ¡Explora la agenda municipal!</p>
-        ) : (
-          <ul className="space-y-2">
-            {items.map((i) => (
-              <li key={i.source + i.id} className="flex items-start justify-between gap-3 border rounded-xl p-3 bg-background">
-                <div className="min-w-0">
-                  <div className="text-sm font-bold text-isa-navy truncate">{i.titulo}</div>
-                  <div className="text-xs text-muted-foreground">
-                    {i.fecha} {i.tipo ? `· ${i.tipo}` : ""}
-                    {i.lugar ? ` · ${i.lugar}` : ""}
-                  </div>
-                  {i.acompanantes.length > 0 && (
-                    <div className="text-[11px] text-muted-foreground mt-1 flex items-center gap-1">
-                      <Users className="w-3 h-3" /> {i.acompanantes.length} acompañante(s): {i.acompanantes.join(", ")}
-                    </div>
-                  )}
-                </div>
-                <button
-                  onClick={() => cancel(i)}
-                  className="shrink-0 inline-flex items-center gap-1 text-xs font-bold text-muno-red border border-muno-red/30 rounded-full px-2.5 py-1.5 hover:bg-muno-red/10"
-                >
-                  <X className="w-3 h-3" /> Cancelar
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-    </section>
-  );
-}
-</file>
-
-<file path="src/components/NotificationsBell.tsx">
-import { useEffect, useState, useRef } from "react";
-import { Bell, X } from "lucide-react";
-import { useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
-import { useAuth } from "@/context/AuthContext";
-import { useMunicipality } from "@/context/MunicipalityContext"; // <-- Necesario para el filtro de canal
-import type { RealtimeChannel } from "@supabase/supabase-js"; // <-- Para tipar los canales
-
-type Notif = {
-  id: string;
-  title: string;
-  body: string;
-  link: string | null;
-  audience: string;
-  created_at: string;
-  user_id?: string | null;
-};
-
-const STORAGE_KEY = "muno.guest.notif.reads";
-
-function getGuestReads(): string[] {
-  try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
-  } catch {
-    return [];
-  }
-}
-
-function addGuestRead(id: string) {
-  const arr = getGuestReads();
-  if (!arr.includes(id)) {
-    arr.push(id);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(arr.slice(-200)));
-  }
-}
-
-export default function NotificationsBell() {
-  const { user, roles } = useAuth();
-  const { municipalityInfo } = useMunicipality(); // Obtenemos info del tenant actual
-  const nav = useNavigate();
-  const [open, setOpen] = useState(false);
-  const [items, setItems] = useState<Notif[]>([]);
-  const [readIds, setReadIds] = useState<Set<string>>(new Set());
-  const ref = useRef<HTMLDivElement>(null);
-
-  const isResident =
-    roles.includes("resident") ||
-    roles.includes("admin") ||
-    roles.includes("mayor") ||
-    roles.includes("tourism_chief") ||
-    roles.includes("area_manager") ||
-    roles.includes("isa_super_admin") ||
-    roles.includes("isa_consultant");
-
-  const audienceFilter = isResident
-    ? ["residents", "both"]
-    : ["tourists", "both"];
-
-  const rolesKey = roles.join(",");
-  const userId = user?.id;
-  const municipalityId = municipalityInfo?.id;
-
-  useEffect(() => {
-    let isMounted = true;
-    const channels: RealtimeChannel[] = []; // Array para guardar múltiples canales
-
-    const load = async () => {
-      let query = supabase
-        .from("notifications")
-        .select("id,title,body,link,audience,created_at,user_id")
-        .order("created_at", { ascending: false })
-        .limit(30);
-
-      if (userId) {
-        query = query.or(`user_id.eq.${userId},and(user_id.is.null,audience.in.(${audienceFilter.join(",")}))`);
-      } else {
-        query = query.is("user_id", null).in("audience", audienceFilter);
-      }
-      
-      const { data } = await query;
-      
-      if (isMounted) {
-        setItems((data as Notif[]) || []);
-      }
-
-      if (userId && isMounted) {
-        const { data: reads } = await supabase
-          .from("notification_reads")
-          .select("notification_id")
-          .eq("user_id", userId);
-          
-        if (isMounted) {
-          setReadIds(new Set((reads || []).map((r: { notification_id: string }) => r.notification_id)));
-        }
-      } else if (isMounted) {
-        setReadIds(new Set(getGuestReads()));
-      }
-    };
-
-    load();
-
-    // 🔴 FIX CRÍTICO SRE: Prevención de Tormenta de Difusión (Broadcast Storm)
-    
-    // Canal 1: Suscribirse ÚNICAMENTE a las alertas públicas del municipio donde está el usuario
-    if (municipalityId) {
-      const muniChannel = supabase
-        .channel(`notif_muni_${municipalityId}`)
-        .on(
-          "postgres_changes",
-          {
-            event: "INSERT",
-            schema: "public",
-            table: "notifications",
-            filter: `municipality_id=eq.${municipalityId}` // El filtro mágico en servidor
-          },
-          () => { if (isMounted) load(); }
-        )
-        .subscribe();
-      channels.push(muniChannel);
-    }
-
-    // Canal 2: Suscribirse ÚNICAMENTE a notificaciones privadas enviadas a este usuario exacto
-    if (userId) {
-      const userChannel = supabase
-        .channel(`notif_user_${userId}`)
-        .on(
-          "postgres_changes",
-          {
-            event: "INSERT",
-            schema: "public",
-            table: "notifications",
-            filter: `user_id=eq.${userId}` // El filtro mágico en servidor
-          },
-          () => { if (isMounted) load(); }
-        )
-        .subscribe();
-      channels.push(userChannel);
-    }
-
-    return () => {
-      isMounted = false;
-      // Cerramos ordenadamente todos los canales al desmontar
-      channels.forEach(ch => supabase.removeChannel(ch));
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId, municipalityId, rolesKey]); 
-
-  useEffect(() => {
-    const onClick = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    if (open) document.addEventListener("mousedown", onClick);
-    return () => document.removeEventListener("mousedown", onClick);
-  }, [open]);
-
-  const unread = items.filter((n) => !readIds.has(n.id));
-  const unreadCount = unread.length;
-
-  const markRead = async (id: string) => {
-    setReadIds((s) => new Set(s).add(id));
-    if (user) {
-      await supabase.from("notification_reads").upsert(
-        { user_id: user.id, notification_id: id },
-        { onConflict: "user_id,notification_id" }
-      );
-    } else {
-      addGuestRead(id);
-    }
-  };
-
-  const markAllRead = async () => {
-    const ids = unread.map((n) => n.id);
-    setReadIds((s) => {
-      const ns = new Set(s);
-      ids.forEach((i) => ns.add(i));
-      return ns;
-    });
-    if (user && ids.length) {
-      await supabase
-        .from("notification_reads")
-        .upsert(
-          ids.map((id) => ({ user_id: user.id, notification_id: id })),
-          { onConflict: "user_id,notification_id" }
-        );
-    } else {
-      ids.forEach(addGuestRead);
-    }
-  };
-
-  const onItemClick = async (n: Notif) => {
-    await markRead(n.id);
-    if (n.link) {
-      if (n.link.startsWith("http")) {
-        window.open(n.link, "_blank", "noopener,noreferrer");
-      } else if (n.link.startsWith("tel:") || n.link.startsWith("mailto:")) {
-        window.location.href = n.link;
-      } else {
-        nav(n.link);
-      }
-    }
-    setOpen(false);
-  };
-
-  return (
-    <div className="relative" ref={ref}>
-      <button
-        onClick={() => setOpen((v) => !v)}
-        aria-label="Notificaciones"
-        className="relative inline-flex items-center justify-center w-9 h-9 rounded-xl hover:bg-isa-light transition-colors"
-      >
-        <Bell strokeWidth={1.8} className="w-5 h-5 text-isa-navy" />
-        {unreadCount > 0 && (
-          <span
-            className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 rounded-full bg-muno-red text-white text-[10px] font-extrabold grid place-items-center ring-2 ring-card"
-            aria-label={`${unreadCount} no leídas`}
-          >
-            {unreadCount > 9 ? "9+" : unreadCount}
-          </span>
-        )}
-      </button>
-
-      {open && (
-        <div className="absolute right-0 mt-2 w-[320px] max-w-[92vw] bg-card border rounded-[16px] shadow-xl z-50 overflow-hidden animate-fade-in">
-          <div className="px-4 py-3 border-b flex items-center justify-between bg-isa-light/40">
-            <div className="font-extrabold text-isa-navy text-sm">Notificaciones</div>
-            <div className="flex items-center gap-2">
-              {unreadCount > 0 && (
-                <button onClick={markAllRead} className="text-[11px] font-bold text-muno-blue">
-                  Marcar todo leído
-                </button>
-              )}
-              <button onClick={() => setOpen(false)} aria-label="Cerrar">
-                <X strokeWidth={2} className="w-4 h-4 text-isa-navy" />
-              </button>
-            </div>
-          </div>
-          <div className="max-h-[60vh] overflow-y-auto">
-            {items.length === 0 ? (
-              <div className="px-4 py-8 text-center text-[12px] text-muted-foreground">
-                Sin notificaciones por ahora.
-              </div>
-            ) : (
-              <ul>
-                {items.map((n) => {
-                  const isUnread = !readIds.has(n.id);
-                  return (
-                    <li key={n.id}>
-                      <button
-                        onClick={() => onItemClick(n)}
-                        className={`w-full text-left px-4 py-3 border-b hover:bg-isa-light/40 transition-colors ${
-                          isUnread ? "bg-isa-light/20" : ""
-                        }`}
-                      >
-                        <div className="flex items-start gap-2">
-                          {isUnread && (
-                            <span className="mt-1.5 w-2 h-2 rounded-full bg-muno-red shrink-0" />
-                          )}
-                          <div className="min-w-0 flex-1">
-                            <div className="font-extrabold text-isa-navy text-[13px] leading-tight">{n.title}</div>
-                            <div className="text-[11px] text-muted-foreground mt-0.5">
-                              {new Date(n.created_at).toLocaleString("es-AR", { dateStyle: "short", timeStyle: "short" })}
-                            </div>
-                            {n.body && (
-                              <p className="text-[12px] text-isa-navy/80 mt-1 line-clamp-2">{n.body}</p>
-                            )}
-                          </div>
-                        </div>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -24931,6 +24218,779 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
         </div>
         {children}
       </div>
+    </div>
+  );
+}
+</file>
+
+<file path="src/pages/MiCuenta.tsx">
+import { useEffect, useRef, useState, useMemo } from "react";
+import { useAuth } from "@/context/AuthContext";
+import { useNavigate } from "react-router-dom";
+import { Mail, Phone, User, Store, LogOut, Camera, Loader2 } from "lucide-react";
+import MisInscripciones from "@/components/MisInscripciones";
+import RatePueblo from "@/components/RatePueblo";
+import MisFavoritos from "@/components/MisFavoritos";
+import { supabase } from "@/integrations/supabase/client";
+import { toast } from "sonner";
+
+// 1. Interfaces Estrictas para limpiar los 'any'
+interface UserProfile {
+  full_name?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  avatar_url?: string | null;
+  cuit?: string | null;
+}
+
+interface BusinessProfile {
+  id: string;
+  name: string;
+  tax_expires_at: string | null;
+  tax_amount: number | null;
+  enabled: boolean;
+}
+
+// 🟠 FIX ALTO SRE: Helper de compresión y recorte de Avatares en el cliente
+const compressAvatar = (file: File): Promise<Blob> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.src = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(img.src);
+      const canvas = document.createElement("canvas");
+      // Avatares no necesitan ser mayores a 400x400 px
+      const MAX_WIDTH = 400;
+      const MAX_HEIGHT = 400;
+      let width = img.width;
+      let height = img.height;
+      if (width > height) {
+        if (width > MAX_WIDTH) { height *= MAX_WIDTH / width; width = MAX_WIDTH; }
+      } else {
+        if (height > MAX_HEIGHT) { width *= MAX_HEIGHT / height; height = MAX_HEIGHT; }
+      }
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return reject(new Error("Canvas context is null"));
+      ctx.drawImage(img, 0, 0, width, height);
+      // Compresión balanceada a 85% JPEG
+      canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("Compression output blob is null")), "image/jpeg", 0.85);
+    };
+    img.onerror = (err) => reject(err);
+  });
+};
+
+export default function MiCuenta() {
+  const { user, roles, signOut } = useAuth();
+  const navigate = useNavigate();
+
+  const profileLabel = useMemo(() => {
+    if (roles.includes("isa_super_admin")) return "ISA Super Admin";
+    if (roles.includes("isa_consultant")) return "Consultor ISA";
+    if (roles.includes("admin")) return "Administrador";
+    if (roles.includes("mayor")) return "Intendente";
+    if (roles.includes("tourism_chief")) return "Jefe de Turismo";
+    if (roles.includes("area_manager")) return "Jefe de Área";
+    if (roles.includes("resident")) return "Vecino";
+
+    return "Turista";
+  }, [roles]);
+
+  const isTourist = roles.length === 0 || roles.includes("tourist");
+
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [cuitDraft, setCuitDraft] = useState("");
+  const [savingCuit, setSavingCuit] = useState(false);
+  const [business, setBusiness] = useState<BusinessProfile | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  // 2. Efecto blindado: Carga de Perfil
+  useEffect(() => {
+    let isMounted = true;
+    if (!user) return;
+
+    const fetchProfile = async () => {
+      try {
+        const { data } = await supabase
+          .from("profiles")
+          .select("full_name,email,phone,avatar_url,cuit")
+          .eq("id", user.id)
+          .maybeSingle();
+
+        if (isMounted && data) {
+          const p = data as UserProfile;
+          setProfile(p);
+          setCuitDraft(p.cuit || "");
+        }
+      } catch (err) {
+        console.error("Error cargando perfil", err);
+      }
+    };
+
+    fetchProfile();
+    return () => { isMounted = false; };
+  }, [user]);
+
+  // 3. Efecto blindado: Carga de Comercio (Hacienda)
+  useEffect(() => {
+    let isMounted = true;
+    const cuit = profile?.cuit?.trim();
+    
+    if (!cuit) {
+      setBusiness(null);
+      return;
+    }
+
+    const fetchBusiness = async () => {
+      try {
+        const { data } = await supabase
+          .from("businesses")
+          .select("id,name,tax_expires_at,tax_amount,enabled")
+          .eq("cuit", cuit)
+          .maybeSingle();
+
+        if (isMounted) {
+          setBusiness((data as BusinessProfile) || null);
+        }
+      } catch (err) {
+        console.error("Error cargando comercio", err);
+      }
+    };
+
+    fetchBusiness();
+    return () => { isMounted = false; };
+  }, [profile?.cuit]);
+
+  const saveCuit = async () => {
+    if (!user) return;
+    setSavingCuit(true);
+    
+    const { error } = await supabase
+      .from("profiles")
+      .update({ cuit: cuitDraft.trim() || null })
+      .eq("id", user.id);
+      
+    setSavingCuit(false);
+    
+    if (error) {
+      toast.error("No se pudo guardar el CUIT");
+    } else {
+      toast.success("CUIT guardado");
+      setProfile((p) => ({ ...(p || {}), cuit: cuitDraft.trim() || null }));
+    }
+  };
+
+  const onPick = () => fileRef.current?.click();
+
+  const onUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !user) return;
+    setUploading(true);
+    
+    try {
+      // 🟠 Compresión SRE activada antes del upload
+      const compressedBlob = await compressAvatar(file);
+      const ext = "jpg"; // Forzamos formato por la compresión Canvas
+      const path = `${user.id}/avatar-${Date.now()}.${ext}`;
+      
+      const { error: upErr } = await supabase.storage.from("profiles").upload(path, compressedBlob, { 
+         upsert: true, 
+         contentType: "image/jpeg",
+         cacheControl: "31536000" 
+      });
+      
+      if (upErr) {
+        toast.error("No se pudo subir la foto de perfil");
+        setUploading(false);
+        return;
+      }
+      
+      const { data: pub } = supabase.storage.from("profiles").getPublicUrl(path);
+      const url = pub.publicUrl;
+      
+      const { error: updErr } = await supabase.from("profiles").update({ avatar_url: url }).eq("id", user.id);
+      
+      if (updErr) {
+        toast.error("No se guardó la foto en tu perfil");
+      } else {
+        setProfile((p) => ({ ...(p || {}), avatar_url: url }));
+        toast.success("Foto de perfil actualizada");
+      }
+    } catch (err) {
+      console.error(err);
+      toast.error("Error al procesar el avatar en el celular");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    await signOut();
+    toast.success("Sesión cerrada");
+    navigate("/auth/login");
+  };
+
+  const displayName = profile?.full_name || user?.email?.split("@")[0] || "Usuario MUNO";
+  const displayEmail = profile?.email || user?.email || "—";
+  const displayPhone = profile?.phone || "—";
+  const initial = (displayName[0] || "V").toUpperCase();
+
+  return (
+    <div className="space-y-5">
+      <div className="isa-card p-6 flex items-center gap-4">
+        <div className="relative">
+          {profile?.avatar_url ? (
+            <img src={profile.avatar_url} alt="Foto de perfil" className="w-16 h-16 rounded-2xl object-cover" />
+          ) : (
+            <div className="w-16 h-16 rounded-2xl bg-isa-navy text-isa-white grid place-items-center text-2xl font-extrabold">{initial}</div>
+          )}
+          {user && (
+            <button
+              onClick={onPick}
+              disabled={uploading}
+              aria-label="Cambiar foto"
+              className="absolute -bottom-1 -right-1 w-7 h-7 rounded-full bg-isa-navy text-white grid place-items-center shadow-md disabled:opacity-50"
+            >
+              {uploading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Camera className="w-3.5 h-3.5" />}
+            </button>
+          )}
+          <input ref={fileRef} type="file" accept="image/*" hidden onChange={onUpload} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="text-xl font-extrabold text-isa-navy truncate">{displayName}</div>
+          <div className="text-sm text-muted-foreground"> Perfil: {profileLabel} </div>
+        </div>
+      </div>
+
+      <div className="isa-card p-5">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-xl bg-muno-blue/10 text-muno-blue grid place-items-center"><Store strokeWidth={1.5} /></div>
+            <div>
+              <div className="font-extrabold text-isa-navy">Mi Comercio</div>
+              <div className="text-xs text-muted-foreground">Próximamente vas a poder vincular un comercio mediante tu CUIT.</div>
+            </div>
+          </div>
+          <button
+            disabled
+            className="relative w-12 h-7 rounded-full bg-muted shrink-0 opacity-60 cursor-not-allowed"
+            aria-label="Mi Comercio (próximamente)"
+          >
+            <span className="absolute top-1 left-1 w-5 h-5 bg-white rounded-full" />
+          </button>
+        </div>
+      </div>
+
+      <div className="isa-card p-6 space-y-4">
+        <h3 className="font-extrabold text-isa-navy">Datos personales</h3>
+        {[
+          { icon: User, label: "Nombre", value: displayName },
+          { icon: Mail, label: "Email", value: displayEmail },
+          { icon: Phone, label: "Teléfono", value: displayPhone },
+        ].map((f) => (
+          <div key={f.label} className="flex items-center gap-3 py-2 border-b last:border-0">
+            <f.icon strokeWidth={1.5} className="w-5 h-5 text-muted-foreground" />
+            <div className="flex-1">
+              <div className="text-xs text-muted-foreground">{f.label}</div>
+              <div className="font-semibold text-isa-navy">{f.value}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {user && (
+        <div className="isa-card p-5 space-y-3">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-muno-blue/10 text-muno-blue grid place-items-center"><Store strokeWidth={1.5} /></div>
+            <div>
+              <div className="font-extrabold text-isa-navy">Estado de tasas (Hacienda)</div>
+              <div className="text-[11px] text-muted-foreground">Vinculá tu CUIT para ver el estado de tu comercio.</div>
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <input
+              value={cuitDraft}
+              onChange={(e) => setCuitDraft(e.target.value)}
+              placeholder="CUIT (ej. 30-12345678-9)"
+              className="flex-1 px-3 py-2 rounded-xl border bg-background text-sm"
+            />
+            <button onClick={saveCuit} disabled={savingCuit} className="bg-isa-navy text-white rounded-xl px-4 text-sm font-bold disabled:opacity-60">
+              {savingCuit ? "…" : "Guardar"}
+            </button>
+          </div>
+          {profile?.cuit && !business && (
+            <div className="text-[12px] text-muted-foreground">No encontramos un comercio asociado a este CUIT.</div>
+          )}
+          {business && (() => {
+            const exp = business.tax_expires_at ? new Date(business.tax_expires_at) : null;
+            const overdue = exp && exp.getTime() < Date.now();
+            const soon = exp && !overdue && exp.getTime() - Date.now() < 15 * 86400000;
+            const status = overdue ? "Vencida" : soon ? "Por vencer" : "Al día";
+            const color = overdue ? "text-muno-red bg-muno-red/10" : soon ? "text-amber-700 bg-amber-100" : "text-muno-teal bg-muno-teal/10";
+            return (
+              <div className="rounded-xl border p-3 space-y-1">
+                <div className="font-bold text-isa-navy">{business.name}</div>
+                <div className="text-xs text-muted-foreground">
+                  Vencimiento: {exp ? exp.toLocaleDateString("es-AR") : "—"}
+                  {business.tax_amount ? ` · $${Number(business.tax_amount).toLocaleString("es-AR")}` : ""}
+                </div>
+                <span className={`inline-block text-[11px] font-bold px-2 py-0.5 rounded-full ${color}`}>{status}</span>
+                <div className="text-[11px] text-muted-foreground pt-1">Información a cargo de Hacienda. Para regularizar acercate a la oficina municipal.</div>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {isTourist && (
+        <>
+          <MisFavoritos />
+          <RatePueblo />
+        </>
+      )}
+
+      <MisInscripciones />
+
+      {user && (
+        <button
+          onClick={handleSignOut}
+          className="w-full inline-flex items-center justify-center gap-2 bg-muno-red text-white rounded-[20px] py-3 font-bold text-sm hover:opacity-90"
+        >
+          <LogOut className="w-4 h-4" /> Cerrar sesión
+        </button>
+      )}
+    </div>
+  );
+}
+</file>
+
+<file path="src/components/MisInscripciones.tsx">
+import { useEffect, useState } from "react";
+import { CalendarCheck, X, Users } from "lucide-react";
+import { listInscripciones, cancelInscripcion, type Inscripcion } from "@/lib/inscripciones";
+import { toast } from "sonner";
+import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/context/AuthContext";
+import type { Database } from "@/integrations/supabase/types";
+
+type RegistrationRow = Database["public"]["Tables"]["registrations"]["Row"];
+
+type Item = {
+  id: string;
+  titulo: string;
+  fecha: string;
+  tipo: string;
+  lugar?: string | null;
+  acompanantes: string[];
+  source: "db" | "local";
+};
+
+export default function MisInscripciones() {
+  const { user } = useAuth();
+  const [items, setItems] = useState<Item[]>([]);
+
+  const userId = user?.id;
+
+  useEffect(() => {
+    let isMounted = true; // Control de Memory Leak
+
+    const refresh = async () => {
+      const local: Item[] = listInscripciones().map((i: Inscripcion) => ({
+        id: i.id,
+        titulo: i.titulo,
+        fecha: i.fecha,
+        tipo: i.tipo,
+        lugar: i.lugar,
+        acompanantes: i.acompanantes,
+        source: "local",
+      }));
+
+      if (!userId) {
+        if (isMounted) setItems(local);
+        return;
+      }
+
+      try {
+        const { data } = await supabase
+          .from("registrations")
+          .select("id,event_title,event_date,event_type,event_place,companions")
+          .eq("user_id", userId)
+          .eq("status", "activa") // FIX: Filtramos las canceladas lógicamente
+          .is("deleted_at", null) // 🟠 FIX ALTO SRE: Fuerza a PostgreSQL a usar el índice parcial idx_registrations_user_active
+          .order("created_at", { ascending: false })
+          .limit(50); // FIX 1.2: Límite de carga (evita Unbounded Payloads)
+
+        const db: Item[] = (data || []).map((r) => ({
+          id: r.id,
+          titulo: r.event_title,
+          fecha: r.event_date || "",
+          tipo: r.event_type || "",
+          lugar: r.event_place,
+          acompanantes: Array.isArray(r.companions) ? r.companions.map(String) : [],
+          source: "db",
+        }));
+
+        if (isMounted) {
+          const seen = new Set(db.map((d) => d.titulo + d.fecha));
+          setItems([...db, ...local.filter((l) => !seen.has(l.titulo + l.fecha))]);
+        }
+      } catch (error) {
+        console.error("Error al obtener inscripciones", error);
+      }
+    };
+
+    refresh();
+    
+    // 🟠 FIX ALTO 1: Escuchar eventos locales EXCLUSIVAMENTE (Ahorro de 50K Sockets)
+    const handleLocalEvent = () => refresh();
+    window.addEventListener("muno:inscripciones", handleLocalEvent);
+
+    return () => {
+      isMounted = false;
+      window.removeEventListener("muno:inscripciones", handleLocalEvent);
+    };
+  }, [userId]); 
+
+  const cancel = async (it: Item) => {
+    if (it.source === "db") {
+      // COMPLIANCE FIX: Soft Delete legal y tipado estrictamente
+      const { error } = await supabase
+        .from("registrations")
+        .update({ status: "cancelada", deleted_at: new Date().toISOString() })
+        .eq("id", it.id);
+        
+      if (error) {
+        toast.error("No se pudo cancelar");
+        return;
+      }
+    } else {
+      cancelInscripcion(it.id);
+    }
+    toast.success("Inscripción cancelada");
+    window.dispatchEvent(new Event("muno:inscripciones"));
+  };
+
+  return (
+    <section>
+      <div className="flex items-center justify-between mb-3">
+        <h2>Mis Inscripciones</h2>
+      </div>
+      <div className="isa-card p-5 space-y-3">
+        <div className="flex items-center gap-2">
+          <CalendarCheck className="w-5 h-5 text-isa-navy" strokeWidth={1.5} />
+          <h3 className="font-extrabold text-isa-navy">Talleres y eventos</h3>
+        </div>
+        {items.length === 0 ? (
+          <p className="text-sm text-muted-foreground">Aún no tienes inscripciones. ¡Explora la agenda municipal!</p>
+        ) : (
+          <ul className="space-y-2">
+            {items.map((i) => (
+              <li key={i.source + i.id} className="flex items-start justify-between gap-3 border rounded-xl p-3 bg-background">
+                <div className="min-w-0">
+                  <div className="text-sm font-bold text-isa-navy truncate">{i.titulo}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {i.fecha} {i.tipo ? `· ${i.tipo}` : ""}
+                    {i.lugar ? ` · ${i.lugar}` : ""}
+                  </div>
+                  {i.acompanantes.length > 0 && (
+                    <div className="text-[11px] text-muted-foreground mt-1 flex items-center gap-1">
+                      <Users className="w-3 h-3" /> {i.acompanantes.length} acompañante(s): {i.acompanantes.join(", ")}
+                    </div>
+                  )}
+                </div>
+                <button
+                  onClick={() => cancel(i)}
+                  className="shrink-0 inline-flex items-center gap-1 text-xs font-bold text-muno-red border border-muno-red/30 rounded-full px-2.5 py-1.5 hover:bg-muno-red/10"
+                >
+                  <X className="w-3 h-3" /> Cancelar
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </section>
+  );
+}
+</file>
+
+<file path="src/components/NotificationsBell.tsx">
+import { useEffect, useState, useRef } from "react";
+import { Bell, X } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/context/AuthContext";
+import { useMunicipality } from "@/context/MunicipalityContext";
+import type { RealtimeChannel } from "@supabase/supabase-js";
+
+type Notif = {
+  id: string;
+  title: string;
+  body: string;
+  link: string | null;
+  audience: string;
+  created_at: string;
+  user_id?: string | null;
+};
+
+const STORAGE_KEY = "muno.guest.notif.reads";
+
+function getGuestReads(): string[] {
+  try {
+    return JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+  } catch {
+    return [];
+  }
+}
+
+function addGuestRead(id: string) {
+  const arr = getGuestReads();
+  if (!arr.includes(id)) {
+    arr.push(id);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(arr.slice(-200)));
+  }
+}
+
+export default function NotificationsBell() {
+  const { user, roles } = useAuth();
+  const { municipalityInfo } = useMunicipality(); 
+  const nav = useNavigate();
+  const [open, setOpen] = useState(false);
+  const [items, setItems] = useState<Notif[]>([]);
+  const [readIds, setReadIds] = useState<Set<string>>(new Set());
+  const ref = useRef<HTMLDivElement>(null);
+
+  const isResident =
+    roles.includes("resident") ||
+    roles.includes("admin") ||
+    roles.includes("mayor") ||
+    roles.includes("tourism_chief") ||
+    roles.includes("area_manager") ||
+    roles.includes("isa_super_admin") ||
+    roles.includes("isa_consultant");
+
+  const audienceFilter = isResident
+    ? ["residents", "both"]
+    : ["tourists", "both"];
+
+  const rolesKey = roles.join(",");
+  const userId = user?.id;
+  const municipalityId = municipalityInfo?.id;
+
+  useEffect(() => {
+    let isMounted = true;
+    const channels: RealtimeChannel[] = []; 
+
+    const load = async () => {
+      let query = supabase
+        .from("notifications")
+        .select("id,title,body,link,audience,created_at,user_id")
+        .order("created_at", { ascending: false })
+        .limit(30);
+
+      if (userId) {
+        query = query.or(`user_id.eq.${userId},and(user_id.is.null,audience.in.(${audienceFilter.join(",")}))`);
+      } else {
+        query = query.is("user_id", null).in("audience", audienceFilter);
+      }
+      
+      const { data } = await query;
+      
+      if (isMounted) {
+        setItems((data as Notif[]) || []);
+      }
+
+      if (userId && isMounted) {
+        const { data: reads } = await supabase
+          .from("notification_reads")
+          .select("notification_id")
+          .eq("user_id", userId);
+          
+        if (isMounted) {
+          setReadIds(new Set((reads || []).map((r: { notification_id: string }) => r.notification_id)));
+        }
+      } else if (isMounted) {
+        setReadIds(new Set(getGuestReads()));
+      }
+    };
+
+    load();
+
+    // 🔴 FIX CRÍTICO SRE: Prevención de Tormenta de Difusión (Broadcast Storm)
+    // Usamos filtros a nivel de base de datos para saltarnos la validación unihilo de RLS de Supabase Realtime
+    
+    if (municipalityId) {
+      const muniChannel = supabase
+        .channel(`notif_muni_${municipalityId}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "notifications",
+            filter: `municipality_id=eq.${municipalityId}` // Filtro mágico en servidor
+          },
+          () => { if (isMounted) load(); }
+        )
+        .subscribe();
+      channels.push(muniChannel);
+    }
+
+    if (userId) {
+      const userChannel = supabase
+        .channel(`notif_user_${userId}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "notifications",
+            filter: `user_id=eq.${userId}` // Filtro mágico en servidor
+          },
+          () => { if (isMounted) load(); }
+        )
+        .subscribe();
+      channels.push(userChannel);
+    }
+
+    return () => {
+      isMounted = false;
+      channels.forEach(ch => supabase.removeChannel(ch));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, municipalityId, rolesKey]); 
+
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    if (open) document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
+  }, [open]);
+
+  const unread = items.filter((n) => !readIds.has(n.id));
+  const unreadCount = unread.length;
+
+  const markRead = async (id: string) => {
+    setReadIds((s) => new Set(s).add(id));
+    if (user) {
+      await supabase.from("notification_reads").upsert(
+        { user_id: user.id, notification_id: id },
+        { onConflict: "user_id,notification_id" }
+      );
+    } else {
+      addGuestRead(id);
+    }
+  };
+
+  const markAllRead = async () => {
+    const ids = unread.map((n) => n.id);
+    setReadIds((s) => {
+      const ns = new Set(s);
+      ids.forEach((i) => ns.add(i));
+      return ns;
+    });
+    if (user && ids.length) {
+      await supabase
+        .from("notification_reads")
+        .upsert(
+          ids.map((id) => ({ user_id: user.id, notification_id: id })),
+          { onConflict: "user_id,notification_id" }
+        );
+    } else {
+      ids.forEach(addGuestRead);
+    }
+  };
+
+  const onItemClick = async (n: Notif) => {
+    await markRead(n.id);
+    if (n.link) {
+      if (n.link.startsWith("http")) {
+        window.open(n.link, "_blank", "noopener,noreferrer");
+      } else if (n.link.startsWith("tel:") || n.link.startsWith("mailto:")) {
+        window.location.href = n.link;
+      } else {
+        nav(n.link);
+      }
+    }
+    setOpen(false);
+  };
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        aria-label="Notificaciones"
+        className="relative inline-flex items-center justify-center w-9 h-9 rounded-xl hover:bg-isa-light transition-colors"
+      >
+        <Bell strokeWidth={1.8} className="w-5 h-5 text-isa-navy" />
+        {unreadCount > 0 && (
+          <span
+            className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 rounded-full bg-muno-red text-white text-[10px] font-extrabold grid place-items-center ring-2 ring-card"
+            aria-label={`${unreadCount} no leídas`}
+          >
+            {unreadCount > 9 ? "9+" : unreadCount}
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <div className="absolute right-0 mt-2 w-[320px] max-w-[92vw] bg-card border rounded-[16px] shadow-xl z-50 overflow-hidden animate-fade-in">
+          <div className="px-4 py-3 border-b flex items-center justify-between bg-isa-light/40">
+            <div className="font-extrabold text-isa-navy text-sm">Notificaciones</div>
+            <div className="flex items-center gap-2">
+              {unreadCount > 0 && (
+                <button onClick={markAllRead} className="text-[11px] font-bold text-muno-blue">
+                  Marcar todo leído
+                </button>
+              )}
+              <button onClick={() => setOpen(false)} aria-label="Cerrar">
+                <X strokeWidth={2} className="w-4 h-4 text-isa-navy" />
+              </button>
+            </div>
+          </div>
+          <div className="max-h-[60vh] overflow-y-auto">
+            {items.length === 0 ? (
+              <div className="px-4 py-8 text-center text-[12px] text-muted-foreground">
+                Sin notificaciones por ahora.
+              </div>
+            ) : (
+              <ul>
+                {items.map((n) => {
+                  const isUnread = !readIds.has(n.id);
+                  return (
+                    <li key={n.id}>
+                      <button
+                        onClick={() => onItemClick(n)}
+                        className={`w-full text-left px-4 py-3 border-b hover:bg-isa-light/40 transition-colors ${
+                          isUnread ? "bg-isa-light/20" : ""
+                        }`}
+                      >
+                        <div className="flex items-start gap-2">
+                          {isUnread && (
+                            <span className="mt-1.5 w-2 h-2 rounded-full bg-muno-red shrink-0" />
+                          )}
+                          <div className="min-w-0 flex-1">
+                            <div className="font-extrabold text-isa-navy text-[13px] leading-tight">{n.title}</div>
+                            <div className="text-[11px] text-muted-foreground mt-0.5">
+                              {new Date(n.created_at).toLocaleString("es-AR", { dateStyle: "short", timeStyle: "short" })}
+                            </div>
+                            {n.body && (
+                              <p className="text-[12px] text-isa-navy/80 mt-1 line-clamp-2">{n.body}</p>
+                            )}
+                          </div>
+                        </div>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

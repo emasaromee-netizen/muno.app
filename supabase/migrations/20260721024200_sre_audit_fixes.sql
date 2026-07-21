@@ -38,3 +38,25 @@ WITH CHECK (
     WHERE content_items.id = registrations.event_id::uuid
   )
 );
+
+-- 🔴 CRÍTICO 1: Limpieza de función innecesaria (la columna ya es UUID nativo)
+DROP FUNCTION IF EXISTS public.is_valid_uuid(text);
+
+-- 🔴 CRÍTICO 1 (Parte 2): Política RLS perfecta y pura (UUID contra UUID sin casteos)
+-- Al ser UUID nativo, Postgres rechaza strings inválidos automáticamente antes de evaluar el RLS (Zero Seq Scans)
+DROP POLICY IF EXISTS "registrations_public_insert" ON public.registrations;
+CREATE POLICY "registrations_public_insert" ON public.registrations FOR INSERT 
+WITH CHECK (
+  EXISTS (
+    SELECT 1 FROM public.content_items 
+    WHERE content_items.id = registrations.event_id
+  )
+);
+
+-- 🟠 ALTO 1: Índices para las bandejas históricas del vecino
+CREATE INDEX IF NOT EXISTS idx_claims_user_id ON public.claims (user_id);
+CREATE INDEX IF NOT EXISTS idx_registrations_user_id ON public.registrations (user_id);
+CREATE INDEX IF NOT EXISTS idx_tourist_favorites_user_id ON public.tourist_favorites (user_id);
+
+-- 🟡 MEDIO 1: Índice compuesto de cobertura para políticas RLS de reclamos
+CREATE INDEX IF NOT EXISTS idx_claims_muni_area_status ON public.claims (municipality_id, area, status);

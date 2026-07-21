@@ -25,6 +25,36 @@ interface BusinessProfile {
   enabled: boolean;
 }
 
+// 🟠 FIX ALTO SRE: Helper de compresión y recorte de Avatares en el cliente
+const compressAvatar = (file: File): Promise<Blob> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.src = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(img.src);
+      const canvas = document.createElement("canvas");
+      // Avatares no necesitan ser mayores a 400x400 px
+      const MAX_WIDTH = 400;
+      const MAX_HEIGHT = 400;
+      let width = img.width;
+      let height = img.height;
+      if (width > height) {
+        if (width > MAX_WIDTH) { height *= MAX_WIDTH / width; width = MAX_WIDTH; }
+      } else {
+        if (height > MAX_HEIGHT) { width *= MAX_HEIGHT / height; height = MAX_HEIGHT; }
+      }
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return reject(new Error("Canvas context is null"));
+      ctx.drawImage(img, 0, 0, width, height);
+      // Compresión balanceada a 85% JPEG
+      canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("Compression output blob is null")), "image/jpeg", 0.85);
+    };
+    img.onerror = (err) => reject(err);
+  });
+};
+
 export default function MiCuenta() {
   const { user, roles, signOut } = useAuth();
   const navigate = useNavigate();
@@ -132,29 +162,41 @@ export default function MiCuenta() {
     const file = e.target.files?.[0];
     if (!file || !user) return;
     setUploading(true);
-    const ext = file.name.split(".").pop() || "jpg";
-    const path = `${user.id}/avatar-${Date.now()}.${ext}`;
     
-    const { error: upErr } = await supabase.storage.from("profiles").upload(path, file, { upsert: true });
-    
-    if (upErr) {
-      toast.error("No se pudo subir la foto");
+    try {
+      // 🟠 Compresión SRE activada antes del upload
+      const compressedBlob = await compressAvatar(file);
+      const ext = "jpg"; // Forzamos formato por la compresión Canvas
+      const path = `${user.id}/avatar-${Date.now()}.${ext}`;
+      
+      const { error: upErr } = await supabase.storage.from("profiles").upload(path, compressedBlob, { 
+        upsert: true,
+        contentType: "image/jpeg" 
+      });
+      
+      if (upErr) {
+        toast.error("No se pudo subir la foto de perfil");
+        setUploading(false);
+        return;
+      }
+      
+      const { data: pub } = supabase.storage.from("profiles").getPublicUrl(path);
+      const url = pub.publicUrl;
+      
+      const { error: updErr } = await supabase.from("profiles").update({ avatar_url: url }).eq("id", user.id);
+      
+      if (updErr) {
+        toast.error("No se guardó la foto en tu perfil");
+      } else {
+        setProfile((p) => ({ ...(p || {}), avatar_url: url }));
+        toast.success("Foto de perfil actualizada");
+      }
+    } catch (err) {
+      console.error(err);
+      toast.error("Error al procesar el avatar en el celular");
+    } finally {
       setUploading(false);
-      return;
     }
-    
-    const { data: pub } = supabase.storage.from("profiles").getPublicUrl(path);
-    const url = pub.publicUrl;
-    
-    const { error: updErr } = await supabase.from("profiles").update({ avatar_url: url }).eq("id", user.id);
-    
-    if (updErr) {
-      toast.error("No se guardó la foto en tu perfil");
-    } else {
-      setProfile((p) => ({ ...(p || {}), avatar_url: url }));
-      toast.success("Foto actualizada");
-    }
-    setUploading(false);
   };
 
   const handleSignOut = async () => {

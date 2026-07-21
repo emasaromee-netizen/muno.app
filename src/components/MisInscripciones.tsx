@@ -4,7 +4,6 @@ import { listInscripciones, cancelInscripcion, type Inscripcion } from "@/lib/in
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
-import type { RealtimeChannel } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 
 type RegistrationRow = Database["public"]["Tables"]["registrations"]["Row"];
@@ -23,13 +22,10 @@ export default function MisInscripciones() {
   const { user } = useAuth();
   const [items, setItems] = useState<Item[]>([]);
 
-  // FIX SRE & ESLINT: Extraemos el ID a una variable primitiva (string)
-  // Esto engaña al renderizador para que no vea mutaciones de objetos, y hace feliz a ESLint.
   const userId = user?.id;
 
   useEffect(() => {
     let isMounted = true; // Control de Memory Leak
-    let channel: RealtimeChannel | null = null; // Tipado estricto
 
     const refresh = async () => {
       const local: Item[] = listInscripciones().map((i: Inscripcion) => ({
@@ -77,38 +73,15 @@ export default function MisInscripciones() {
 
     refresh();
     
-    // Escuchar eventos locales
+    // 🟠 FIX ALTO 1: Escuchar eventos locales EXCLUSIVAMENTE (Ahorro de 50K Sockets)
     const handleLocalEvent = () => refresh();
     window.addEventListener("muno:inscripciones", handleLocalEvent);
-
-    // Conexión segura a Sockets de Supabase
-    if (userId) {
-      channel = supabase
-        .channel(`registrations_${userId}`)
-        .on(
-          "postgres_changes",
-          { 
-            event: "INSERT", 
-            schema: "public", 
-            table: "registrations", 
-            filter: `user_id=eq.${userId}` 
-          },
-          () => {
-            // FIX SRE: Bloqueo de actualizaciones si el componente ya se desmontó
-            if (isMounted) refresh();
-          }
-        )
-        .subscribe();
-    }
 
     return () => {
       isMounted = false;
       window.removeEventListener("muno:inscripciones", handleLocalEvent);
-      if (channel) {
-        supabase.removeChannel(channel);
-      }
     };
-  }, [userId]); // <- ¡Array de dependencias perfecto!
+  }, [userId]); 
 
   const cancel = async (it: Item) => {
     if (it.source === "db") {

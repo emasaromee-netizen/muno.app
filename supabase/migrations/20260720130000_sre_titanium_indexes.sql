@@ -16,3 +16,14 @@ WHERE (published = true);
 -- 🟡 MEDIO 2: Prevenir contención por alta concurrencia en calificaciones
 ALTER INDEX IF EXISTS unique_user_muni_rating SET (fillfactor = 90);
 REINDEX INDEX unique_user_muni_rating;
+
+-- 🔴 CRÍTICO 1: Índice parcial para optimizar el conteo y filtrado de reclamos activos
+-- Ignora por completo los reclamos cerrados, reduciendo el tamaño del índice en un ~90%
+CREATE INDEX IF NOT EXISTS idx_claims_muni_active_status
+ON public.claims (municipality_id, status)
+WHERE (status != 'Cerrado'::public.claim_status);
+
+-- 🔴 CRÍTICO 2: Índice compuesto de cobertura para consultas de auditoría
+-- Evita el "External Merge Sort" (ordenamiento en disco) al listar logs de actividad
+CREATE INDEX IF NOT EXISTS idx_activity_logs_muni_created_desc
+ON public.activity_logs (municipality_id, created_at DESC);

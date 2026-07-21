@@ -35,20 +35,11 @@ export default function StaffNewsWidget() {
 
     load();
 
-    const channel = supabase
-      .channel("staff_ann_widget_changes")
-      .on(
-        "postgres_changes", 
-        { event: "*", schema: "public", table: "staff_announcements" }, 
-        () => {
-          if (isMounted) load();
-        }
-      )
-      .subscribe();
+    // 🟠 FIX ALTO SRE: WebSocket eliminado por completo. 
+    // Evitamos saturar el connection pool de Supabase Realtime con canales inactivos y redundantes.
 
     return () => {
       isMounted = false;
-      supabase.removeChannel(channel);
     };
   }, []);
 

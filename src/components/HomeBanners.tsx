@@ -207,7 +207,13 @@ function BannerModal({
         </button>
 
         {extendedBanner.image && (
-          <img src={extendedBanner.image} alt={extendedBanner.title} className="w-full h-52 object-cover" />
+          // 🟠 FIX MEDIO SRE: Optimización de red móvil (Bandwidth-Safe)
+          <img 
+            src={extendedBanner.image} 
+            alt={extendedBanner.title} 
+            className="w-full h-52 object-cover"
+            loading="lazy" 
+          />
         )}
 
         <div className="p-5 space-y-3">
@@ -312,7 +318,8 @@ function CultureBanner({ b }: { b: CustomBanner }) {
     <div className="relative text-isa-white overflow-hidden rounded-[16px]" style={{ background: COLOR_BG[b.color] }}>
       {b.image && (
         <>
-          <img src={b.image} alt="" className="absolute inset-0 w-full h-full object-cover" />
+          {/* 🟠 FIX MEDIO SRE: Lazy loading para no bloquear el Main Thread */}
+          <img src={b.image} alt="" className="absolute inset-0 w-full h-full object-cover" loading="lazy" />
           <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/40 to-black/20" />
         </>
       )}

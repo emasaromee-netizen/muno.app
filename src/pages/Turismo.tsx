@@ -74,6 +74,7 @@ const InfoLine = ({ icon: Icon, children }: { icon: ElementType; children: React
 const PlaceCard = ({ item, rateable }: { item: PlaceItem; rateable?: boolean }) => (
   <article className="isa-card overflow-hidden hover:-translate-y-0.5 hover:shadow-md transition-all">
     <div className="relative">
+      {/* 🟠 FIX MEDIO SRE: Lazy loading nativo en tarjetas de turismo */}
       <img src={item.photo_url} alt={item.name} loading="lazy" className="w-full h-[120px] object-cover" />
       <div className="absolute top-2 right-2">
         <FavoriteButton place={{ id: item.id, name: item.name, type: item.type, photo_url: item.photo_url, zone: item.zone || "" }} />
@@ -99,7 +100,8 @@ const LodgingCard = ({ item, onConsultar }: { item: LodgingItem; onConsultar: (i
   return (
     <article className="isa-card overflow-hidden">
       <div className="relative">
-        <img src={item.photos[idx]} alt={item.name} className="w-full h-48 object-cover" />
+        {/* 🟠 FIX MEDIO SRE: Lazy loading nativo en tarjetas de alojamiento */}
+        <img src={item.photos[idx]} alt={item.name} loading="lazy" className="w-full h-48 object-cover" />
         <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex gap-1.5">
           {item.photos.map((_, i) => (
             <button key={i} onClick={() => setIdx(i)} className={`w-2 h-2 rounded-full ${i === idx ? "bg-white" : "bg-white/50"}`} />

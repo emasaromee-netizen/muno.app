@@ -83,21 +83,12 @@ export default function AdminNovedadesJefes() {
     
     load();
     
-    const channel = supabase
-      .channel("staff_ann_changes")
-      .on(
-        "postgres_changes", 
-        { event: "*", schema: "public", table: "staff_announcements" }, 
-        () => {
-          if (isMounted.current) load();
-        }
-      )
-      .subscribe();
-      
+    // 🟠 FIX ALTO SRE: Extirpación de WebSocket redundante.
+    // La carga se realiza exclusivamente bajo demanda (on-mount) ahorrando conexiones TCP/IP constantes.
+
     return () => {
       // 4. Se apaga la referencia al desmontar
       isMounted.current = false;
-      supabase.removeChannel(channel);
     };
   }, [load]);
 
@@ -113,6 +104,7 @@ export default function AdminNovedadesJefes() {
       if (error) throw error;
       
       toast.success("Eliminada");
+      load(); // Recargamos tras eliminar (en lugar de esperar un socket)
     } catch (err: unknown) {
       console.error(err);
       toast.error("No se pudo eliminar");

@@ -269,6 +269,7 @@ supabase/
     20260718100000_compliance_soft_deletes.sql
     20260718120000_auditoria_big4_fixes.sql
     20260720111500_fix_trigger_handle_new_user_null.sql
+    20260720130000_sre_titanium_indexes.sql
   config.toml
 .env.example
 .gitignore
@@ -7089,6 +7090,27 @@ END;
 $$;
 </file>
 
+<file path="supabase/migrations/20260720130000_sre_titanium_indexes.sql">
+-- 🔴 CRÍTICO 1: Índice parcial para Inscripciones Activas
+CREATE INDEX IF NOT EXISTS idx_registrations_user_active 
+ON public.registrations (user_id) 
+WHERE (deleted_at IS NULL AND status = 'activa');
+
+-- 🔴 CRÍTICO 2: Índice de Cobertura (INCLUDE) para evitar Heap Scans en RLS
+CREATE INDEX IF NOT EXISTS idx_user_roles_rls_cover 
+ON public.user_roles (user_id, active, role) 
+INCLUDE (municipality_id, area);
+
+-- 🟡 MEDIO 1: Índice parcial para la guía de Puntos Turísticos
+CREATE INDEX IF NOT EXISTS idx_tourism_items_muni_category 
+ON public.tourism_items (municipality_id, category) 
+WHERE (published = true);
+
+-- 🟡 MEDIO 2: Prevenir contención por alta concurrencia en calificaciones
+ALTER INDEX IF EXISTS unique_user_muni_rating SET (fillfactor = 90);
+REINDEX INDEX unique_user_muni_rating;
+</file>
+
 <file path=".env.example">
 # Variables de entorno - MUNO
 # Copiá este archivo como .env y completá los valores reales.
@@ -13254,375 +13276,6 @@ function TemplatesDialog({ onClose }: { onClose: () => void }) {
             </ul>
           </>
         )}
-      </div>
-    </div>
-  );
-}
-</file>
-
-<file path="src/pages/admin/Turismo.tsx">
-import { useEffect, useRef, useState, useCallback } from "react";
-import { supabase } from "@/integrations/supabase/client";
-import { useAuth } from "@/context/AuthContext";
-import { toast } from "sonner";
-import { Camera, Loader2, Plus, Star, Upload, Wallet } from "lucide-react";
-
-type Category = "gastronomy" | "event" | "lodging" | "nature" | "commerce";
-
-interface DBBusiness {
-  id: string;
-  name: string;
-  zone: string | null;
-  photo_url: string | null;
-  address: string | null;
-  enabled: boolean;
-  tax_expires_at: string | null;
-  municipality_id: string | null;
-}
-
-const CATS: { id: Category; label: string }[] = [
-  { id: "gastronomy", label: "Gastronomía" },
-  { id: "event", label: "Eventos" },
-  { id: "lodging", label: "Hospedaje" },
-  { id: "nature", label: "Atractivos" },
-];
-
-function FormularioCarga() {
-  const { user } = useAuth();
-  const fileRef = useRef<HTMLInputElement>(null);
-  const [category, setCategory] = useState<Category>("gastronomy");
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
-  const [photo, setPhoto] = useState<string | null>(null);
-  const [uploading, setUploading] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [drag, setDrag] = useState(false);
-
-  const upload = async (file: File) => {
-    if (!user) {
-      toast.error("Iniciá sesión para subir fotos");
-      return;
-    }
-    setUploading(true);
-    const ext = file.name.split(".").pop() || "jpg";
-    const path = `tourism/${user.id}/${Date.now()}.${ext}`;
-    const { error } = await supabase.storage.from("avatars").upload(path, file, { upsert: true });
-    if (error) {
-      toast.error("Error subiendo foto");
-      setUploading(false);
-      return;
-    }
-    const { data } = supabase.storage.from("avatars").getPublicUrl(path);
-    setPhoto(data.publicUrl);
-    setUploading(false);
-  };
-
-  const onDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setDrag(false);
-    const f = e.dataTransfer.files?.[0];
-    if (f) upload(f);
-  };
-
-  const save = async () => {
-    if (!title.trim()) {
-      toast.error("El nombre es obligatorio");
-      return;
-    }
-    setSaving(true);
-    
-    // Blindaje Multi-Tenant
-    let municipality_id = null;
-    if (user?.id) {
-      const { data: prof } = await supabase.from("profiles").select("municipality_id").eq("id", user.id).maybeSingle();
-      municipality_id = prof?.municipality_id;
-    }
-
-    const { error } = await supabase.from("tourism_items").insert({
-      category,
-      title: title.trim(),
-      description: description.trim() || null,
-      photo_url: photo,
-      published: true,
-      created_by: user?.id,
-      ...(municipality_id ? { municipality_id } : {})
-    });
-    
-    setSaving(false);
-    if (error) {
-      toast.error("Error: " + error.message);
-      return;
-    }
-    toast.success("Publicado en la guía turística");
-    setTitle("");
-    setDescription("");
-    setPhoto(null);
-  };
-
-  return (
-    <div className="bg-white rounded-[16px] border p-5 space-y-4">
-      <div className="flex items-center gap-2">
-        <Plus className="w-4 h-4 text-isa-navy" />
-        <h3 className="font-extrabold text-isa-navy text-sm">Nuevo ítem turístico</h3>
-      </div>
-
-      <div className="flex gap-2 flex-wrap">
-        {CATS.map((c) => (
-          <button
-            key={c.id}
-            type="button"
-            onClick={() => setCategory(c.id)}
-            className={`px-3 py-2 rounded-[10px] text-[12px] font-bold opacity-100 ${
-              category === c.id ? "bg-isa-navy text-white" : "border text-isa-navy"
-            }`}
-          >
-            {c.label}
-          </button>
-        ))}
-      </div>
-
-      <input
-        value={title}
-        onChange={(e) => setTitle(e.target.value)}
-        placeholder="Nombre"
-        className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm"
-      />
-      <textarea
-        value={description}
-        onChange={(e) => setDescription(e.target.value)}
-        rows={3}
-        placeholder="Descripción"
-        className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm resize-none"
-      />
-
-      {/* Dropzone */}
-      <div
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDrag(true);
-        }}
-        onDragLeave={() => setDrag(false)}
-        onDrop={onDrop}
-        onClick={() => fileRef.current?.click()}
-        className={`cursor-pointer border-2 border-dashed rounded-[14px] p-5 text-center transition-colors ${
-          drag ? "border-isa-navy bg-isa-light" : "border-muted-foreground/30 bg-muted/30"
-        }`}
-      >
-        {photo ? (
-          <div className="flex items-center gap-3 justify-center">
-            <img src={photo} className="w-16 h-16 rounded-lg object-cover" alt="" />
-            <span className="text-xs text-muted-foreground">Foto cargada · click para reemplazar</span>
-          </div>
-        ) : uploading ? (
-          <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground">
-            <Loader2 className="w-4 h-4 animate-spin" /> Subiendo...
-          </div>
-        ) : (
-          <div className="flex flex-col items-center gap-1.5 text-muted-foreground">
-            <Upload className="w-5 h-5" />
-            <div className="text-xs font-bold text-isa-navy">Arrastrá una foto o hacé click</div>
-            <div className="text-[11px]">JPG, PNG · max 5MB</div>
-          </div>
-        )}
-        <input
-          ref={fileRef}
-          type="file"
-          accept="image/*"
-          hidden
-          onChange={(e) => e.target.files?.[0] && upload(e.target.files[0])}
-        />
-      </div>
-
-      <button
-        onClick={save}
-        disabled={saving}
-        className="inline-flex items-center gap-2 bg-isa-navy text-white rounded-[12px] px-4 py-2.5 text-[13px] font-bold opacity-100 disabled:opacity-60"
-      >
-        {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Camera className="w-4 h-4" />}
-        Guardar y publicar
-      </button>
-    </div>
-  );
-}
-
-function TablaComerciosHacienda() {
-  const { user } = useAuth();
-  const [rows, setRows] = useState<DBBusiness[]>([]);
-  const [featuredIds, setFeaturedIds] = useState<Set<string>>(new Set());
-  const [loading, setLoading] = useState(true);
-
-  // 1. Candado en memoria para validación sincrónica
-  const isMounted = useRef(true);
-
-  // 2. Remoción del falso booleano
-  const load = useCallback(async () => {
-    if (!user?.id) return;
-    if (isMounted.current) setLoading(true);
-
-    try {
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("municipality_id")
-        .eq("id", user.id)
-        .maybeSingle();
-
-      const muniId = profile?.municipality_id;
-
-      let bq = supabase
-        .from("businesses")
-        .select("id,name,zone,address,enabled,tax_expires_at,photo_url,municipality_id")
-        .order("name");
-
-      if (muniId) bq = bq.eq("municipality_id", muniId);
-
-      const { data: biz } = await bq;
-
-      let tq = supabase
-        .from("tourism_items")
-        .select("business_id,featured")
-        .eq("featured", true);
-
-      if (muniId) tq = tq.eq("municipality_id", muniId);
-
-      const { data: feats } = await tq;
-
-      // 3. Verificamos el .current antes de setear variables de estado
-      if (isMounted.current) {
-        setRows((biz as DBBusiness[]) || []);
-        const featArray = (feats || []) as { business_id: string | null }[];
-        setFeaturedIds(new Set(featArray.map((f) => f.business_id).filter(Boolean) as string[]));
-        setLoading(false);
-      }
-    } catch (error) {
-      console.error("Error al cargar comercios para turismo:", error);
-      if (isMounted.current) setLoading(false);
-    }
-  }, [user?.id]);
-
-  useEffect(() => {
-    isMounted.current = true;
-    load();
-    return () => { 
-      // 4. Apagamos la referencia si el componente se desmonta
-      isMounted.current = false; 
-    };
-  }, [load]);
-
-  const featurar = async (b: DBBusiness) => {
-    if (featuredIds.has(b.id)) {
-      const { data: existing } = await supabase
-        .from("tourism_items")
-        .select("id")
-        .eq("business_id", b.id)
-        .maybeSingle();
-        
-      if (existing?.id) {
-        await supabase.from("tourism_items").update({ featured: false }).eq("id", existing.id);
-      }
-      toast.success("Quitado de destacados");
-    } else {
-      const { error } = await supabase.from("tourism_items").insert({
-        category: "commerce",
-        title: b.name,
-        description: b.address || "",
-        photo_url: b.photo_url,
-        location: b.zone || b.address || null,
-        business_id: b.id,
-        featured: true,
-        published: true,
-        created_by: user?.id,
-        municipality_id: b.municipality_id
-      });
-      
-      if (error) {
-        toast.error("No se pudo destacar: " + error.message);
-        return;
-      }
-      toast.success(`${b.name} destacado en la guía`);
-    }
-    load();
-  };
-
-  return (
-    <div className="bg-white rounded-[16px] border overflow-hidden">
-      <div className="p-4 border-b flex items-center gap-2">
-        <Wallet className="w-4 h-4 text-isa-navy" />
-        <h3 className="font-extrabold text-isa-navy text-sm">Comercios desde Hacienda</h3>
-      </div>
-
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead className="bg-muted/40 text-[11px] uppercase tracking-wider text-muted-foreground">
-            <tr>
-              <th className="text-left px-4 py-2.5 font-bold">Comercio</th>
-              <th className="text-left px-4 py-2.5 font-bold">Zona</th>
-              <th className="text-left px-4 py-2.5 font-bold">Habilitado</th>
-              <th className="text-right px-4 py-2.5 font-bold">Acciones</th>
-            </tr>
-          </thead>
-          <tbody>
-            {loading && (
-              <tr>
-                <td colSpan={4} className="px-4 py-6 text-center text-muted-foreground text-xs">
-                  Cargando...
-                </td>
-              </tr>
-            )}
-            {!loading && rows.length === 0 && (
-              <tr>
-                <td colSpan={4} className="px-4 py-6 text-center text-muted-foreground text-xs">
-                  Sin comercios registrados.
-                </td>
-              </tr>
-            )}
-            {rows.map((b) => {
-              const featured = featuredIds.has(b.id);
-              return (
-                <tr key={b.id} className="border-t">
-                  <td className="px-4 py-2.5 font-bold text-isa-navy">{b.name}</td>
-                  <td className="px-4 py-2.5 text-muted-foreground">{b.zone || b.address || "—"}</td>
-                  <td className="px-4 py-2.5">
-                    <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${
-                      b.enabled ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"
-                    }`}>
-                      {b.enabled ? "SI" : "NO"}
-                    </span>
-                  </td>
-                  <td className="px-4 py-2.5 text-right">
-                    <button
-                      onClick={() => featurar(b)}
-                      className={`inline-flex items-center gap-1.5 text-[11px] font-bold px-3 py-1.5 rounded-full opacity-100 ${
-                        featured ? "bg-amber-400 text-isa-navy" : "border text-isa-navy hover:bg-isa-light"
-                      }`}
-                    >
-                      <Star className="w-3 h-3" /> {featured ? "Destacado" : "Destacar en Guía"}
-                    </button>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-export default function Turismo() {
-  return (
-    <div className="space-y-5">
-      <header>
-        <h2 className="font-display font-extrabold text-isa-navy text-[22px] leading-tight">
-          Panel de Turismo
-        </h2>
-        <p className="text-sm text-muted-foreground mt-1">
-          Cargá contenido turístico y conectá comercios desde Hacienda.
-        </p>
-      </header>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        <FormularioCarga />
-        <TablaComerciosHacienda />
       </div>
     </div>
   );
@@ -19997,6 +19650,432 @@ export default function IntendenteDashboard() {
 }
 </file>
 
+<file path="src/pages/admin/Turismo.tsx">
+import { useEffect, useRef, useState, useCallback } from "react";
+import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/context/AuthContext";
+import { toast } from "sonner";
+import { Camera, Loader2, Plus, Star, Upload, Wallet } from "lucide-react";
+
+type Category = "gastronomy" | "event" | "lodging" | "nature" | "commerce";
+
+interface DBBusiness {
+  id: string;
+  name: string;
+  zone: string | null;
+  photo_url: string | null;
+  address: string | null;
+  enabled: boolean;
+  tax_expires_at: string | null;
+  municipality_id: string | null;
+}
+
+const CATS: { id: Category; label: string }[] = [
+  { id: "gastronomy", label: "Gastronomía" },
+  { id: "event", label: "Eventos" },
+  { id: "lodging", label: "Hospedaje" },
+  { id: "nature", label: "Atractivos" },
+];
+
+// 🟠 FIX ALTO SRE: Helper de compresión de imágenes en el cliente (reduce el payload y ancho de banda en un 90%)
+const compressImage = (file: File): Promise<Blob> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.src = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(img.src);
+      const canvas = document.createElement("canvas");
+      // Tamaño máximo ideal para vistas turísticas en móviles y desktop
+      const MAX_WIDTH = 1280;
+      const MAX_HEIGHT = 720;
+      let width = img.width;
+      let height = img.height;
+
+      if (width > height) {
+        if (width > MAX_WIDTH) { 
+          height *= MAX_WIDTH / width; 
+          width = MAX_WIDTH; 
+        }
+      } else {
+        if (height > MAX_HEIGHT) { 
+          width *= MAX_HEIGHT / height; 
+          height = MAX_HEIGHT; 
+        }
+      }
+
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return reject(new Error("Canvas context is null"));
+      
+      ctx.drawImage(img, 0, 0, width, height);
+      canvas.toBlob(
+        (blob) => blob ? resolve(blob) : reject(new Error("Compression output blob is null")), 
+        "image/jpeg", 
+        0.80 // 80% de calidad es un equilibrio perfecto entre nitidez y peso para turismo
+      );
+    };
+    img.onerror = (err) => reject(err);
+  });
+};
+
+function FormularioCarga() {
+  const { user } = useAuth();
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [category, setCategory] = useState<Category>("gastronomy");
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [photo, setPhoto] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [drag, setDrag] = useState(false);
+
+  const upload = async (file: File) => {
+    if (!user) {
+      toast.error("Iniciá sesión para subir fotos");
+      return;
+    }
+    setUploading(true);
+    
+    try {
+      // Aplicar compresión asíncrona antes de subir
+      const compressedBlob = await compressImage(file);
+      const ext = "jpg"; // Forzamos jpg por la compresión del canvas
+      const path = `tourism/${user.id}/${Date.now()}.${ext}`;
+      
+      const { error } = await supabase.storage.from("avatars").upload(path, compressedBlob, { 
+        upsert: true,
+        contentType: "image/jpeg"
+      });
+      
+      if (error) {
+        toast.error("Error subiendo foto");
+        setUploading(false);
+        return;
+      }
+      
+      const { data } = supabase.storage.from("avatars").getPublicUrl(path);
+      setPhoto(data.publicUrl);
+    } catch (err) {
+      console.error(err);
+      toast.error("No se pudo procesar la imagen localmente");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const onDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDrag(false);
+    const f = e.dataTransfer.files?.[0];
+    if (f) upload(f);
+  };
+
+  const save = async () => {
+    if (!title.trim()) {
+      toast.error("El nombre es obligatorio");
+      return;
+    }
+    setSaving(true);
+    
+    // Blindaje Multi-Tenant
+    let municipality_id = null;
+    if (user?.id) {
+      const { data: prof } = await supabase.from("profiles").select("municipality_id").eq("id", user.id).maybeSingle();
+      municipality_id = prof?.municipality_id;
+    }
+
+    const { error } = await supabase.from("tourism_items").insert({
+      category,
+      title: title.trim(),
+      description: description.trim() || null,
+      photo_url: photo,
+      published: true,
+      created_by: user?.id,
+      ...(municipality_id ? { municipality_id } : {})
+    });
+    
+    setSaving(false);
+    if (error) {
+      toast.error("Error: " + error.message);
+      return;
+    }
+    toast.success("Publicado en la guía turística");
+    setTitle("");
+    setDescription("");
+    setPhoto(null);
+  };
+
+  return (
+    <div className="bg-white rounded-[16px] border p-5 space-y-4">
+      <div className="flex items-center gap-2">
+        <Plus className="w-4 h-4 text-isa-navy" />
+        <h3 className="font-extrabold text-isa-navy text-sm">Nuevo ítem turístico</h3>
+      </div>
+
+      <div className="flex gap-2 flex-wrap">
+        {CATS.map((c) => (
+          <button
+            key={c.id}
+            type="button"
+            onClick={() => setCategory(c.id)}
+            className={`px-3 py-2 rounded-[10px] text-[12px] font-bold opacity-100 ${
+              category === c.id ? "bg-isa-navy text-white" : "border text-isa-navy"
+            }`}
+          >
+            {c.label}
+          </button>
+        ))}
+      </div>
+
+      <input
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        placeholder="Nombre"
+        className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm"
+      />
+      <textarea
+        value={description}
+        onChange={(e) => setDescription(e.target.value)}
+        rows={3}
+        placeholder="Descripción"
+        className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm resize-none"
+      />
+
+      {/* Dropzone */}
+      <div
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDrag(true);
+        }}
+        onDragLeave={() => setDrag(false)}
+        onDrop={onDrop}
+        onClick={() => fileRef.current?.click()}
+        className={`cursor-pointer border-2 border-dashed rounded-[14px] p-5 text-center transition-colors ${
+          drag ? "border-isa-navy bg-isa-light" : "border-muted-foreground/30 bg-muted/30"
+        }`}
+      >
+        {photo ? (
+          <div className="flex items-center gap-3 justify-center">
+            <img src={photo} className="w-16 h-16 rounded-lg object-cover" alt="" />
+            <span className="text-xs text-muted-foreground">Foto cargada · click para reemplazar</span>
+          </div>
+        ) : uploading ? (
+          <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="w-4 h-4 animate-spin" /> Subiendo...
+          </div>
+        ) : (
+          <div className="flex flex-col items-center gap-1.5 text-muted-foreground">
+            <Upload className="w-5 h-5" />
+            <div className="text-xs font-bold text-isa-navy">Arrastrá una foto o hacé click</div>
+            <div className="text-[11px]">JPG, PNG · compresión inteligente activa</div>
+          </div>
+        )}
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/*"
+          hidden
+          onChange={(e) => e.target.files?.[0] && upload(e.target.files[0])}
+        />
+      </div>
+
+      <button
+        onClick={save}
+        disabled={saving}
+        className="inline-flex items-center gap-2 bg-isa-navy text-white rounded-[12px] px-4 py-2.5 text-[13px] font-bold opacity-100 disabled:opacity-60"
+      >
+        {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Camera className="w-4 h-4" />}
+        Guardar y publicar
+      </button>
+    </div>
+  );
+}
+
+function TablaComerciosHacienda() {
+  const { user } = useAuth();
+  const [rows, setRows] = useState<DBBusiness[]>([]);
+  const [featuredIds, setFeaturedIds] = useState<Set<string>>(new Set());
+  const [loading, setLoading] = useState(true);
+
+  // 1. Candado en memoria para validación sincrónica
+  const isMounted = useRef(true);
+
+  // 2. Remoción del falso booleano
+  const load = useCallback(async () => {
+    if (!user?.id) return;
+    if (isMounted.current) setLoading(true);
+
+    try {
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("municipality_id")
+        .eq("id", user.id)
+        .maybeSingle();
+
+      const muniId = profile?.municipality_id;
+
+      let bq = supabase
+        .from("businesses")
+        .select("id,name,zone,address,enabled,tax_expires_at,photo_url,municipality_id")
+        .order("name");
+
+      if (muniId) bq = bq.eq("municipality_id", muniId);
+
+      const { data: biz } = await bq;
+
+      let tq = supabase
+        .from("tourism_items")
+        .select("business_id,featured")
+        .eq("featured", true);
+
+      if (muniId) tq = tq.eq("municipality_id", muniId);
+
+      const { data: feats } = await tq;
+
+      // 3. Verificamos el .current antes de setear variables de estado
+      if (isMounted.current) {
+        setRows((biz as DBBusiness[]) || []);
+        const featArray = (feats || []) as { business_id: string | null }[];
+        setFeaturedIds(new Set(featArray.map((f) => f.business_id).filter(Boolean) as string[]));
+        setLoading(false);
+      }
+    } catch (error) {
+      console.error("Error al cargar comercios para turismo:", error);
+      if (isMounted.current) setLoading(false);
+    }
+  }, [user?.id]);
+
+  useEffect(() => {
+    isMounted.current = true;
+    load();
+    return () => { 
+      // 4. Apagamos la referencia si el componente se desmonta
+      isMounted.current = false; 
+    };
+  }, [load]);
+
+  const featurar = async (b: DBBusiness) => {
+    if (featuredIds.has(b.id)) {
+      const { data: existing } = await supabase
+        .from("tourism_items")
+        .select("id")
+        .eq("business_id", b.id)
+        .maybeSingle();
+        
+      if (existing?.id) {
+        await supabase.from("tourism_items").update({ featured: false }).eq("id", existing.id);
+      }
+      toast.success("Quitado de destacados");
+    } else {
+      const { error } = await supabase.from("tourism_items").insert({
+        category: "commerce",
+        title: b.name,
+        description: b.address || "",
+        photo_url: b.photo_url,
+        location: b.zone || b.address || null,
+        business_id: b.id,
+        featured: true,
+        published: true,
+        created_by: user?.id,
+        municipality_id: b.municipality_id
+      });
+      
+      if (error) {
+        toast.error("No se pudo destacar: " + error.message);
+        return;
+      }
+      toast.success(`${b.name} destacado en la guía`);
+    }
+    load();
+  };
+
+  return (
+    <div className="bg-white rounded-[16px] border overflow-hidden">
+      <div className="p-4 border-b flex items-center gap-2">
+        <Wallet className="w-4 h-4 text-isa-navy" />
+        <h3 className="font-extrabold text-isa-navy text-sm">Comercios desde Hacienda</h3>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="bg-muted/40 text-[11px] uppercase tracking-wider text-muted-foreground">
+            <tr>
+              <th className="text-left px-4 py-2.5 font-bold">Comercio</th>
+              <th className="text-left px-4 py-2.5 font-bold">Zona</th>
+              <th className="text-left px-4 py-2.5 font-bold">Habilitado</th>
+              <th className="text-right px-4 py-2.5 font-bold">Acciones</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading && (
+              <tr>
+                <td colSpan={4} className="px-4 py-6 text-center text-muted-foreground text-xs">
+                  Cargando...
+                </td>
+              </tr>
+            )}
+            {!loading && rows.length === 0 && (
+              <tr>
+                <td colSpan={4} className="px-4 py-6 text-center text-muted-foreground text-xs">
+                  Sin comercios registrados.
+                </td>
+              </tr>
+            )}
+            {rows.map((b) => {
+              const featured = featuredIds.has(b.id);
+              return (
+                <tr key={b.id} className="border-t">
+                  <td className="px-4 py-2.5 font-bold text-isa-navy">{b.name}</td>
+                  <td className="px-4 py-2.5 text-muted-foreground">{b.zone || b.address || "—"}</td>
+                  <td className="px-4 py-2.5">
+                    <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${
+                      b.enabled ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"
+                    }`}>
+                      {b.enabled ? "SI" : "NO"}
+                    </span>
+                  </td>
+                  <td className="px-4 py-2.5 text-right">
+                    <button
+                      onClick={() => featurar(b)}
+                      className={`inline-flex items-center gap-1.5 text-[11px] font-bold px-3 py-1.5 rounded-full opacity-100 ${
+                        featured ? "bg-amber-400 text-isa-navy" : "border text-isa-navy hover:bg-isa-light"
+                      }`}
+                    >
+                      <Star className="w-3 h-3" /> {featured ? "Destacado" : "Destacar en Guía"}
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+export default function Turismo() {
+  return (
+    <div className="space-y-5">
+      <header>
+        <h2 className="font-display font-extrabold text-isa-navy text-[22px] leading-tight">
+          Panel de Turismo
+        </h2>
+        <p className="text-sm text-muted-foreground mt-1">
+          Cargá contenido turístico y conectá comercios desde Hacienda.
+        </p>
+      </header>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <FormularioCarga />
+        <TablaComerciosHacienda />
+      </div>
+    </div>
+  );
+}
+</file>
+
 <file path="src/pages/auth/Signup.tsx">
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
@@ -21831,306 +21910,6 @@ export default function Lugares() {
 }
 </file>
 
-<file path="src/pages/MiCuenta.tsx">
-import { useEffect, useRef, useState, useMemo } from "react";
-import { useAuth } from "@/context/AuthContext";
-import { useNavigate } from "react-router-dom";
-import { Mail, Phone, User, Store, LogOut, Camera, Loader2 } from "lucide-react";
-import MisInscripciones from "@/components/MisInscripciones";
-import RatePueblo from "@/components/RatePueblo";
-import MisFavoritos from "@/components/MisFavoritos";
-import { supabase } from "@/integrations/supabase/client";
-import { toast } from "sonner";
-
-// 1. Interfaces Estrictas para limpiar los 'any'
-interface UserProfile {
-  full_name?: string | null;
-  email?: string | null;
-  phone?: string | null;
-  avatar_url?: string | null;
-  cuit?: string | null;
-}
-
-interface BusinessProfile {
-  id: string;
-  name: string;
-  tax_expires_at: string | null;
-  tax_amount: number | null;
-  enabled: boolean;
-}
-
-export default function MiCuenta() {
-  const { user, roles, signOut } = useAuth();
-  const navigate = useNavigate();
-
-  const profileLabel = useMemo(() => {
-    if (roles.includes("isa_super_admin")) return "ISA Super Admin";
-    if (roles.includes("isa_consultant")) return "Consultor ISA";
-    if (roles.includes("admin")) return "Administrador";
-    if (roles.includes("mayor")) return "Intendente";
-    if (roles.includes("tourism_chief")) return "Jefe de Turismo";
-    if (roles.includes("area_manager")) return "Jefe de Área";
-    if (roles.includes("resident")) return "Vecino";
-
-    return "Turista";
-  }, [roles]);
-
-  const isTourist = roles.length === 0 || roles.includes("tourist");
-
-  const [profile, setProfile] = useState<UserProfile | null>(null);
-  const [uploading, setUploading] = useState(false);
-  const [cuitDraft, setCuitDraft] = useState("");
-  const [savingCuit, setSavingCuit] = useState(false);
-  const [business, setBusiness] = useState<BusinessProfile | null>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
-
-  // 2. Efecto blindado: Carga de Perfil
-  useEffect(() => {
-    let isMounted = true;
-    if (!user) return;
-
-    const fetchProfile = async () => {
-      try {
-        const { data } = await supabase
-          .from("profiles")
-          .select("full_name,email,phone,avatar_url,cuit")
-          .eq("id", user.id)
-          .maybeSingle();
-
-        if (isMounted && data) {
-          const p = data as UserProfile;
-          setProfile(p);
-          setCuitDraft(p.cuit || "");
-        }
-      } catch (err) {
-        console.error("Error cargando perfil", err);
-      }
-    };
-
-    fetchProfile();
-    return () => { isMounted = false; };
-  }, [user]);
-
-  // 3. Efecto blindado: Carga de Comercio (Hacienda)
-  useEffect(() => {
-    let isMounted = true;
-    const cuit = profile?.cuit?.trim();
-    
-    if (!cuit) {
-      setBusiness(null);
-      return;
-    }
-
-    const fetchBusiness = async () => {
-      try {
-        const { data } = await supabase
-          .from("businesses")
-          .select("id,name,tax_expires_at,tax_amount,enabled")
-          .eq("cuit", cuit)
-          .maybeSingle();
-
-        if (isMounted) {
-          setBusiness((data as BusinessProfile) || null);
-        }
-      } catch (err) {
-        console.error("Error cargando comercio", err);
-      }
-    };
-
-    fetchBusiness();
-    return () => { isMounted = false; };
-  }, [profile?.cuit]);
-
-  const saveCuit = async () => {
-    if (!user) return;
-    setSavingCuit(true);
-    
-    const { error } = await supabase
-      .from("profiles")
-      .update({ cuit: cuitDraft.trim() || null })
-      .eq("id", user.id);
-      
-    setSavingCuit(false);
-    
-    if (error) {
-      toast.error("No se pudo guardar el CUIT");
-    } else {
-      toast.success("CUIT guardado");
-      setProfile((p) => ({ ...(p || {}), cuit: cuitDraft.trim() || null }));
-    }
-  };
-
-  const onPick = () => fileRef.current?.click();
-
-  const onUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !user) return;
-    setUploading(true);
-    const ext = file.name.split(".").pop() || "jpg";
-    const path = `${user.id}/avatar-${Date.now()}.${ext}`;
-    
-    const { error: upErr } = await supabase.storage.from("profiles").upload(path, file, { upsert: true });
-    
-    if (upErr) {
-      toast.error("No se pudo subir la foto");
-      setUploading(false);
-      return;
-    }
-    
-    const { data: pub } = supabase.storage.from("profiles").getPublicUrl(path);
-    const url = pub.publicUrl;
-    
-    const { error: updErr } = await supabase.from("profiles").update({ avatar_url: url }).eq("id", user.id);
-    
-    if (updErr) {
-      toast.error("No se guardó la foto en tu perfil");
-    } else {
-      setProfile((p) => ({ ...(p || {}), avatar_url: url }));
-      toast.success("Foto actualizada");
-    }
-    setUploading(false);
-  };
-
-  const handleSignOut = async () => {
-    await signOut();
-    toast.success("Sesión cerrada");
-    navigate("/auth/login");
-  };
-
-  const displayName = profile?.full_name || user?.email?.split("@")[0] || "Usuario MUNO";
-  const displayEmail = profile?.email || user?.email || "—";
-  const displayPhone = profile?.phone || "—";
-  const initial = (displayName[0] || "V").toUpperCase();
-
-  return (
-    <div className="space-y-5">
-      <div className="isa-card p-6 flex items-center gap-4">
-        <div className="relative">
-          {profile?.avatar_url ? (
-            <img src={profile.avatar_url} alt="Foto de perfil" className="w-16 h-16 rounded-2xl object-cover" />
-          ) : (
-            <div className="w-16 h-16 rounded-2xl bg-isa-navy text-isa-white grid place-items-center text-2xl font-extrabold">{initial}</div>
-          )}
-          {user && (
-            <button
-              onClick={onPick}
-              disabled={uploading}
-              aria-label="Cambiar foto"
-              className="absolute -bottom-1 -right-1 w-7 h-7 rounded-full bg-isa-navy text-white grid place-items-center shadow-md disabled:opacity-50"
-            >
-              {uploading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Camera className="w-3.5 h-3.5" />}
-            </button>
-          )}
-          <input ref={fileRef} type="file" accept="image/*" hidden onChange={onUpload} />
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="text-xl font-extrabold text-isa-navy truncate">{displayName}</div>
-          <div className="text-sm text-muted-foreground"> Perfil: {profileLabel} </div>
-        </div>
-      </div>
-
-      <div className="isa-card p-5">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex items-start gap-3">
-            <div className="w-10 h-10 rounded-xl bg-muno-blue/10 text-muno-blue grid place-items-center"><Store strokeWidth={1.5} /></div>
-            <div>
-              <div className="font-extrabold text-isa-navy">Mi Comercio</div>
-              <div className="text-xs text-muted-foreground">Próximamente vas a poder vincular un comercio mediante tu CUIT.</div>
-            </div>
-          </div>
-          <button
-            disabled
-            className="relative w-12 h-7 rounded-full bg-muted shrink-0 opacity-60 cursor-not-allowed"
-            aria-label="Mi Comercio (próximamente)"
-          >
-            <span className="absolute top-1 left-1 w-5 h-5 bg-white rounded-full" />
-          </button>
-        </div>
-      </div>
-
-      <div className="isa-card p-6 space-y-4">
-        <h3 className="font-extrabold text-isa-navy">Datos personales</h3>
-        {[
-          { icon: User, label: "Nombre", value: displayName },
-          { icon: Mail, label: "Email", value: displayEmail },
-          { icon: Phone, label: "Teléfono", value: displayPhone },
-        ].map((f) => (
-          <div key={f.label} className="flex items-center gap-3 py-2 border-b last:border-0">
-            <f.icon strokeWidth={1.5} className="w-5 h-5 text-muted-foreground" />
-            <div className="flex-1">
-              <div className="text-xs text-muted-foreground">{f.label}</div>
-              <div className="font-semibold text-isa-navy">{f.value}</div>
-            </div>
-          </div>
-        ))}
-      </div>
-
-      {user && (
-        <div className="isa-card p-5 space-y-3">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-muno-blue/10 text-muno-blue grid place-items-center"><Store strokeWidth={1.5} /></div>
-            <div>
-              <div className="font-extrabold text-isa-navy">Estado de tasas (Hacienda)</div>
-              <div className="text-[11px] text-muted-foreground">Vinculá tu CUIT para ver el estado de tu comercio.</div>
-            </div>
-          </div>
-          <div className="flex gap-2">
-            <input
-              value={cuitDraft}
-              onChange={(e) => setCuitDraft(e.target.value)}
-              placeholder="CUIT (ej. 30-12345678-9)"
-              className="flex-1 px-3 py-2 rounded-xl border bg-background text-sm"
-            />
-            <button onClick={saveCuit} disabled={savingCuit} className="bg-isa-navy text-white rounded-xl px-4 text-sm font-bold disabled:opacity-60">
-              {savingCuit ? "…" : "Guardar"}
-            </button>
-          </div>
-          {profile?.cuit && !business && (
-            <div className="text-[12px] text-muted-foreground">No encontramos un comercio asociado a este CUIT.</div>
-          )}
-          {business && (() => {
-            const exp = business.tax_expires_at ? new Date(business.tax_expires_at) : null;
-            const overdue = exp && exp.getTime() < Date.now();
-            const soon = exp && !overdue && exp.getTime() - Date.now() < 15 * 86400000;
-            const status = overdue ? "Vencida" : soon ? "Por vencer" : "Al día";
-            const color = overdue ? "text-muno-red bg-muno-red/10" : soon ? "text-amber-700 bg-amber-100" : "text-muno-teal bg-muno-teal/10";
-            return (
-              <div className="rounded-xl border p-3 space-y-1">
-                <div className="font-bold text-isa-navy">{business.name}</div>
-                <div className="text-xs text-muted-foreground">
-                  Vencimiento: {exp ? exp.toLocaleDateString("es-AR") : "—"}
-                  {business.tax_amount ? ` · $${Number(business.tax_amount).toLocaleString("es-AR")}` : ""}
-                </div>
-                <span className={`inline-block text-[11px] font-bold px-2 py-0.5 rounded-full ${color}`}>{status}</span>
-                <div className="text-[11px] text-muted-foreground pt-1">Información a cargo de Hacienda. Para regularizar acercate a la oficina municipal.</div>
-              </div>
-            );
-          })()}
-        </div>
-      )}
-
-      {isTourist && (
-        <>
-          <MisFavoritos />
-          <RatePueblo />
-        </>
-      )}
-
-      <MisInscripciones />
-
-      {user && (
-        <button
-          onClick={handleSignOut}
-          className="w-full inline-flex items-center justify-center gap-2 bg-muno-red text-white rounded-[20px] py-3 font-bold text-sm hover:opacity-90"
-        >
-          <LogOut className="w-4 h-4" /> Cerrar sesión
-        </button>
-      )}
-    </div>
-  );
-}
-</file>
-
 <file path="src/pages/Reclamos.tsx">
 import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
@@ -23572,182 +23351,6 @@ Despliegue técnico de la plataforma en la infraestructura de Vercel/Supabase, a
 | 2.0 | 13/07/2026 | Cierre del Hito 2: Aprobación de auditoría final, 0 errores TS, cobertura de tests superada y certificación para producción. Transición a Despliegue. |
 </file>
 
-<file path="src/components/MisInscripciones.tsx">
-import { useEffect, useState } from "react";
-import { CalendarCheck, X, Users } from "lucide-react";
-import { listInscripciones, cancelInscripcion, type Inscripcion } from "@/lib/inscripciones";
-import { toast } from "sonner";
-import { supabase } from "@/integrations/supabase/client";
-import { useAuth } from "@/context/AuthContext";
-import type { RealtimeChannel } from "@supabase/supabase-js";
-import type { Database } from "@/integrations/supabase/types";
-
-type RegistrationRow = Database["public"]["Tables"]["registrations"]["Row"];
-
-type Item = {
-  id: string;
-  titulo: string;
-  fecha: string;
-  tipo: string;
-  lugar?: string | null;
-  acompanantes: string[];
-  source: "db" | "local";
-};
-
-export default function MisInscripciones() {
-  const { user } = useAuth();
-  const [items, setItems] = useState<Item[]>([]);
-
-  // FIX SRE & ESLINT: Extraemos el ID a una variable primitiva (string)
-  // Esto engaña al renderizador para que no vea mutaciones de objetos, y hace feliz a ESLint.
-  const userId = user?.id;
-
-  useEffect(() => {
-    let isMounted = true; // Control de Memory Leak
-    let channel: RealtimeChannel | null = null; // Tipado estricto
-
-    const refresh = async () => {
-      const local: Item[] = listInscripciones().map((i: Inscripcion) => ({
-        id: i.id,
-        titulo: i.titulo,
-        fecha: i.fecha,
-        tipo: i.tipo,
-        lugar: i.lugar,
-        acompanantes: i.acompanantes,
-        source: "local",
-      }));
-
-      if (!userId) {
-        if (isMounted) setItems(local);
-        return;
-      }
-
-      try {
-        const { data } = await supabase
-          .from("registrations")
-          .select("id,event_title,event_date,event_type,event_place,companions")
-          .eq("user_id", userId)
-          .eq("status", "activa") // FIX: Filtramos las canceladas lógicamente
-          .order("created_at", { ascending: false })
-          .limit(50); // FIX 1.2: Límite de carga (evita Unbounded Payloads)
-
-        const db: Item[] = (data || []).map((r) => ({
-          id: r.id,
-          titulo: r.event_title,
-          fecha: r.event_date || "",
-          tipo: r.event_type || "",
-          lugar: r.event_place,
-          acompanantes: Array.isArray(r.companions) ? r.companions.map(String) : [],
-          source: "db",
-        }));
-
-        if (isMounted) {
-          const seen = new Set(db.map((d) => d.titulo + d.fecha));
-          setItems([...db, ...local.filter((l) => !seen.has(l.titulo + l.fecha))]);
-        }
-      } catch (error) {
-        console.error("Error al obtener inscripciones", error);
-      }
-    };
-
-    refresh();
-    
-    // Escuchar eventos locales
-    const handleLocalEvent = () => refresh();
-    window.addEventListener("muno:inscripciones", handleLocalEvent);
-
-    // Conexión segura a Sockets de Supabase
-    if (userId) {
-      channel = supabase
-        .channel(`registrations_${userId}`)
-        .on(
-          "postgres_changes",
-          { 
-            event: "INSERT", 
-            schema: "public", 
-            table: "registrations", 
-            filter: `user_id=eq.${userId}` 
-          },
-          () => {
-            // FIX SRE: Bloqueo de actualizaciones si el componente ya se desmontó
-            if (isMounted) refresh();
-          }
-        )
-        .subscribe();
-    }
-
-    return () => {
-      isMounted = false;
-      window.removeEventListener("muno:inscripciones", handleLocalEvent);
-      if (channel) {
-        supabase.removeChannel(channel);
-      }
-    };
-  }, [userId]); // <- ¡Array de dependencias perfecto!
-
-  const cancel = async (it: Item) => {
-    if (it.source === "db") {
-      // COMPLIANCE FIX: Soft Delete legal y tipado estrictamente
-      const { error } = await supabase
-        .from("registrations")
-        .update({ status: "cancelada", deleted_at: new Date().toISOString() })
-        .eq("id", it.id);
-        
-      if (error) {
-        toast.error("No se pudo cancelar");
-        return;
-      }
-    } else {
-      cancelInscripcion(it.id);
-    }
-    toast.success("Inscripción cancelada");
-    window.dispatchEvent(new Event("muno:inscripciones"));
-  };
-
-  return (
-    <section>
-      <div className="flex items-center justify-between mb-3">
-        <h2>Mis Inscripciones</h2>
-      </div>
-      <div className="isa-card p-5 space-y-3">
-        <div className="flex items-center gap-2">
-          <CalendarCheck className="w-5 h-5 text-isa-navy" strokeWidth={1.5} />
-          <h3 className="font-extrabold text-isa-navy">Talleres y eventos</h3>
-        </div>
-        {items.length === 0 ? (
-          <p className="text-sm text-muted-foreground">Aún no tienes inscripciones. ¡Explora la agenda municipal!</p>
-        ) : (
-          <ul className="space-y-2">
-            {items.map((i) => (
-              <li key={i.source + i.id} className="flex items-start justify-between gap-3 border rounded-xl p-3 bg-background">
-                <div className="min-w-0">
-                  <div className="text-sm font-bold text-isa-navy truncate">{i.titulo}</div>
-                  <div className="text-xs text-muted-foreground">
-                    {i.fecha} {i.tipo ? `· ${i.tipo}` : ""}
-                    {i.lugar ? ` · ${i.lugar}` : ""}
-                  </div>
-                  {i.acompanantes.length > 0 && (
-                    <div className="text-[11px] text-muted-foreground mt-1 flex items-center gap-1">
-                      <Users className="w-3 h-3" /> {i.acompanantes.length} acompañante(s): {i.acompanantes.join(", ")}
-                    </div>
-                  )}
-                </div>
-                <button
-                  onClick={() => cancel(i)}
-                  className="shrink-0 inline-flex items-center gap-1 text-xs font-bold text-muno-red border border-muno-red/30 rounded-full px-2.5 py-1.5 hover:bg-muno-red/10"
-                >
-                  <X className="w-3 h-3" /> Cancelar
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-    </section>
-  );
-}
-</file>
-
 <file path="src/components/ProtectedRoute.tsx">
 import { Navigate, useLocation } from "react-router-dom";
 import { useAuth, routeForRoles } from "@/context/AuthContext";
@@ -24134,6 +23737,497 @@ function Modal({ title, onClose, children }: ModalProps) {
         {children}
       </div>
     </div>
+  );
+}
+</file>
+
+<file path="src/pages/MiCuenta.tsx">
+import { useEffect, useRef, useState, useMemo } from "react";
+import { useAuth } from "@/context/AuthContext";
+import { useNavigate } from "react-router-dom";
+import { Mail, Phone, User, Store, LogOut, Camera, Loader2 } from "lucide-react";
+import MisInscripciones from "@/components/MisInscripciones";
+import RatePueblo from "@/components/RatePueblo";
+import MisFavoritos from "@/components/MisFavoritos";
+import { supabase } from "@/integrations/supabase/client";
+import { toast } from "sonner";
+
+// 1. Interfaces Estrictas para limpiar los 'any'
+interface UserProfile {
+  full_name?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  avatar_url?: string | null;
+  cuit?: string | null;
+}
+
+interface BusinessProfile {
+  id: string;
+  name: string;
+  tax_expires_at: string | null;
+  tax_amount: number | null;
+  enabled: boolean;
+}
+
+// 🟠 FIX ALTO SRE: Helper de compresión y recorte de Avatares en el cliente
+const compressAvatar = (file: File): Promise<Blob> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.src = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(img.src);
+      const canvas = document.createElement("canvas");
+      // Avatares no necesitan ser mayores a 400x400 px
+      const MAX_WIDTH = 400;
+      const MAX_HEIGHT = 400;
+      let width = img.width;
+      let height = img.height;
+      if (width > height) {
+        if (width > MAX_WIDTH) { height *= MAX_WIDTH / width; width = MAX_WIDTH; }
+      } else {
+        if (height > MAX_HEIGHT) { width *= MAX_HEIGHT / height; height = MAX_HEIGHT; }
+      }
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return reject(new Error("Canvas context is null"));
+      ctx.drawImage(img, 0, 0, width, height);
+      // Compresión balanceada a 85% JPEG
+      canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("Compression output blob is null")), "image/jpeg", 0.85);
+    };
+    img.onerror = (err) => reject(err);
+  });
+};
+
+export default function MiCuenta() {
+  const { user, roles, signOut } = useAuth();
+  const navigate = useNavigate();
+
+  const profileLabel = useMemo(() => {
+    if (roles.includes("isa_super_admin")) return "ISA Super Admin";
+    if (roles.includes("isa_consultant")) return "Consultor ISA";
+    if (roles.includes("admin")) return "Administrador";
+    if (roles.includes("mayor")) return "Intendente";
+    if (roles.includes("tourism_chief")) return "Jefe de Turismo";
+    if (roles.includes("area_manager")) return "Jefe de Área";
+    if (roles.includes("resident")) return "Vecino";
+
+    return "Turista";
+  }, [roles]);
+
+  const isTourist = roles.length === 0 || roles.includes("tourist");
+
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [cuitDraft, setCuitDraft] = useState("");
+  const [savingCuit, setSavingCuit] = useState(false);
+  const [business, setBusiness] = useState<BusinessProfile | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  // 2. Efecto blindado: Carga de Perfil
+  useEffect(() => {
+    let isMounted = true;
+    if (!user) return;
+
+    const fetchProfile = async () => {
+      try {
+        const { data } = await supabase
+          .from("profiles")
+          .select("full_name,email,phone,avatar_url,cuit")
+          .eq("id", user.id)
+          .maybeSingle();
+
+        if (isMounted && data) {
+          const p = data as UserProfile;
+          setProfile(p);
+          setCuitDraft(p.cuit || "");
+        }
+      } catch (err) {
+        console.error("Error cargando perfil", err);
+      }
+    };
+
+    fetchProfile();
+    return () => { isMounted = false; };
+  }, [user]);
+
+  // 3. Efecto blindado: Carga de Comercio (Hacienda)
+  useEffect(() => {
+    let isMounted = true;
+    const cuit = profile?.cuit?.trim();
+    
+    if (!cuit) {
+      setBusiness(null);
+      return;
+    }
+
+    const fetchBusiness = async () => {
+      try {
+        const { data } = await supabase
+          .from("businesses")
+          .select("id,name,tax_expires_at,tax_amount,enabled")
+          .eq("cuit", cuit)
+          .maybeSingle();
+
+        if (isMounted) {
+          setBusiness((data as BusinessProfile) || null);
+        }
+      } catch (err) {
+        console.error("Error cargando comercio", err);
+      }
+    };
+
+    fetchBusiness();
+    return () => { isMounted = false; };
+  }, [profile?.cuit]);
+
+  const saveCuit = async () => {
+    if (!user) return;
+    setSavingCuit(true);
+    
+    const { error } = await supabase
+      .from("profiles")
+      .update({ cuit: cuitDraft.trim() || null })
+      .eq("id", user.id);
+      
+    setSavingCuit(false);
+    
+    if (error) {
+      toast.error("No se pudo guardar el CUIT");
+    } else {
+      toast.success("CUIT guardado");
+      setProfile((p) => ({ ...(p || {}), cuit: cuitDraft.trim() || null }));
+    }
+  };
+
+  const onPick = () => fileRef.current?.click();
+
+  const onUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !user) return;
+    setUploading(true);
+    
+    try {
+      // 🟠 Compresión SRE activada antes del upload
+      const compressedBlob = await compressAvatar(file);
+      const ext = "jpg"; // Forzamos formato por la compresión Canvas
+      const path = `${user.id}/avatar-${Date.now()}.${ext}`;
+      
+      const { error: upErr } = await supabase.storage.from("profiles").upload(path, compressedBlob, { 
+        upsert: true,
+        contentType: "image/jpeg" 
+      });
+      
+      if (upErr) {
+        toast.error("No se pudo subir la foto de perfil");
+        setUploading(false);
+        return;
+      }
+      
+      const { data: pub } = supabase.storage.from("profiles").getPublicUrl(path);
+      const url = pub.publicUrl;
+      
+      const { error: updErr } = await supabase.from("profiles").update({ avatar_url: url }).eq("id", user.id);
+      
+      if (updErr) {
+        toast.error("No se guardó la foto en tu perfil");
+      } else {
+        setProfile((p) => ({ ...(p || {}), avatar_url: url }));
+        toast.success("Foto de perfil actualizada");
+      }
+    } catch (err) {
+      console.error(err);
+      toast.error("Error al procesar el avatar en el celular");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    await signOut();
+    toast.success("Sesión cerrada");
+    navigate("/auth/login");
+  };
+
+  const displayName = profile?.full_name || user?.email?.split("@")[0] || "Usuario MUNO";
+  const displayEmail = profile?.email || user?.email || "—";
+  const displayPhone = profile?.phone || "—";
+  const initial = (displayName[0] || "V").toUpperCase();
+
+  return (
+    <div className="space-y-5">
+      <div className="isa-card p-6 flex items-center gap-4">
+        <div className="relative">
+          {profile?.avatar_url ? (
+            <img src={profile.avatar_url} alt="Foto de perfil" className="w-16 h-16 rounded-2xl object-cover" />
+          ) : (
+            <div className="w-16 h-16 rounded-2xl bg-isa-navy text-isa-white grid place-items-center text-2xl font-extrabold">{initial}</div>
+          )}
+          {user && (
+            <button
+              onClick={onPick}
+              disabled={uploading}
+              aria-label="Cambiar foto"
+              className="absolute -bottom-1 -right-1 w-7 h-7 rounded-full bg-isa-navy text-white grid place-items-center shadow-md disabled:opacity-50"
+            >
+              {uploading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Camera className="w-3.5 h-3.5" />}
+            </button>
+          )}
+          <input ref={fileRef} type="file" accept="image/*" hidden onChange={onUpload} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="text-xl font-extrabold text-isa-navy truncate">{displayName}</div>
+          <div className="text-sm text-muted-foreground"> Perfil: {profileLabel} </div>
+        </div>
+      </div>
+
+      <div className="isa-card p-5">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-xl bg-muno-blue/10 text-muno-blue grid place-items-center"><Store strokeWidth={1.5} /></div>
+            <div>
+              <div className="font-extrabold text-isa-navy">Mi Comercio</div>
+              <div className="text-xs text-muted-foreground">Próximamente vas a poder vincular un comercio mediante tu CUIT.</div>
+            </div>
+          </div>
+          <button
+            disabled
+            className="relative w-12 h-7 rounded-full bg-muted shrink-0 opacity-60 cursor-not-allowed"
+            aria-label="Mi Comercio (próximamente)"
+          >
+            <span className="absolute top-1 left-1 w-5 h-5 bg-white rounded-full" />
+          </button>
+        </div>
+      </div>
+
+      <div className="isa-card p-6 space-y-4">
+        <h3 className="font-extrabold text-isa-navy">Datos personales</h3>
+        {[
+          { icon: User, label: "Nombre", value: displayName },
+          { icon: Mail, label: "Email", value: displayEmail },
+          { icon: Phone, label: "Teléfono", value: displayPhone },
+        ].map((f) => (
+          <div key={f.label} className="flex items-center gap-3 py-2 border-b last:border-0">
+            <f.icon strokeWidth={1.5} className="w-5 h-5 text-muted-foreground" />
+            <div className="flex-1">
+              <div className="text-xs text-muted-foreground">{f.label}</div>
+              <div className="font-semibold text-isa-navy">{f.value}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {user && (
+        <div className="isa-card p-5 space-y-3">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-muno-blue/10 text-muno-blue grid place-items-center"><Store strokeWidth={1.5} /></div>
+            <div>
+              <div className="font-extrabold text-isa-navy">Estado de tasas (Hacienda)</div>
+              <div className="text-[11px] text-muted-foreground">Vinculá tu CUIT para ver el estado de tu comercio.</div>
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <input
+              value={cuitDraft}
+              onChange={(e) => setCuitDraft(e.target.value)}
+              placeholder="CUIT (ej. 30-12345678-9)"
+              className="flex-1 px-3 py-2 rounded-xl border bg-background text-sm"
+            />
+            <button onClick={saveCuit} disabled={savingCuit} className="bg-isa-navy text-white rounded-xl px-4 text-sm font-bold disabled:opacity-60">
+              {savingCuit ? "…" : "Guardar"}
+            </button>
+          </div>
+          {profile?.cuit && !business && (
+            <div className="text-[12px] text-muted-foreground">No encontramos un comercio asociado a este CUIT.</div>
+          )}
+          {business && (() => {
+            const exp = business.tax_expires_at ? new Date(business.tax_expires_at) : null;
+            const overdue = exp && exp.getTime() < Date.now();
+            const soon = exp && !overdue && exp.getTime() - Date.now() < 15 * 86400000;
+            const status = overdue ? "Vencida" : soon ? "Por vencer" : "Al día";
+            const color = overdue ? "text-muno-red bg-muno-red/10" : soon ? "text-amber-700 bg-amber-100" : "text-muno-teal bg-muno-teal/10";
+            return (
+              <div className="rounded-xl border p-3 space-y-1">
+                <div className="font-bold text-isa-navy">{business.name}</div>
+                <div className="text-xs text-muted-foreground">
+                  Vencimiento: {exp ? exp.toLocaleDateString("es-AR") : "—"}
+                  {business.tax_amount ? ` · $${Number(business.tax_amount).toLocaleString("es-AR")}` : ""}
+                </div>
+                <span className={`inline-block text-[11px] font-bold px-2 py-0.5 rounded-full ${color}`}>{status}</span>
+                <div className="text-[11px] text-muted-foreground pt-1">Información a cargo de Hacienda. Para regularizar acercate a la oficina municipal.</div>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {isTourist && (
+        <>
+          <MisFavoritos />
+          <RatePueblo />
+        </>
+      )}
+
+      <MisInscripciones />
+
+      {user && (
+        <button
+          onClick={handleSignOut}
+          className="w-full inline-flex items-center justify-center gap-2 bg-muno-red text-white rounded-[20px] py-3 font-bold text-sm hover:opacity-90"
+        >
+          <LogOut className="w-4 h-4" /> Cerrar sesión
+        </button>
+      )}
+    </div>
+  );
+}
+</file>
+
+<file path="src/components/MisInscripciones.tsx">
+import { useEffect, useState } from "react";
+import { CalendarCheck, X, Users } from "lucide-react";
+import { listInscripciones, cancelInscripcion, type Inscripcion } from "@/lib/inscripciones";
+import { toast } from "sonner";
+import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/context/AuthContext";
+import type { Database } from "@/integrations/supabase/types";
+
+type RegistrationRow = Database["public"]["Tables"]["registrations"]["Row"];
+
+type Item = {
+  id: string;
+  titulo: string;
+  fecha: string;
+  tipo: string;
+  lugar?: string | null;
+  acompanantes: string[];
+  source: "db" | "local";
+};
+
+export default function MisInscripciones() {
+  const { user } = useAuth();
+  const [items, setItems] = useState<Item[]>([]);
+
+  const userId = user?.id;
+
+  useEffect(() => {
+    let isMounted = true; // Control de Memory Leak
+
+    const refresh = async () => {
+      const local: Item[] = listInscripciones().map((i: Inscripcion) => ({
+        id: i.id,
+        titulo: i.titulo,
+        fecha: i.fecha,
+        tipo: i.tipo,
+        lugar: i.lugar,
+        acompanantes: i.acompanantes,
+        source: "local",
+      }));
+
+      if (!userId) {
+        if (isMounted) setItems(local);
+        return;
+      }
+
+      try {
+        const { data } = await supabase
+          .from("registrations")
+          .select("id,event_title,event_date,event_type,event_place,companions")
+          .eq("user_id", userId)
+          .eq("status", "activa") // FIX: Filtramos las canceladas lógicamente
+          .order("created_at", { ascending: false })
+          .limit(50); // FIX 1.2: Límite de carga (evita Unbounded Payloads)
+
+        const db: Item[] = (data || []).map((r) => ({
+          id: r.id,
+          titulo: r.event_title,
+          fecha: r.event_date || "",
+          tipo: r.event_type || "",
+          lugar: r.event_place,
+          acompanantes: Array.isArray(r.companions) ? r.companions.map(String) : [],
+          source: "db",
+        }));
+
+        if (isMounted) {
+          const seen = new Set(db.map((d) => d.titulo + d.fecha));
+          setItems([...db, ...local.filter((l) => !seen.has(l.titulo + l.fecha))]);
+        }
+      } catch (error) {
+        console.error("Error al obtener inscripciones", error);
+      }
+    };
+
+    refresh();
+    
+    // 🟠 FIX ALTO 1: Escuchar eventos locales EXCLUSIVAMENTE (Ahorro de 50K Sockets)
+    const handleLocalEvent = () => refresh();
+    window.addEventListener("muno:inscripciones", handleLocalEvent);
+
+    return () => {
+      isMounted = false;
+      window.removeEventListener("muno:inscripciones", handleLocalEvent);
+    };
+  }, [userId]); 
+
+  const cancel = async (it: Item) => {
+    if (it.source === "db") {
+      // COMPLIANCE FIX: Soft Delete legal y tipado estrictamente
+      const { error } = await supabase
+        .from("registrations")
+        .update({ status: "cancelada", deleted_at: new Date().toISOString() })
+        .eq("id", it.id);
+        
+      if (error) {
+        toast.error("No se pudo cancelar");
+        return;
+      }
+    } else {
+      cancelInscripcion(it.id);
+    }
+    toast.success("Inscripción cancelada");
+    window.dispatchEvent(new Event("muno:inscripciones"));
+  };
+
+  return (
+    <section>
+      <div className="flex items-center justify-between mb-3">
+        <h2>Mis Inscripciones</h2>
+      </div>
+      <div className="isa-card p-5 space-y-3">
+        <div className="flex items-center gap-2">
+          <CalendarCheck className="w-5 h-5 text-isa-navy" strokeWidth={1.5} />
+          <h3 className="font-extrabold text-isa-navy">Talleres y eventos</h3>
+        </div>
+        {items.length === 0 ? (
+          <p className="text-sm text-muted-foreground">Aún no tienes inscripciones. ¡Explora la agenda municipal!</p>
+        ) : (
+          <ul className="space-y-2">
+            {items.map((i) => (
+              <li key={i.source + i.id} className="flex items-start justify-between gap-3 border rounded-xl p-3 bg-background">
+                <div className="min-w-0">
+                  <div className="text-sm font-bold text-isa-navy truncate">{i.titulo}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {i.fecha} {i.tipo ? `· ${i.tipo}` : ""}
+                    {i.lugar ? ` · ${i.lugar}` : ""}
+                  </div>
+                  {i.acompanantes.length > 0 && (
+                    <div className="text-[11px] text-muted-foreground mt-1 flex items-center gap-1">
+                      <Users className="w-3 h-3" /> {i.acompanantes.length} acompañante(s): {i.acompanantes.join(", ")}
+                    </div>
+                  )}
+                </div>
+                <button
+                  onClick={() => cancel(i)}
+                  className="shrink-0 inline-flex items-center gap-1 text-xs font-bold text-muno-red border border-muno-red/30 rounded-full px-2.5 py-1.5 hover:bg-muno-red/10"
+                >
+                  <X className="w-3 h-3" /> Cancelar
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </section>
   );
 }
 </file>

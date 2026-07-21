@@ -122,7 +122,8 @@ export default function Lugares() {
         munId = m?.id ?? null;
       }
       
-      let q = supabase.from("content_items").select("*").eq("kind", "Lugar").eq("published", true).order("created_at", { ascending: false });
+      // 🔴 FIX CRÍTICO SRE: Añadimos .limit(60) para proteger la RAM del cliente y limitar el Scan en BD
+      let q = supabase.from("content_items").select("*").eq("kind", "Lugar").eq("published", true).order("created_at", { ascending: false }).limit(60);
       if (munId) q = q.eq("municipality_id", munId);
       
       const { data } = await q;

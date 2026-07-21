@@ -74,6 +74,38 @@ interface CannedPayload {
   municipality_id?: string;
 }
 
+// 🟡 FIX MEDIO SRE: Compresión asíncrona de imágenes en el Panel Admin
+const compressImage = (file: File): Promise<Blob> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.src = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(img.src);
+      const canvas = document.createElement("canvas");
+      const MAX_WIDTH = 1920;
+      const MAX_HEIGHT = 1080;
+      let width = img.width;
+      let height = img.height;
+
+      if (width > height) {
+        if (width > MAX_WIDTH) { height *= MAX_WIDTH / width; width = MAX_WIDTH; }
+      } else {
+        if (height > MAX_HEIGHT) { width *= MAX_HEIGHT / height; height = MAX_HEIGHT; }
+      }
+
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return reject(new Error("Canvas context is null"));
+      ctx.drawImage(img, 0, 0, width, height);
+      canvas.toBlob((blob) => {
+        if (blob) resolve(blob); else reject(new Error("Blob null"));
+      }, "image/jpeg", 0.75);
+    };
+    img.onerror = (err) => reject(err);
+  });
+};
+
 export default function AdminReclamos() {
   const { user } = useAuth();
   const [items, setItems] = useState<Claim[]>([]);
@@ -251,6 +283,7 @@ function ManageDialog({ claim, onClose, onSaved }: { claim: Claim; onClose: () =
   const [status, setStatus] = useState<ClaimStatus>(claim.status);
   const [response, setResponse] = useState(claim.resolution_note || "");
   const [photo, setPhoto] = useState<string | null>(claim.resolution_photos?.[0] || null);
+  const [photoFile, setPhotoFile] = useState<File | null>(null); // Añadido estado para el archivo real
   const [crew, setCrew] = useState<string>("");
   const [canned, setCanned] = useState<Canned[]>([]);
   const [saving, setSaving] = useState(false);
@@ -271,7 +304,10 @@ function ManageDialog({ claim, onClose, onSaved }: { claim: Claim; onClose: () =
 
   const onUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
-    if (f) setPhoto(URL.createObjectURL(f));
+    if (f) {
+      setPhotoFile(f);
+      setPhoto(URL.createObjectURL(f));
+    }
   };
 
   const save = async () => {
@@ -282,10 +318,37 @@ function ManageDialog({ claim, onClose, onSaved }: { claim: Claim; onClose: () =
     setSaving(true);
     
     const updatePayload: ClaimUpdate = { status };
+    let finalPhotoUrl = photo;
+
     if (status === "Cerrado") {
       updatePayload.resolution_note = response.trim();
-      if (photo) updatePayload.resolution_photos = [photo];
       updatePayload.resolved_at = new Date().toISOString();
+
+      // 🟡 FIX MEDIO SRE: Subida real del archivo al bucket en vez de guardar Blob URL local
+      if (photoFile) {
+        try {
+          const compressedBlob = await compressImage(photoFile);
+          const path = `claims/resolutions/${claim.id}-${Date.now()}.jpg`;
+          const { error: uploadError } = await supabase.storage
+            .from("avatars") 
+            .upload(path, compressedBlob, { contentType: "image/jpeg", cacheControl: "31536000", upsert: true });
+          
+          if (!uploadError) {
+            const { data } = supabase.storage.from("avatars").getPublicUrl(path);
+            finalPhotoUrl = data.publicUrl;
+          } else {
+             toast.error("Error al subir imagen de resolución");
+             setSaving(false);
+             return;
+          }
+        } catch (e) {
+           console.error("Compression error", e);
+        }
+      }
+      
+      if (finalPhotoUrl && !finalPhotoUrl.startsWith("blob:")) {
+        updatePayload.resolution_photos = [finalPhotoUrl];
+      }
     } else if (response.trim()) {
       updatePayload.resolution_note = response.trim();
     }
@@ -398,7 +461,7 @@ function ManageDialog({ claim, onClose, onSaved }: { claim: Claim; onClose: () =
               {photo ? (
                 <div className="relative">
                   <img src={photo} className="w-full h-40 object-cover rounded-xl" />
-                  <button onClick={() => setPhoto(null)} className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/60 text-white grid place-items-center"><X className="w-4 h-4" /></button>
+                  <button onClick={() => { setPhoto(null); setPhotoFile(null); }} className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/60 text-white grid place-items-center"><X className="w-4 h-4" /></button>
                 </div>
               ) : (
                 <button onClick={() => fileRef.current?.click()} className="w-full h-32 rounded-xl border-2 border-dashed grid place-items-center text-muted-foreground">

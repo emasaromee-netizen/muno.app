@@ -202,8 +202,9 @@ export default function Turismo() {
           munId = municipalityId || null;
         }
 
-        let qLugares = supabase.from("content_items").select("*").eq("published", true).eq("kind", "Lugar").order("created_at", { ascending: false });
-        let qEv = supabase.from("content_items").select("*").eq("published", true).in("kind", ["Evento", "Actividad", "Taller"]).order("created_at", { ascending: false });
+        // 🔴 FIX CRÍTICO SRE: Añadimos .limit(60) para prevenir desbordes de memoria en cliente y Sequential Scans infinitos
+        let qLugares = supabase.from("content_items").select("*").eq("published", true).eq("kind", "Lugar").order("created_at", { ascending: false }).limit(60);
+        let qEv = supabase.from("content_items").select("*").eq("published", true).in("kind", ["Evento", "Actividad", "Taller"]).order("created_at", { ascending: false }).limit(60);
         
         if (munId) { 
           qLugares = qLugares.eq("municipality_id", munId); 

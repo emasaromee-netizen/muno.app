@@ -71,6 +71,11 @@ export default function NotificationsBell() {
         .order("created_at", { ascending: false })
         .limit(30);
 
+      // 🟡 FIX MEDIO SRE: Filtrado estricto por municipio en la carga inicial (Evita Cross-Tenant Data Leak)
+      if (municipalityId) {
+        query = query.eq("municipality_id", municipalityId);
+      }
+
       if (userId) {
         query = query.or(`user_id.eq.${userId},and(user_id.is.null,audience.in.(${audienceFilter.join(",")}))`);
       } else {
@@ -100,7 +105,7 @@ export default function NotificationsBell() {
     load();
 
     // 🔴 FIX CRÍTICO SRE: Prevención de Tormenta de Difusión (Broadcast Storm)
-    // Extraemos el 'payload.new' directamente de la memoria del socket. Cero lecturas a disco.
+    // Extraemos el 'payload.new' directamente de la memoria del socket en lugar de hacer 'load()'. Cero lecturas a disco.
     if (municipalityId) {
       const muniChannel = supabase
         .channel(`notif_muni_${municipalityId}`)

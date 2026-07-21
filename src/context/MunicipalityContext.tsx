@@ -60,7 +60,10 @@ export function MunicipalityProvider({ children }: { children: ReactNode }) {
     let isMounted = true;
 
     const fetchDefaultMunicipality = async () => {
-      if (!municipalityInfo) {
+      // Usamos el valor del local storage en lugar del state para evitar referencias obsoletas
+      const rawInfo = localStorage.getItem(KEY_INFO);
+      
+      if (!rawInfo) {
         try {
           const { data } = await supabase
             .from("municipalities")
@@ -95,7 +98,8 @@ export function MunicipalityProvider({ children }: { children: ReactNode }) {
     return () => {
       isMounted = false;
     };
-  }, [municipalityInfo]);
+    // 🟠 FIX ALTO: Array de dependencias vacío. Bootstrap de un solo uso. Rompe el bucle de montado infinito.
+  }, []);
 
   const setMunicipality = async (name: string, explicitId?: string) => {
     if (!name) {

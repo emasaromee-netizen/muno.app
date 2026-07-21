@@ -2,21 +2,9 @@ import { useEffect, useState } from "react";
 import { CalendarCheck, X, Users } from "lucide-react";
 import { listInscripciones, cancelInscripcion, type Inscripcion } from "@/lib/inscripciones";
 import { toast } from "sonner";
-import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
-import type { Database } from "@/integrations/supabase/types";
 
-type RegistrationRow = Database["public"]["Tables"]["registrations"]["Row"];
-
-type Item = {
-  id: string;
-  titulo: string;
-  fecha: string;
-  tipo: string;
-  lugar?: string | null;
-  acompanantes: string[];
-  source: "db" | "local";
-};
+type Item = Inscripcion & { source: "db" };
 
 export default function MisInscripciones() {
   const { user } = useAuth();
@@ -28,44 +16,17 @@ export default function MisInscripciones() {
     let isMounted = true; // Control de Memory Leak
 
     const refresh = async () => {
-      const local: Item[] = listInscripciones().map((i: Inscripcion) => ({
-        id: i.id,
-        titulo: i.titulo,
-        fecha: i.fecha,
-        tipo: i.tipo,
-        lugar: i.lugar,
-        acompanantes: i.acompanantes,
-        source: "local",
-      }));
-
       if (!userId) {
-        if (isMounted) setItems(local);
+        if (isMounted) setItems([]);
         return;
       }
 
       try {
-        const { data } = await supabase
-          .from("registrations")
-          .select("id,event_title,event_date,event_type,event_place,companions")
-          .eq("user_id", userId)
-          .eq("status", "activa") // FIX: Filtramos las canceladas lógicamente
-          .is("deleted_at", null) // 🟠 FIX ALTO SRE: Fuerza a PostgreSQL a usar el índice parcial idx_registrations_user_active
-          .order("created_at", { ascending: false })
-          .limit(50); // FIX 1.2: Límite de carga (evita Unbounded Payloads)
-
-        const db: Item[] = (data || []).map((r) => ({
-          id: r.id,
-          titulo: r.event_title,
-          fecha: r.event_date || "",
-          tipo: r.event_type || "",
-          lugar: r.event_place,
-          acompanantes: Array.isArray(r.companions) ? r.companions.map(String) : [],
-          source: "db",
-        }));
-
+        // 🔴 FIX TS: Esperamos la promesa y le pasamos el userId
+        const dbInscripciones = await listInscripciones(userId);
+        
         if (isMounted) {
-          const seen = new Set(db.map((d) => d.titulo + d.fecha));
-          setItems([...db, ...local.filter((l) => !seen.has(l.titulo + l.fecha))]);
+          setItems(dbInscripciones.map((i) => ({ ...i, source: "db" })));
         }
       } catch (error) {
         console.error("Error al obtener inscripciones", error);
@@ -85,22 +46,14 @@ export default function MisInscripciones() {
   }, [userId]); 
 
   const cancel = async (it: Item) => {
-    if (it.source === "db") {
-      // COMPLIANCE FIX: Soft Delete legal y tipado estrictamente
-      const { error } = await supabase
-        .from("registrations")
-        .update({ status: "cancelada", deleted_at: new Date().toISOString() })
-        .eq("id", it.id);
-        
-      if (error) {
-        toast.error("No se pudo cancelar");
-        return;
-      }
-    } else {
-      cancelInscripcion(it.id);
+    try {
+      // COMPLIANCE FIX: Soft Delete legal asíncrono
+      await cancelInscripcion(it.id);
+      toast.success("Inscripción cancelada");
+      // El helper ya dispara el evento "muno:inscripciones" para auto-recargar
+    } catch (err) {
+      toast.error("No se pudo cancelar");
     }
-    toast.success("Inscripción cancelada");
-    window.dispatchEvent(new Event("muno:inscripciones"));
   };
 
   return (

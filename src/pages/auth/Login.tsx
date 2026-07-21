@@ -36,8 +36,13 @@ export default function Login() {
       email: parsed.data.email,
       password: parsed.data.password,
     });
-    setSubmitting(false);
+    
+    // 🟡 FIX MEDIO SRE (Claude): Condición de Carrera en Desmontaje (Race Condition)
+    // Solo liberamos el Loading State si hubo un error. Si es exitoso, AuthContext
+    // nos desmontará automáticamente. Intentar hacer setSubmitting(false) acá 
+    // lanzaría un error de Memory Leak por "React state update on an unmounted component".
     if (error) {
+      setSubmitting(false);
       toast({
         title: "No pudimos ingresar",
         description: error.message.includes("Invalid")

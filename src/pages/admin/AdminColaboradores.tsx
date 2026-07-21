@@ -51,7 +51,11 @@ export default function AdminColaboradores() {
   const myArea = area || (isTourismChief ? "Turismo" : isMayor || isAdmin ? "Intendencia" : null);
   
   // SOLUCIÓN QUIRÚRGICA: Uso de la directiva centralizada de seguridad
-  const canManage = can(roles, area, PERMISSIONS.USERS_MANAGE);
+  type AppRoles = Parameters<typeof can>[0];
+  const safeRoles = roles as AppRoles;
+  
+  const canManage = can(safeRoles, area, PERMISSIONS.USERS_MANAGE);
+  const canViewAll = can(safeRoles, area, PERMISSIONS.USERS_VIEW_ALL); // 🔴 FIX SRE: Traer la capacidad formal
 
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
@@ -84,7 +88,8 @@ export default function AdminColaboradores() {
         `)
         .eq("role", "resident");
 
-      const { data: urData } = isAdmin || isMayor ? await q : await q.eq("area", myArea);
+      // 🔴 FIX ALTO (Google AI Studio): Refactor de validación de carga basada en capacidades (can()), NO en roles
+      const { data: urData } = canViewAll ? await q : await q.eq("area", myArea);
       
       if (isMounted.current) {
         // Tipado estricto para eliminar el error de 'any'
@@ -119,7 +124,7 @@ export default function AdminColaboradores() {
     } finally {
       if (isMounted.current) setLoading(false);
     }
-  }, [myArea, isAdmin, isMayor]);
+  }, [myArea, canViewAll]);
 
   useEffect(() => { 
     isMounted.current = true;

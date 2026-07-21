@@ -156,6 +156,13 @@ export default function MiComercio() {
     }
     
     setSaving(true);
+
+    // 🔴 FIX CRÍTICO SRE: Obtener el municipio real del comerciante
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("municipality_id")
+      .eq("id", user.id)
+      .maybeSingle();
     
     const payload = {
       owner_id: user.id,
@@ -163,6 +170,7 @@ export default function MiComercio() {
       type: parsed.data.type,
       address: parsed.data.address,
       schedule: parsed.data.schedule || null,
+      municipality_id: profile?.municipality_id || null, // Aislamiento explícito
     };
     
     const { data, error } = businessId

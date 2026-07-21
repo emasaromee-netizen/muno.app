@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { X, CheckCircle2 } from "lucide-react";
-import { addInscripcion } from "@/lib/inscripciones";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
@@ -13,7 +12,7 @@ interface Props {
     id: string;
     titulo: string;
     fecha: string;
-    tipo: "Cultura" | "Deportes" | "Taller";
+    tipo: "Cultura" | "Deportes" | "Taller" | string;
     lugar?: string;
     municipality_id?: string | null; // Corrección quirúrgica P1: Propagar el tenant
   } | null;
@@ -34,6 +33,7 @@ type RegistrationPayload = {
   guest_email?: string;
   guest_city?: string;
   guest_country?: string;
+  status?: string;
 };
 
 export default function InscripcionDialog({ open, onClose, onSuccess, evento }: Props) {
@@ -106,15 +106,6 @@ export default function InscripcionDialog({ open, onClose, onSuccess, evento }: 
 
     setSubmitting(true);
 
-    addInscripcion({
-      eventoId: evento.id,
-      titulo: evento.titulo,
-      fecha: evento.fecha,
-      tipo: evento.tipo,
-      lugar: evento.lugar,
-      acompanantes: Array.from({ length: Math.max(0, p - 1) }, (_, i) => `Acompañante ${i + 1}`),
-    });
-
     const payload: RegistrationPayload = {
       event_id: evento.id,
       event_title: evento.titulo,
@@ -122,8 +113,9 @@ export default function InscripcionDialog({ open, onClose, onSuccess, evento }: 
       event_type: evento.tipo,
       event_place: evento.lugar ?? null,
       people_count: p,
-      companions: [],
+      companions: Array.from({ length: Math.max(0, p - 1) }, (_, i) => `Acompañante ${i + 1}`),
       municipality_id: evento.municipality_id ?? null, // Corrección quirúrgica P1: Previene contaminación
+      status: "activa"
     };
     
     if (user) {
@@ -154,6 +146,7 @@ export default function InscripcionDialog({ open, onClose, onSuccess, evento }: 
     
     toast.success("¡Inscripción exitosa!");
     setDone(true);
+    // Refrescamos la UI local
     window.dispatchEvent(new Event("muno:inscripciones"));
     onSuccess?.(evento.id);
   };

@@ -6,6 +6,11 @@ import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
 import StaffNewsWidget from "@/components/admin/StaffNewsWidget";
 
+// 🔴 FIX SRE: Importamos el motor unificado de permisos
+import { can } from "@/security/can";
+import { PERMISSIONS } from "@/security/permissions";
+type AppRoles = Parameters<typeof can>[0];
+
 // SOLUCIÓN TS: Interfaz para las propiedades de la tarjeta
 interface CardProps {
   icon: React.ElementType;
@@ -37,8 +42,12 @@ interface DBAnnouncement {
 }
 
 function InternalAnnouncement() {
-  const { user, roles } = useAuth();
-  const isAdmin = roles.includes("admin");
+  const { user, roles, area } = useAuth();
+  
+  // 🔴 FIX ALTO (Google AI Studio): Refactor de Lógica Hardcodeada de Roles
+  const safeRoles = roles as AppRoles;
+  const canPublish = can(safeRoles, area, PERMISSIONS.CONTENT_PUBLISH) || can(safeRoles, area, PERMISSIONS.SYSTEM_ADMIN);
+
   const [row, setRow] = useState<DBAnnouncement | null>(null);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
@@ -73,6 +82,7 @@ function InternalAnnouncement() {
     }
     setSaving(true);
     
+    // Al no especificar municipality_id, la RLS y el trigger ya lo protegen a nivel SQL
     const payload = { message, updated_by: user?.id };
     
     const res = row?.id
@@ -106,7 +116,7 @@ function InternalAnnouncement() {
           <div className="text-[10px] uppercase tracking-[0.18em] font-bold text-isa-navy/70">
             Novedades para Jefes de Área
           </div>
-          {isAdmin && !editing && (
+          {canPublish && !editing && (
             <button
               onClick={() => setEditing(true)}
               className="inline-flex items-center gap-1.5 text-[12px] font-bold text-isa-navy hover:opacity-80 min-h-[36px] px-2"
@@ -149,7 +159,7 @@ function InternalAnnouncement() {
           </div>
         ) : (
           <p className="text-[14px] font-semibold leading-snug text-isa-navy mt-1">
-            {row?.message || (isAdmin
+            {row?.message || (canPublish
               ? "Aún no hay novedades. Tocá Crear para publicar el primer anuncio."
               : "Sin novedades por ahora.")}
           </p>

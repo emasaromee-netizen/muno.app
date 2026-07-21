@@ -40,11 +40,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // Declaramos loadRoles antes del useEffect para poder usar await de forma segura
   const loadRoles = async (uid: string) => {
+    // 🟠 FIX MEDIO SRE: Previene inyección de estados zombi si el usuario cerró sesión rápido
+    const { data: { session: preSession } } = await supabase.auth.getSession();
+    if (!preSession || preSession.user.id !== uid) return;
+
     const { data } = await supabase
       .from("user_roles")
       .select("role, area")
       .eq("user_id", uid)
       .eq("active", true); // Corrección quirúrgica P0: impide bypass de roles inactivos
+
+    // 🟠 Segunda validación post-query para mitigar Race Conditions extremas
+    const { data: { session: postSession } } = await supabase.auth.getSession();
+    if (!postSession || postSession.user.id !== uid) return;
 
     // Tipado estricto para eliminar el error de 'any'
     const rows = (data || []) as { role: AppRole; area: string | null }[];

@@ -135,6 +135,13 @@ export default function Reclamos() {
     }
     setSaving(true);
 
+    // 🔴 FIX CRÍTICO SRE: Obtener el municipio real del ciudadano
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("municipality_id")
+      .eq("id", user.id)
+      .maybeSingle();
+
     let uploadedUrls: string[] = [];
 
     // 🟠 FIX MEDIO SRE: Subida y compresión en Paralelo (Promise.all)
@@ -174,7 +181,8 @@ export default function Reclamos() {
     const isOtro = category?.id === "otro";
     const finalLocation = location || (isOtro ? "Ubicación automática (GPS del dispositivo)" : "");
     
-    const payload: ClaimPayload = {
+    // 🔴 INYECCIÓN DEL MUNICIPIO EVITANDO EL FALLBACK AL PUEBLO POR DEFECTO
+    const payload: ClaimPayload & { municipality_id: string | null } = {
       user_id: user.id,
       category: category?.label || category?.id || "General",
       area: finalArea,
@@ -182,6 +190,7 @@ export default function Reclamos() {
       description: description || `${category?.label} - ${finalLocation}`,
       evidence_photos: uploadedUrls, 
       status: "Pendiente",
+      municipality_id: profile?.municipality_id || null, 
     };
 
     const { data, error } = await supabase

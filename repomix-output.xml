@@ -271,6 +271,8 @@ supabase/
     20260720111500_fix_trigger_handle_new_user_null.sql
     20260720130000_sre_titanium_indexes.sql
     20260721024200_sre_audit_fixes.sql
+    20260721120000_sre_final_audit.sql
+    20260721150000_sre_bola_security_fixes.sql
   config.toml
 .env.example
 .gitignore
@@ -291,6 +293,136 @@ vitest.config.ts
 
 <files>
 This section contains the contents of the repository's files.
+
+<file path="supabase/migrations/20260721150000_sre_bola_security_fixes.sql">
+-- 🔴 CRÍTICO 1: BOLA Fix para Jefes de Área en content_items
+DROP POLICY IF EXISTS "content_area_manager_insert" ON public.content_items;
+DROP POLICY IF EXISTS "content_area_manager_update" ON public.content_items;
+DROP POLICY IF EXISTS "content_area_manager_delete" ON public.content_items;
+
+CREATE POLICY "content_area_manager_insert" ON public.content_items
+  FOR INSERT WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM public.user_roles
+      WHERE user_roles.user_id = auth.uid()
+        AND user_roles.role = 'area_manager'::app_role
+        AND user_roles.area = content_items.area
+        AND user_roles.municipality_id = content_items.municipality_id
+        AND user_roles.active = true
+    )
+  );
+
+CREATE POLICY "content_area_manager_update" ON public.content_items
+  FOR UPDATE USING (
+    EXISTS (
+      SELECT 1 FROM public.user_roles
+      WHERE user_roles.user_id = auth.uid()
+        AND user_roles.role = 'area_manager'::app_role
+        AND user_roles.area = content_items.area
+        AND user_roles.municipality_id = content_items.municipality_id
+        AND user_roles.active = true
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM public.user_roles
+      WHERE user_roles.user_id = auth.uid()
+        AND user_roles.role = 'area_manager'::app_role
+        AND user_roles.area = content_items.area
+        AND user_roles.municipality_id = content_items.municipality_id
+        AND user_roles.active = true
+    )
+  );
+
+CREATE POLICY "content_area_manager_delete" ON public.content_items
+  FOR DELETE USING (
+    EXISTS (
+      SELECT 1 FROM public.user_roles
+      WHERE user_roles.user_id = auth.uid()
+        AND user_roles.role = 'area_manager'::app_role
+        AND user_roles.area = content_items.area
+        AND user_roles.municipality_id = content_items.municipality_id
+        AND user_roles.active = true
+    )
+  );
+
+-- 🔴 CRÍTICO 2: BOLA Fix para Jefes de Turismo
+DROP POLICY IF EXISTS tourism_manage_insert ON public.tourism_items;
+DROP POLICY IF EXISTS tourism_manage_update ON public.tourism_items;
+DROP POLICY IF EXISTS tourism_manage_delete ON public.tourism_items;
+
+CREATE POLICY tourism_manage_insert ON public.tourism_items
+  FOR INSERT WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM public.user_roles
+      WHERE user_roles.user_id = auth.uid()
+        AND user_roles.role IN ('admin'::app_role, 'tourism_chief'::app_role)
+        AND user_roles.municipality_id = tourism_items.municipality_id
+        AND user_roles.active = true
+    )
+  );
+
+CREATE POLICY tourism_manage_update ON public.tourism_items
+  FOR UPDATE USING (
+    EXISTS (
+      SELECT 1 FROM public.user_roles
+      WHERE user_roles.user_id = auth.uid()
+        AND user_roles.role IN ('admin'::app_role, 'tourism_chief'::app_role)
+        AND user_roles.municipality_id = tourism_items.municipality_id
+        AND user_roles.active = true
+    )
+  );
+
+CREATE POLICY tourism_manage_delete ON public.tourism_items
+  FOR DELETE USING (
+    EXISTS (
+      SELECT 1 FROM public.user_roles
+      WHERE user_roles.user_id = auth.uid()
+        AND user_roles.role IN ('admin'::app_role, 'tourism_chief'::app_role)
+        AND user_roles.municipality_id = tourism_items.municipality_id
+        AND user_roles.active = true
+    )
+  );
+
+-- 🔴 CRÍTICO 3: BOLA Fix para Comercios y Hacienda
+DROP POLICY IF EXISTS "businesses_owner_update" ON public.businesses;
+CREATE POLICY "businesses_owner_update" ON public.businesses
+  FOR UPDATE USING (
+    auth.uid() = owner_id
+    OR EXISTS (
+      SELECT 1 FROM public.user_roles
+      WHERE user_roles.user_id = auth.uid()
+        AND user_roles.role = 'admin'::app_role
+        AND user_roles.municipality_id = businesses.municipality_id
+        AND user_roles.active = true
+    )
+  );
+
+DROP POLICY IF EXISTS "businesses_owner_insert" ON public.businesses;
+CREATE POLICY "businesses_owner_insert" ON public.businesses
+  FOR INSERT WITH CHECK (
+    auth.uid() = owner_id
+    OR EXISTS (
+      SELECT 1 FROM public.user_roles
+      WHERE user_roles.user_id = auth.uid()
+        AND user_roles.role = 'admin'::app_role
+        AND user_roles.municipality_id = businesses.municipality_id
+        AND user_roles.active = true
+    )
+  );
+
+DROP POLICY IF EXISTS "businesses_admin_delete" ON public.businesses;
+CREATE POLICY "businesses_admin_delete" ON public.businesses
+  FOR DELETE USING (
+    EXISTS (
+      SELECT 1 FROM public.user_roles
+      WHERE user_roles.user_id = auth.uid()
+        AND user_roles.role = 'admin'::app_role
+        AND user_roles.municipality_id = businesses.municipality_id
+        AND user_roles.active = true
+    )
+  );
+</file>
 
 <file path="docs/99_Anexos/01_Manual_Operaciones.md">
 # DOC-099 — Anexos: Manual de Operaciones y Glosario Técnico
@@ -3506,6 +3638,7 @@ export default function MisReclamos() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    let isMounted = true; // 🔴 FIX MEDIO: Bandera de montado para evitar Memory Leaks
     if (!user) {
       setLoading(false);
       return;
@@ -3517,9 +3650,15 @@ export default function MisReclamos() {
       .order("created_at", { ascending: false })
       .limit(20)
       .then(({ data }) => {
-        setItems((data as Claim[]) || []);
-        setLoading(false);
+        if (isMounted) {
+          setItems((data as Claim[]) || []);
+          setLoading(false);
+        }
       });
+
+    return () => {
+      isMounted = false; // Compuerta cerrada si el usuario abandona la vista
+    };
   }, [user]);
 
   return (
@@ -7091,47 +7230,18 @@ END;
 $$;
 </file>
 
-<file path="supabase/migrations/20260721024200_sre_audit_fixes.sql">
--- 🔴 FIX CRÍTICO 1: Reescribir el RPC para evitar la Explosión Cartesiana
--- Destruimos la función anterior porque cambió la estructura de retorno
-DROP FUNCTION IF EXISTS get_municipality_counts();
+<file path="supabase/migrations/20260721120000_sre_final_audit.sql">
+-- 🔴 CRÍTICO 1: Índices para la tabla más leída de la plataforma (Turismo/Lugares/Eventos)
+CREATE INDEX IF NOT EXISTS idx_content_items_muni_kind_pub_created
+ON public.content_items (municipality_id, kind, created_at DESC)
+WHERE published = true;
 
--- Creamos la versión optimizada con subconsultas aisladas (O(N) en lugar de O(N^4))
-CREATE OR REPLACE FUNCTION get_municipality_counts()
-RETURNS TABLE(
-    municipality_id uuid, 
-    name text, 
-    profiles_count bigint, 
-    businesses_count bigint, 
-    claims_count bigint, 
-    announcements_count bigint
-) AS $$
-BEGIN
-  RETURN QUERY
-  SELECT
-    m.id, 
-    m.name,
-    (SELECT count(*) FROM public.profiles p WHERE p.municipality_id = m.id) as profiles_count,
-    (SELECT count(*) FROM public.businesses b WHERE b.municipality_id = m.id) as businesses_count,
-    (SELECT count(*) FROM public.claims c WHERE c.municipality_id = m.id) as claims_count,
-    (SELECT count(*) FROM public.staff_announcements sa WHERE sa.municipality_id = m.id) as announcements_count
-  FROM public.municipalities m;
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+-- 🔴 CRÍTICO 2: Índices para contadores masivos (Salva la función get_municipality_counts)
+CREATE INDEX IF NOT EXISTS idx_profiles_municipality ON public.profiles (municipality_id);
+CREATE INDEX IF NOT EXISTS idx_staff_announcements_muni ON public.staff_announcements (municipality_id);
 
--- 🔴 FIX CRÍTICO 2: Índices compuestos faltantes en Claims (Reclamos)
-CREATE INDEX IF NOT EXISTS idx_claims_created_desc ON public.claims (created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_claims_muni_created_desc ON public.claims (municipality_id, created_at DESC);
-
--- 🔴 FIX CRÍTICO 3: Arreglar el RLS de Registrations que anulaba la Primary Key
-DROP POLICY IF EXISTS "registrations_public_insert" ON public.registrations;
-CREATE POLICY "registrations_public_insert" ON public.registrations FOR INSERT 
-WITH CHECK (
-  EXISTS (
-    SELECT 1 FROM public.content_items 
-    WHERE content_items.id = registrations.event_id::uuid
-  )
-);
+-- 🟡 MEDIO 1: Índice para NotificationsBell filtrado por municipio
+CREATE INDEX IF NOT EXISTS idx_notifications_muni_created ON public.notifications (municipality_id, created_at DESC);
 </file>
 
 <file path=".env.example">
@@ -10791,74 +10901,6 @@ export const lovable = {
 };
 </file>
 
-<file path="src/lib/analytics.ts">
-import { supabase } from "@/integrations/supabase/client";
-
-// SOLUCIÓN TS: Tipado estricto sin usar 'any' para proteger el JSONB
-export type IntentEvent = {
-  ts: number;
-  kind: "search_zone" | "category_click" | "wifi_lead" | "reserva_lead" | "rating";
-  zone?: string;
-  category?: string;
-  userType?: string;
-  origin?: string;
-  rating?: number;
-  meta?: Record<string, string | number | boolean | null>; 
-};
-
-const KEY = "muno_analytics_v1";
-
-export const track = async (e: Omit<IntentEvent, "ts">) => {
-  // 1. Guardar localmente (Mantenemos fallback offline)
-  const list = readAll();
-  list.push({ ...e, ts: Date.now() });
-  try {
-    localStorage.setItem(KEY, JSON.stringify(list));
-  } catch (err) {
-    console.warn("[ANALYTICS] LocalStorage lleno o deshabilitado:", err);
-  }
-
-  // 2. Transmitir de forma asíncrona a Supabase (Fire-and-forget)
-  try {
-    await supabase.from("analytics_events").insert({
-      kind: e.kind,
-      zone: e.zone || null,
-      category: e.category || null,
-      user_type: e.userType || null,
-      meta: e.meta || {},
-    });
-  } catch (err) {
-    // Silenciamos el error para no arruinar la experiencia del usuario si falla la conexión móvil
-    console.warn("[ANALYTICS] Falló sincronización remota:", err);
-  }
-};
-
-export const readAll = (): IntentEvent[] => {
-  try { 
-    return JSON.parse(localStorage.getItem(KEY) || "[]"); 
-  } catch { 
-    return []; 
-  }
-};
-
-// SOLUCIÓN TS: Eliminación del casteo 'as any' usando conversión segura
-export const groupCount = (
-  items: IntentEvent[], 
-  key: keyof IntentEvent
-): { name: string; count: number }[] => {
-  const acc: Record<string, number> = {};
-  items.forEach((i) => {
-    const val = i[key];
-    // Convertimos a string de forma segura. Si es un objeto (como 'meta') o nulo, lo ignoramos.
-    const v = val !== undefined && val !== null && typeof val !== "object" ? String(val) : "—";
-    acc[v] = (acc[v] || 0) + 1;
-  });
-  return Object.entries(acc)
-    .map(([name, count]) => ({ name, count }))
-    .sort((a, b) => b.count - a.count);
-};
-</file>
-
 <file path="src/lib/audit.ts">
 import { supabase } from "@/integrations/supabase/client";
 
@@ -14076,6 +14118,71 @@ CREATE INDEX IF NOT EXISTS idx_activity_logs_muni_created_desc
 ON public.activity_logs (municipality_id, created_at DESC);
 </file>
 
+<file path="supabase/migrations/20260721024200_sre_audit_fixes.sql">
+-- 🔴 FIX CRÍTICO 1: Reescribir el RPC para evitar la Explosión Cartesiana
+-- Destruimos la función anterior porque cambió la estructura de retorno
+DROP FUNCTION IF EXISTS get_municipality_counts();
+
+-- Creamos la versión optimizada con subconsultas aisladas (O(N) en lugar de O(N^4))
+CREATE OR REPLACE FUNCTION get_municipality_counts()
+RETURNS TABLE(
+    municipality_id uuid, 
+    name text, 
+    profiles_count bigint, 
+    businesses_count bigint, 
+    claims_count bigint, 
+    announcements_count bigint
+) AS $$
+BEGIN
+  RETURN QUERY
+  SELECT
+    m.id, 
+    m.name,
+    (SELECT count(*) FROM public.profiles p WHERE p.municipality_id = m.id) as profiles_count,
+    (SELECT count(*) FROM public.businesses b WHERE b.municipality_id = m.id) as businesses_count,
+    (SELECT count(*) FROM public.claims c WHERE c.municipality_id = m.id) as claims_count,
+    (SELECT count(*) FROM public.staff_announcements sa WHERE sa.municipality_id = m.id) as announcements_count
+  FROM public.municipalities m;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- 🔴 FIX CRÍTICO 2: Índices compuestos faltantes en Claims (Reclamos)
+CREATE INDEX IF NOT EXISTS idx_claims_created_desc ON public.claims (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_claims_muni_created_desc ON public.claims (municipality_id, created_at DESC);
+
+-- 🔴 FIX CRÍTICO 3: Arreglar el RLS de Registrations que anulaba la Primary Key
+DROP POLICY IF EXISTS "registrations_public_insert" ON public.registrations;
+CREATE POLICY "registrations_public_insert" ON public.registrations FOR INSERT 
+WITH CHECK (
+  EXISTS (
+    SELECT 1 FROM public.content_items 
+    WHERE content_items.id = registrations.event_id::uuid
+  )
+);
+
+-- 🔴 CRÍTICO 1: Limpieza de función innecesaria (la columna ya es UUID nativo)
+DROP FUNCTION IF EXISTS public.is_valid_uuid(text);
+
+-- 🔴 CRÍTICO 1 (Parte 2): Política RLS perfecta y pura (UUID contra UUID sin casteos)
+-- Al ser UUID nativo, Postgres rechaza strings inválidos automáticamente antes de evaluar el RLS (Zero Seq Scans)
+DROP POLICY IF EXISTS "registrations_public_insert" ON public.registrations;
+CREATE POLICY "registrations_public_insert" ON public.registrations FOR INSERT 
+WITH CHECK (
+  EXISTS (
+    SELECT 1 FROM public.content_items 
+    WHERE content_items.id = registrations.event_id
+  )
+);
+
+-- 🟠 ALTO 1: Índices para las bandejas históricas del vecino
+CREATE INDEX IF NOT EXISTS idx_claims_user_id ON public.claims (user_id);
+CREATE INDEX IF NOT EXISTS idx_registrations_user_id ON public.registrations (user_id);
+CREATE INDEX IF NOT EXISTS idx_tourist_favorites_user_id ON public.tourist_favorites (user_id);
+
+-- 🟡 MEDIO 1: Índice compuesto de cobertura para políticas RLS de reclamos
+CREATE INDEX IF NOT EXISTS idx_claims_muni_area_status ON public.claims (municipality_id, area, status);
+</file>
+
 <file path="supabase/config.toml">
 project_id = "jljjgehinjqpwkrixbnm"
 </file>
@@ -14580,24 +14687,24 @@ type Item = {
 // Extraemos el tipo estricto que espera la función can() de forma automática
 type AppRoles = Parameters<typeof can>[0];
 
-// Generación dinámica de menú basada estrictamente en PERMISOS, no en roles hardcodeados.
+// Generación dinámica de menú basada estrictamente en PERMISOS (Fix SRE: Deuda Técnica)
 function generateMenu(roles: string[], area: string): Item[] {
   const menu: Item[] = [];
   
-  // Casteo seguro de TypeScript: Le garantizamos al compilador que este array de strings
-  // contiene los roles oficiales de la app para que la función can() no arroje error.
+  // Casteo seguro de TypeScript para el motor de permisos
   const safeRoles = roles as AppRoles;
 
   // Módulo Global ISA
-  if (can(safeRoles, area, PERMISSIONS.ANALYTICS_VIEW) && (roles.includes("isa_super_admin") || roles.includes("isa_consultant"))) {
+  if (can(safeRoles, area, PERMISSIONS.SYSTEM_ADMIN) && (roles.includes("isa_super_admin") || roles.includes("isa_consultant"))) {
     return [{ to: "/isa/panel", label: "Panel ISA", icon: BarChart3 }];
   }
 
   // Dashboard General (Todos los internos lo ven)
   menu.push({ to: "/admin", label: "Inicio", icon: LayoutDashboard });
 
-  // Intendente Dashboard Ejecutivo
-  if (roles.includes("mayor")) {
+  // Intendente Dashboard Ejecutivo (Solo lectura analítica sin poder crear contenido)
+  const isMayor = can(safeRoles, area, PERMISSIONS.ANALYTICS_VIEW) && !can(safeRoles, area, PERMISSIONS.CONTENT_CREATE);
+  if (isMayor) {
     menu.push({ to: "/admin/dashboard-intendente", label: "Dashboard Ejecutivo", icon: LayoutDashboard });
   }
 
@@ -14660,12 +14767,12 @@ export default function AdminShell({ children }: { children?: ReactNode }) {
   const { pathname } = useLocation();
 
   const safeRoles = roles as AppRoles;
-  const isMayor = roles.includes("mayor");
+  const isMayor = can(safeRoles, area, PERMISSIONS.ANALYTICS_VIEW) && !can(safeRoles, area, PERMISSIONS.CONTENT_CREATE);
   const isAdmin = can(safeRoles, area, PERMISSIONS.SYSTEM_ADMIN);
 
   // Determinación de etiqueta visual del área
   const visualArea = roles.includes("isa_super_admin") || roles.includes("isa_consultant")
-    ? "ISA" : roles.includes("mayor") ? "Intendencia" : area || "Área General";
+    ? "ISA" : isMayor ? "Intendencia" : area || "Área General";
 
   const items = generateMenu(roles, area);
 
@@ -15048,31 +15155,35 @@ export default function BottomNav() {
     icon: LucideIcon;
   }[] = [];
 
-  // 1. ISA Consultant / Super Admin
-  if (roles.includes("isa_super_admin") || roles.includes("isa_consultant")) {
+  // 1. ISA Consultant / Super Admin (Centralizado en el motor de permisos)
+  if (can(safeRoles, area, PERMISSIONS.SYSTEM_ADMIN)) {
     items = [
       { to: "/isa/global", label: "Panel Global", icon: LayoutDashboard },
       { to: "/mi-cuenta", label: "Perfil", icon: Settings },
     ];
   }
 
-  // 2. Personal del Gabinete Municipal (Admins, Intendente, Jefes)
+  // 2. Personal del Gabinete Municipal (Autorización basada en capacidades, no roles estáticos)
   else if (
-    roles.includes("admin") ||
-    roles.includes("mayor") ||
-    roles.includes("tourism_chief") ||
-    roles.includes("area_manager")
+    can(safeRoles, area, PERMISSIONS.TASKS_MANAGE) ||
+    can(safeRoles, area, PERMISSIONS.ANALYTICS_VIEW) ||
+    can(safeRoles, area, PERMISSIONS.CONTENT_CREATE)
   ) {
-    // Todos ven el inicio
+    // Todos los miembros del staff ven el inicio
     items.push({ to: "/admin", label: "Inicio", icon: LayoutDashboard });
 
-    // Solo quienes tienen acceso analítico ven Métricas (Admin e Intendente)
+    // Solo quienes tienen acceso analítico ven Métricas
     if (can(safeRoles, area, PERMISSIONS.ANALYTICS_VIEW)) {
       items.push({ to: "/admin/metricas", label: "Métricas", icon: BarChart3 });
     }
 
     // Solo Admins, Hacienda, Intendencia o Turismo ven Comercios
-    if (can(safeRoles, area, PERMISSIONS.SYSTEM_ADMIN) || area === "Hacienda" || area === "Turismo" || area === "Intendencia") {
+    if (
+      can(safeRoles, area, PERMISSIONS.SYSTEM_ADMIN) || 
+      area === "Hacienda" || 
+      area === "Turismo" || 
+      area === "Intendencia"
+    ) {
       items.push({ to: "/admin/comercios", label: "Comercios", icon: Store });
     }
 
@@ -15734,7 +15845,10 @@ export function MunicipalityProvider({ children }: { children: ReactNode }) {
     let isMounted = true;
 
     const fetchDefaultMunicipality = async () => {
-      if (!municipalityInfo) {
+      // Usamos el valor del local storage en lugar del state para evitar referencias obsoletas
+      const rawInfo = localStorage.getItem(KEY_INFO);
+      
+      if (!rawInfo) {
         try {
           const { data } = await supabase
             .from("municipalities")
@@ -15769,7 +15883,8 @@ export function MunicipalityProvider({ children }: { children: ReactNode }) {
     return () => {
       isMounted = false;
     };
-  }, [municipalityInfo]);
+    // 🟠 FIX ALTO: Array de dependencias vacío. Bootstrap de un solo uso. Rompe el bucle de montado infinito.
+  }, []);
 
   const setMunicipality = async (name: string, explicitId?: string) => {
     if (!name) {
@@ -17128,407 +17243,117 @@ export const Constants = {
 } as const
 </file>
 
-<file path="src/pages/admin/AdminContenido.tsx">
-import { useEffect, useRef, useState } from "react";
-import { Camera, X, CheckCircle2, Pencil, Trash2, Loader2 } from "lucide-react";
+<file path="src/lib/analytics.ts">
 import { supabase } from "@/integrations/supabase/client";
-import { useAuth } from "@/context/AuthContext";
-import { AREAS, type Area } from "@/data/mock";
-import { toast } from "sonner";
-import { formatARS } from "@/lib/format";
-import { can } from "@/security/can";
-import { PERMISSIONS } from "@/security/permissions";
 
-const KINDS = ["Actividad", "Evento", "Taller", "Lugar"] as const;
-type Kind = (typeof KINDS)[number];
-
-type Item = {
-  id: string;
-  area: string;
-  kind: string;
-  title: string;
-  description: string | null;
-  price: number | null;
-  days: string | null;
-  schedule: string | null;
-  photo_url: string | null;
-  published: boolean;
-  created_at: string;
+// SOLUCIÓN TS: Tipado estricto sin usar 'any' para proteger el JSONB
+export type IntentEvent = {
+  ts: number;
+  kind: "search_zone" | "category_click" | "wifi_lead" | "reserva_lead" | "rating";
+  zone?: string;
+  category?: string;
+  userType?: string;
+  origin?: string;
+  rating?: number;
+  meta?: Record<string, string | number | boolean | null>; 
 };
 
-const EMPTY = { title: "", price: "", days: "", schedule: "", desc: "" };
+const KEY = "muno_analytics_v1";
 
-export default function AdminContenido() {
-  const { user, roles, area: adminArea } = useAuth();
+// Tipado estricto para el payload que va a la base de datos
+type AnalyticsPayload = {
+  kind: string;
+  zone: string | null;
+  category: string | null;
+  user_type: string | null;
+  meta: Record<string, string | number | boolean | null>;
+};
 
-  const canCreateContent = can(roles, adminArea, PERMISSIONS.CONTENT_CREATE);
-  const canEditContent = can(roles, adminArea, PERMISSIONS.CONTENT_EDIT);
-  const canDeleteContent = can(roles, adminArea, PERMISSIONS.CONTENT_DELETE);
-  const canEditAllAreas = can(roles, adminArea, PERMISSIONS.SYSTEM_ADMIN);
+// 🔴 FIX ALTO SRE: Cola en memoria para Batching sin 'any'
+let eventQueue: AnalyticsPayload[] = [];
+let flushTimeout: number | null = null;
+const FLUSH_INTERVAL = 15000; // 15 segundos
+const BATCH_SIZE = 20;        // O cada 20 eventos
 
-  const [kind, setKind] = useState<Kind>("Evento");
-  const [area, setArea] = useState<Area>(((adminArea as Area) && AREAS.includes(adminArea as Area)) ? (adminArea as Area) : "Cultura");
-  const [form, setForm] = useState(EMPTY);
-  const [photo, setPhoto] = useState<string | null>(null);
-  const [photoFile, setPhotoFile] = useState<File | null>(null);
-  const [posY, setPosY] = useState<number>(50);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [items, setItems] = useState<Item[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [myMunId, setMyMunId] = useState<string | null>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
+const flushQueue = async () => {
+  if (eventQueue.length === 0) return;
+  
+  // Extraemos los eventos actuales y vaciamos la cola al instante para seguir recolectando
+  const batch = [...eventQueue];
+  eventQueue = [];
 
-  // Efecto 1: Resolver el ID del municipio del usuario
-  useEffect(() => {
-    let isMounted = true;
-    if (!user?.id) return;
+  try {
+    // Un solo INSERT multi-fila a Supabase en lugar de 20 peticiones separadas
+    await supabase.from("analytics_events").insert(batch);
+  } catch (err) {
+    console.warn("[ANALYTICS] Falló sincronización remota del lote:", err);
+    // Nota: Es analítica fire-and-forget. Si falla, priorizamos no trabar la UI.
+  }
+};
 
-    supabase.from("profiles").select("municipality_id").eq("id", user.id).maybeSingle()
-      .then(({ data }) => {
-        if (isMounted) setMyMunId(data?.municipality_id ?? null);
-      });
+export const track = async (e: Omit<IntentEvent, "ts">) => {
+  const localEvent = { ...e, ts: Date.now() };
 
-    return () => { isMounted = false; };
-  }, [user?.id]);
+  // 1. Guardar localmente (Mantenemos fallback offline)
+  try {
+    const list = readAll();
+    list.push(localEvent);
+    // Evitamos que el localStorage crezca infinitamente en dispositivos viejos
+    if (list.length > 2000) list.splice(0, list.length - 2000);
+    localStorage.setItem(KEY, JSON.stringify(list));
+  } catch (err) {
+    console.warn("[ANALYTICS] LocalStorage lleno o deshabilitado:", err);
+  }
 
-  // Efecto 2: Cargar el contenido en base a los permisos y el área
-  useEffect(() => {
-    let isMounted = true;
+  // 2. Encolar para transmisión remota
+  eventQueue.push({
+    kind: e.kind,
+    zone: e.zone || null,
+    category: e.category || null,
+    user_type: e.userType || null,
+    meta: e.meta || {},
+  });
 
-    const fetchContent = async () => {
-      setLoading(true);
-      let q = supabase.from("content_items").select("*").order("created_at", { ascending: false });
-      if (!canEditAllAreas) {
-        q = q.eq("area", area);
-      }
-      if (myMunId) q = q.eq("municipality_id", myMunId);
-
-      try {
-        const { data } = await q;
-        if (isMounted) {
-          setItems((data as Item[]) || []);
-          setLoading(false);
-        }
-      } catch (error) {
-        console.error("Error cargando contenido", error);
-        if (isMounted) setLoading(false);
-      }
-    };
-
-    fetchContent();
-
-    return () => { isMounted = false; };
-  }, [area, canEditAllAreas, myMunId]);
-
-  // Exponemos una función load simplificada solo para recargar después de Guardar/Borrar
-  const load = async () => {
-      let q = supabase.from("content_items").select("*").order("created_at", { ascending: false });
-      if (!canEditAllAreas) q = q.eq("area", area);
-      if (myMunId) q = q.eq("municipality_id", myMunId);
-      const { data } = await q;
-      setItems((data as Item[]) || []);
-  };
-
-  const onUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0];
-    if (f) {
-      setPhotoFile(f);
-      setPhoto(URL.createObjectURL(f));
-      setPosY(50);
+  // 3. Evaluar si disparamos el envío (Flush)
+  if (eventQueue.length >= BATCH_SIZE) {
+    if (flushTimeout) {
+      clearTimeout(flushTimeout);
+      flushTimeout = null;
     }
-  };
+    flushQueue();
+  } else if (!flushTimeout) {
+    // Utilizamos window.setTimeout para evitar conflictos con el tipado de NodeJS en TS
+    flushTimeout = window.setTimeout(() => {
+      flushTimeout = null;
+      flushQueue();
+    }, FLUSH_INTERVAL);
+  }
+};
 
-  const reset = () => {
-    setForm(EMPTY);
-    setPhoto(null);
-    setPhotoFile(null);
-    setPosY(50);
-    setEditingId(null);
-    if (fileRef.current) fileRef.current.value = "";
-  };
+export const readAll = (): IntentEvent[] => {
+  try { 
+    return JSON.parse(localStorage.getItem(KEY) || "[]"); 
+  } catch { 
+    return []; 
+  }
+};
 
-  // Recorta la imagen a 1200x600 (2:1) usando posY (0-100) como encuadre vertical
-  const cropTo2x1 = (file: File): Promise<Blob> =>
-    new Promise((resolve, reject) => {
-      const img = new Image();
-      img.onload = () => {
-        const TW = 1200, TH = 600;
-        const targetRatio = TW / TH;
-        const srcRatio = img.width / img.height;
-        let sx = 0, sy = 0, sw = img.width, sh = img.height;
-        if (srcRatio > targetRatio) {
-          // recortar lados
-          sw = img.height * targetRatio;
-          sx = (img.width - sw) / 2;
-        } else {
-          // recortar arriba/abajo según posY
-          sh = img.width / targetRatio;
-          const maxOffset = img.height - sh;
-          sy = Math.max(0, Math.min(maxOffset, (posY / 100) * maxOffset));
-        }
-        const canvas = document.createElement("canvas");
-        canvas.width = TW;
-        canvas.height = TH;
-        const ctx = canvas.getContext("2d");
-        if (!ctx) return reject(new Error("Canvas no disponible"));
-        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, TW, TH);
-        canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("Error al generar imagen"))), "image/jpeg", 0.88);
-      };
-      img.onerror = () => reject(new Error("No se pudo cargar la imagen"));
-      img.src = URL.createObjectURL(file);
-    });
-
-  const uploadPhoto = async (): Promise<string | null> => {
-    if (!photoFile || !user) return photo; // si es URL existente
-    let blob: Blob = photoFile;
-    try {
-      blob = await cropTo2x1(photoFile);
-    } catch {
-      blob = photoFile;
-    }
-    const path = `${user.id}/content-${Date.now()}.jpg`;
-    const { error } = await supabase.storage.from("avatars").upload(path, blob, { upsert: true, contentType: "image/jpeg" });
-    if (error) return null;
-    const { data } = supabase.storage.from("avatars").getPublicUrl(path);
-    return data.publicUrl;
-  };
-
-  const submit = async () => {
-    if (!canCreateContent && !editingId) {
-      toast.error("No tenés permisos.");
-      return;
-    }
-
-    if (!canEditContent && editingId) {
-      toast.error("No tenés permisos.");
-      return;
-    }
-    if (!form.title.trim()) {
-      toast.error("Falta el título");
-      return;
-    }
-    
-    setBusy(true);
-    const photo_url = await uploadPhoto();
-    
-    // Corrección quirúrgica P1: Detener proceso si la nueva subida falló debido a problemas de red móvil
-    if (photoFile && !photo_url) {
-      toast.error("Error al subir la imagen. Por favor, verificá tu conexión móvil e intentalo de nuevo.");
-      setBusy(false);
-      return;
-    }
-
-    // Vincular al municipio del jefe logueado
-    let municipality_id: string | null = null;
-    if (user?.id) {
-      const { data: prof } = await supabase
-        .from("profiles")
-        .select("municipality_id")
-        .eq("id", user.id)
-        .maybeSingle();
-      municipality_id = prof?.municipality_id ?? null;
-    }
-    
-    const payload = {
-      area,
-      kind,
-      title: form.title.trim(),
-      description: form.desc.trim() || null,
-      price: form.price ? Number(String(form.price).replace(/[^\d.-]/g, "")) || null : null,
-      days: form.days.trim() || null,
-      schedule: form.schedule.trim() || null,
-      photo_url,
-      created_by: user?.id,
-      ...(municipality_id ? { municipality_id } : {}),
-    };
-    
-    let error;
-    if (editingId) {
-      ({ error } = await supabase.from("content_items").update(payload).eq("id", editingId));
-    } else {
-      ({ error } = await supabase.from("content_items").insert(payload));
-    }
-    
-    setBusy(false);
-    
-    if (error) {
-      toast.error(editingId ? "No se pudo actualizar" : "No se pudo publicar", { description: error.message });
-      return;
-    }
-    
-    toast.success(editingId ? "Cambios guardados" : "Publicado correctamente");
-    reset();
-    load();
-  };
-
-  const startEdit = (it: Item) => {
-    if (!canEditContent) {
-      toast.error("No tenés permisos.");
-      return;
-    }
-    setEditingId(it.id);
-    setKind(it.kind as Kind);
-    setForm({
-      title: it.title,
-      price: it.price?.toString() || "",
-      days: it.days || "",
-      schedule: it.schedule || "",
-      desc: it.description || "",
-    });
-    setPhoto(it.photo_url);
-    setPhotoFile(null);
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  };
-
-  const remove = async (id: string) => {
-    if (!canDeleteContent) {
-      toast.error("No tenés permisos.");
-      return;
-    }
-    if (!confirm("¿Eliminar esta publicación?")) return;
-    const { error } = await supabase.from("content_items").delete().eq("id", id);
-    if (error) {
-      toast.error("No se pudo eliminar");
-      return;
-    }
-    toast.success("Eliminado");
-    setItems((xs) => xs.filter((x) => x.id !== id));
-  };
-
-  return (
-    <div className="space-y-5">
-      {canEditAllAreas && (
-        <div className="isa-card p-3 flex items-center gap-2">
-          <span className="text-[11px] uppercase tracking-wider font-bold text-muted-foreground">Área</span>
-          <select value={area} onChange={(e) => setArea(e.target.value as Area)} className="px-3 py-2 rounded-xl border bg-background text-sm font-bold">
-            {AREAS.map((a) => <option key={a}>{a}</option>)}
-          </select>
-        </div>
-      )}
-
-      <div className="flex gap-2 overflow-x-auto pb-1">
-        {KINDS.map((t) => (
-          <button key={t} onClick={() => setKind(t)} className={`px-3 py-1.5 rounded-[20px] text-xs font-bold ${kind === t ? "bg-isa-navy text-isa-white" : "bg-card border"}`}>{t}</button>
-        ))}
-      </div>
-
-      {(canCreateContent || canEditContent) && (
-        <div className="isa-card p-5 space-y-3">
-          <h3>{editingId ? `Editar ${kind.toLowerCase()}` : `Nuevo ${kind.toLowerCase()}`} · {area}</h3>
-
-          {photo ? (
-            <div className="space-y-2">
-              <div className="relative w-full overflow-hidden rounded-xl bg-muted" style={{ aspectRatio: "2 / 1" }}>
-                <img
-                  src={photo}
-                  className="absolute inset-0 w-full h-full object-cover"
-                  style={{ objectPosition: `center ${posY}%` }}
-                  alt="preview"
-                />
-                <button onClick={() => { setPhoto(null); setPhotoFile(null); }} className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/60 text-white grid place-items-center"><X className="w-4 h-4" /></button>
-              </div>
-              {photoFile && (
-                <div className="space-y-1">
-                  <label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">Reencuadrar (vertical)</label>
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    value={posY}
-                    onChange={(e) => setPosY(parseInt(e.target.value, 10))}
-                    className="w-full"
-                  />
-                </div>
-              )}
-              <p className="text-[11px] text-muted-foreground">Tamaño recomendado: 1200x600px (2:1)</p>
-            </div>
-          ) : (
-            <div className="space-y-1">
-              <button onClick={() => fileRef.current?.click()} className="w-full rounded-xl border-2 border-dashed grid place-items-center text-muted-foreground" style={{ aspectRatio: "2 / 1" }}>
-                <div className="text-center"><Camera className="w-6 h-6 mx-auto" /><div className="text-xs mt-1">Subir foto del evento</div></div>
-              </button>
-              <p className="text-[11px] text-muted-foreground">Tamaño recomendado: 1200x600px (2:1)</p>
-            </div>
-          )}
-          <input ref={fileRef} type="file" accept="image/*" hidden onChange={onUpload} />
-
-          <input placeholder="Título" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm" />
-          <textarea placeholder="Descripción" value={form.desc} onChange={(e) => setForm({ ...form, desc: e.target.value })} rows={3} className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm resize-none" />
-          <div className="grid grid-cols-2 gap-2">
-            <input placeholder="Precio (ej 5000)" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} className="px-3 py-2.5 rounded-xl border bg-background text-sm" />
-            <input placeholder="Días" value={form.days} onChange={(e) => setForm({ ...form, days: e.target.value })} className="px-3 py-2.5 rounded-xl border bg-background text-sm" />
-          </div>
-          <input placeholder="Horario" value={form.schedule} onChange={(e) => setForm({ ...form, schedule: e.target.value })} className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm" />
-
-          <div className="flex gap-2">
-            {((canCreateContent && !editingId) || (canEditContent && editingId)) && (
-              <button
-                onClick={submit}
-                disabled={!form.title || busy}
-                className="flex-1 bg-isa-navy text-isa-white rounded-[20px] py-3 font-bold disabled:opacity-40 flex items-center justify-center gap-2"
-              >
-                {busy ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <CheckCircle2 className="w-4 h-4" />
-                )}
-                {editingId ? "Guardar cambios" : "Publicar"}
-              </button>
-            )}
-            {editingId && (
-              <button onClick={reset} className="px-4 rounded-[20px] border-2 border-isa-navy text-isa-navy font-bold text-sm">Cancelar</button>
-            )}
-          </div>
-        </div>
-      )}
-
-      <section>
-        <div className="flex items-center justify-between mb-3">
-          <h2> Lo publicado {!canEditAllAreas && `· ${area}`} </h2>
-          <span className="text-xs text-muted-foreground">{items.length} ítem(s)</span>
-        </div>
-        {loading ? (
-          <div className="isa-card p-6 text-center text-sm text-muted-foreground">Cargando…</div>
-        ) : items.length === 0 ? (
-          <div className="isa-card p-6 text-center text-sm text-muted-foreground">Aún no hay contenido publicado.</div>
-        ) : (
-          <ul className="space-y-2">
-            {items.map((it) => (
-              <li key={it.id} className="isa-card p-3 flex items-center gap-3">
-                {it.photo_url ? (
-                  <img src={it.photo_url} className="w-14 h-14 rounded-lg object-cover shrink-0" />
-                ) : (
-                  <div className="w-14 h-14 rounded-lg bg-muted shrink-0" />
-                )}
-                <div className="flex-1 min-w-0">
-                  <div className="font-extrabold text-isa-navy text-sm truncate">{it.title}</div>
-                  <div className="text-xs text-muted-foreground truncate">
-                    {it.kind} · {it.area}{it.price ? ` · ${formatARS(it.price)}` : ""}{it.schedule ? ` · ${it.schedule}` : ""}
-                  </div>
-                </div>
-                {canEditContent && (
-                  <button
-                    onClick={() => startEdit(it)}
-                    className="w-9 h-9 grid place-items-center rounded-lg hover:bg-isa-light text-isa-navy" >
-                    <Pencil className="w-4 h-4" />
-                  </button>
-                )}
-                {canDeleteContent && (
-                  <button
-                    onClick={() => remove(it.id)}
-                    className="w-9 h-9 grid place-items-center rounded-lg hover:bg-muno-red/10 text-muno-red" >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-    </div>
-  );
-}
+// SOLUCIÓN TS: Eliminación del casteo 'as any' usando conversión segura
+export const groupCount = (
+  items: IntentEvent[], 
+  key: keyof IntentEvent
+): { name: string; count: number }[] => {
+  const acc: Record<string, number> = {};
+  items.forEach((i) => {
+    const val = i[key];
+    // Convertimos a string de forma segura. Si es un objeto (como 'meta') o nulo, lo ignoramos.
+    const v = val !== undefined && val !== null && typeof val !== "object" ? String(val) : "—";
+    acc[v] = (acc[v] || 0) + 1;
+  });
+  return Object.entries(acc)
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count);
+};
 </file>
 
 <file path="src/pages/admin/AdminMetricas.tsx">
@@ -17773,594 +17598,6 @@ function ChartCard({ title, children, className = "" }: ChartCardProps) {
     <div className={`bg-white rounded-[16px] p-5 border ${className}`}>
       <div className="font-extrabold text-isa-navy text-sm mb-3">{title}</div>
       {children}
-    </div>
-  );
-}
-</file>
-
-<file path="src/pages/admin/AdminReclamos.tsx">
-import { useEffect, useState, useRef, useCallback } from "react";
-import { Camera, X, CheckCircle2, Clock, AlertCircle, MapPin, Users, MessageSquare, Plus, Trash2, Pencil, Save, FileText, Loader2 } from "lucide-react";
-import { Link } from "react-router-dom";
-import { toast } from "sonner";
-import { supabase } from "@/integrations/supabase/client";
-import { logActivity } from "@/lib/audit";
-import { useAuth } from "@/context/AuthContext";
-
-import { CLAIM_AREAS } from "@/data/mock";
-
-const CUADRILLAS = ["Cuadrilla A · Alumbrado", "Cuadrilla B · Bacheo", "Cuadrilla C · Limpieza", "Cuadrilla D · Espacios verdes"];
-
-type ClaimStatus = "Pendiente" | "En curso" | "Cerrado";
-const STATUS_LIST: ClaimStatus[] = ["Pendiente", "En curso", "Cerrado"];
-const STATUS_LABEL: Record<string, string> = {
-  "Pendiente": "Pendiente de revisión",
-  "En curso": "En curso",
-  "Cerrado": "Resuelto",
-};
-const STATUS_STYLE: Record<string, string> = {
-  "Pendiente": "bg-muno-amber/15 text-[hsl(var(--muno-amber))]",
-  "En curso": "bg-muno-blue/15 text-muno-blue",
-  "Cerrado": "bg-muno-teal/15 text-muno-teal",
-};
-const STATUS_DOT: Record<string, string> = {
-  "Pendiente": "bg-red-500",
-  "En curso": "bg-amber-400",
-  "Cerrado": "bg-emerald-500",
-};
-const STATUS_BTN: Record<string, string> = {
-  "Pendiente": "border-red-500 bg-red-500/10 text-red-700",
-  "En curso": "border-amber-500 bg-amber-400/15 text-amber-800",
-  "Cerrado": "border-emerald-500 bg-emerald-500/10 text-emerald-700",
-};
-
-type Claim = {
-  id: string;
-  user_id: string;
-  category: string;
-  area: string | null;
-  status: ClaimStatus;
-  address: string | null;
-  description: string | null;
-  evidence_photos: string[] | null;
-  resolution_note: string | null;
-  resolution_photos: string[] | null;
-  resolved_at: string | null;
-  created_at: string;
-};
-
-type Canned = { id: string; label: string; body: string; enabled: boolean };
-
-interface ClaimUpdate {
-  status: ClaimStatus;
-  resolution_note?: string;
-  resolution_photos?: string[];
-  resolved_at?: string;
-}
-
-interface NotificationPayload {
-  title: string;
-  body: string;
-  link: string;
-  audience: string;
-  source_type: string;
-  source_id: string;
-  user_id: string;
-}
-
-interface CannedPayload {
-  label: string;
-  body: string;
-  enabled: boolean;
-  municipality_id?: string;
-}
-
-export default function AdminReclamos() {
-  const { user } = useAuth();
-  const [items, setItems] = useState<Claim[]>([]);
-  const [active, setActive] = useState<Claim | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [showTpl, setShowTpl] = useState(false);
-  const [areaFilter, setAreaFilter] = useState<string>("");
-  const [statusFilter, setStatusFilter] = useState<string>("");
-
-  // 🔴 FIX CRÍTICO SRE: Filtrado en Base de Datos (Zero Seq Scans)
-  const loadClaims = useCallback(async (isMounted = true) => {
-    if (!user) return;
-    setLoading(true);
-    try {
-      // 1. Obtener la jurisdicción (Multi-tenant BOLA fix)
-      const { data: userRole } = await supabase
-        .from("user_roles")
-        .select("municipality_id")
-        .eq("user_id", user.id)
-        .eq("active", true)
-        .maybeSingle();
-
-      const muniId = userRole?.municipality_id;
-
-      // 2. Construir la consulta con filtros directos al motor SQL
-      let q = supabase
-        .from("claims")
-        .select("*")
-        .order("created_at", { ascending: false })
-        .limit(200);
-
-      if (muniId) q = q.eq("municipality_id", muniId);
-      if (areaFilter) q = q.eq("area", areaFilter);
-      if (statusFilter) q = q.eq("status", statusFilter as ClaimStatus);
-        
-      const { data } = await q;
-        
-      if (isMounted) {
-        setItems((data as Claim[]) || []);
-        setLoading(false);
-      }
-    } catch (err) {
-      console.error("Error al cargar reclamos:", err);
-      if (isMounted) setLoading(false);
-    }
-  }, [user, areaFilter, statusFilter]); // Re-ejecuta solo si cambian los filtros
-
-  useEffect(() => {
-    let isMounted = true;
-    loadClaims(isMounted);
-    return () => { isMounted = false; };
-  }, [loadClaims]);
-
-  const update = (c: Claim) => setItems((p) => p.map((x) => x.id === c.id ? c : x));
-
-  return (
-    <div className="space-y-5">
-      <div className="flex items-center justify-between gap-3 flex-wrap">
-        <h2 className="font-display text-isa-navy text-[20px] font-extrabold">Bandeja de Reclamos</h2>
-        <button
-          onClick={() => setShowTpl(true)}
-          className="inline-flex items-center gap-1.5 text-xs font-bold bg-isa-navy text-white rounded-[14px] px-3 py-2 min-h-[40px]"
-        >
-          <FileText className="w-3.5 h-3.5" /> Respuestas predeterminadas
-        </button>
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-xs font-bold text-muted-foreground">Área:</span>
-        <button onClick={() => setAreaFilter("")} className={`px-3 py-1 rounded-full text-xs font-bold border ${!areaFilter ? "bg-isa-navy text-white border-isa-navy" : "bg-card"}`}>Todas</button>
-        {CLAIM_AREAS.map((a) => (
-          <button key={a} onClick={() => setAreaFilter(a)} className={`px-3 py-1 rounded-full text-xs font-bold border ${areaFilter === a ? "bg-isa-navy text-white border-isa-navy" : "bg-card"}`}>{a}</button>
-        ))}
-        <span className="mx-2 h-4 w-px bg-border" />
-        <span className="text-xs font-bold text-muted-foreground">Estado:</span>
-        {["", ...STATUS_LIST].map((s) => (
-          <button key={s || "all"} onClick={() => setStatusFilter(s)} className={`inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-bold border ${statusFilter === s ? "bg-isa-navy text-white border-isa-navy" : "bg-card"}`}>
-            {s && <span className={`w-2 h-2 rounded-full ${STATUS_DOT[s]}`} />}
-            {s || "Todos"}
-          </button>
-        ))}
-      </div>
-
-      {loading && (
-        <div className="text-center text-sm text-muted-foreground py-10 inline-flex items-center gap-2 justify-center w-full">
-          <Loader2 className="w-4 h-4 animate-spin" /> Cargando…
-        </div>
-      )}
-
-      {!loading && items.length === 0 && (
-        <div className="isa-card p-6 text-center text-sm text-muted-foreground">
-          No hay reclamos {areaFilter ? `en ${areaFilter}` : ""} {statusFilter ? `· ${statusFilter}` : ""}.
-        </div>
-      )}
-
-      {!loading && items.length > 0 && (
-        <>
-          {/* Vista Escritorio */}
-          <div className="isa-card overflow-hidden hidden lg:block">
-            <table className="w-full text-sm">
-              <thead className="bg-muted text-isa-navy">
-                <tr>
-                  <th className="text-left p-3">Ticket</th>
-                  <th className="text-left p-3">Categoría</th>
-                  <th className="text-left p-3">Área</th>
-                  <th className="text-left p-3">Fecha</th>
-                  <th className="text-left p-3">Estado</th>
-                  <th className="p-3"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {items.map((r) => {
-                  const short = r.id.slice(0, 4).toUpperCase();
-                  return (
-                    <tr key={r.id} className="border-t hover:bg-muted/40 transition-colors">
-                      <td className="p-3 font-bold">
-                        <Link to={`/reclamos/${encodeURIComponent(r.id)}`} className="hover:underline">#MUNO-{short}</Link>
-                      </td>
-                      <td className="p-3">{r.category}</td>
-                      <td className="p-3 text-xs"><span className="px-2 py-1 rounded-full bg-muted">{r.area || "—"}</span></td>
-                      <td className="p-3 text-muted-foreground">{new Date(r.created_at).toLocaleDateString("es-AR")}</td>
-                      <td className="p-3">
-                        <span className={`isa-chip inline-flex items-center gap-1 ${STATUS_STYLE[r.status]}`}>
-                          <span className={`w-2 h-2 rounded-full ${STATUS_DOT[r.status]}`} />
-                          {STATUS_LABEL[r.status] || r.status}
-                        </span>
-                      </td>
-                      <td className="p-3 text-right">
-                        <button onClick={() => setActive(r)} className="text-xs font-bold text-muno-blue hover:underline">Gestionar</button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-
-          {/* Vista Móvil */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 lg:hidden">
-            {items.map((r) => {
-              const Icon = r.status === "Cerrado" ? CheckCircle2 : r.status === "En curso" ? Clock : AlertCircle;
-              const short = r.id.slice(0, 4).toUpperCase();
-              return (
-                <article key={r.id} className="isa-card p-4 space-y-2">
-                  <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <Link to={`/reclamos/${encodeURIComponent(r.id)}`} className="font-extrabold text-isa-navy text-sm hover:underline">#MUNO-{short}</Link>
-                      <div className="text-xs text-muted-foreground mt-0.5">{r.category} · {new Date(r.created_at).toLocaleDateString("es-AR")}</div>
-                    </div>
-                    <span className={`isa-chip ${STATUS_STYLE[r.status]} inline-flex items-center gap-1 shrink-0`}>
-                      <Icon className="w-3 h-3" /> {STATUS_LABEL[r.status] || r.status}
-                    </span>
-                  </div>
-                  {r.description && <p className="text-xs text-muted-foreground line-clamp-2">{r.description}</p>}
-                  <button
-                    onClick={() => setActive(r)}
-                    className="w-full mt-1 bg-isa-navy text-isa-white rounded-[20px] py-2 text-xs font-bold inline-flex items-center justify-center gap-1.5"
-                  >
-                    <MessageSquare className="w-3.5 h-3.5" /> Gestionar
-                  </button>
-                </article>
-              );
-            })}
-          </div>
-        </>
-      )}
-
-      {active && <ManageDialog claim={active} onClose={() => setActive(null)} onSaved={(c) => { update(c); setActive(null); }} />}
-      {showTpl && <TemplatesDialog onClose={() => setShowTpl(false)} />}
-    </div>
-  );
-}
-
-function ManageDialog({ claim, onClose, onSaved }: { claim: Claim; onClose: () => void; onSaved: (c: Claim) => void }) {
-  const [status, setStatus] = useState<ClaimStatus>(claim.status);
-  const [response, setResponse] = useState(claim.resolution_note || "");
-  const [photo, setPhoto] = useState<string | null>(claim.resolution_photos?.[0] || null);
-  const [crew, setCrew] = useState<string>("");
-  const [canned, setCanned] = useState<Canned[]>([]);
-  const [saving, setSaving] = useState(false);
-  const fileRef = useRef<HTMLInputElement>(null);
-  const mapHref = `https://maps.google.com/?q=${encodeURIComponent(claim.address || "San Francisco del Monte de Oro")}`;
-  const short = claim.id.slice(0, 4).toUpperCase();
-  const photos = claim.evidence_photos || [];
-
-  useEffect(() => {
-    let isMounted = true;
-    const fetchCanned = async () => {
-      const { data } = await supabase.from("claim_canned_responses").select("id,label,body,enabled").eq("enabled", true);
-      if (isMounted) setCanned((data as Canned[]) || []);
-    };
-    fetchCanned();
-    return () => { isMounted = false; };
-  }, []);
-
-  const onUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0];
-    if (f) setPhoto(URL.createObjectURL(f));
-  };
-
-  const save = async () => {
-    if (status === "Cerrado" && !response.trim()) {
-      toast.error("Para cerrar el reclamo, escribí una respuesta.");
-      return;
-    }
-    setSaving(true);
-    
-    const updatePayload: ClaimUpdate = { status };
-    if (status === "Cerrado") {
-      updatePayload.resolution_note = response.trim();
-      if (photo) updatePayload.resolution_photos = [photo];
-      updatePayload.resolved_at = new Date().toISOString();
-    } else if (response.trim()) {
-      updatePayload.resolution_note = response.trim();
-    }
-    
-    const { data, error } = await supabase.from("claims").update(updatePayload).eq("id", claim.id).select("*").single();
-    if (error || !data) {
-      setSaving(false);
-      toast.error("No se pudo guardar", { description: error?.message });
-      return;
-    }
-    
-    if (response.trim() || status !== claim.status) {
-      const areaLabel = claim.area || "tu área";
-      const body =
-        status === "Cerrado"
-          ? `Tu reclamo en ${areaLabel} fue resuelto.`
-          : status === "En curso"
-          ? `Tu reclamo en ${areaLabel} está en curso.`
-          : `Tu reclamo en ${areaLabel} ha sido respondido.`;
-          
-      const notifPayload: NotificationPayload = {
-        title: `Reclamo #MUNO-${claim.id.slice(0, 4).toUpperCase()}`,
-        body,
-        link: `/reclamos/${claim.id}`,
-        audience: "residents",
-        source_type: "claim",
-        source_id: claim.id,
-        user_id: claim.user_id,
-      };
-      
-      await supabase.from("notifications").insert(notifPayload);
-    }
-    setSaving(false);
-    toast.success("Reclamo actualizado · Vecino notificado");
-    logActivity(
-      status === "Cerrado" ? "Cerrar reclamo" : `Actualizar reclamo · ${status}`,
-      { entity: "claim", entity_id: claim.id, meta: { crew, status, area: claim.area } }
-    );
-    onSaved(data as Claim);
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
-      <div className="isa-card p-5 max-w-lg w-full max-h-[90vh] overflow-y-auto">
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <div className="text-xs text-muted-foreground">Ticket</div>
-            <h3 className="font-extrabold text-isa-navy">#MUNO-{short}</h3>
-          </div>
-          <button onClick={onClose} className="w-8 h-8 grid place-items-center rounded-lg hover:bg-muted"><X className="w-4 h-4" /></button>
-        </div>
-
-        {photos[0] && <img src={photos[0]} className="w-full h-32 object-cover rounded-xl mb-3" />}
-        {claim.description && <p className="text-sm text-muted-foreground mb-3">{claim.description}</p>}
-
-        {claim.address && (
-          <a href={mapHref} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-[12px] font-bold text-muno-blue mb-4">
-            <MapPin className="w-3.5 h-3.5" /> {claim.address}
-          </a>
-        )}
-
-        <label className="text-xs font-bold text-muted-foreground flex items-center gap-1"><Users className="w-3 h-3" /> Cuadrilla</label>
-        <select value={crew} onChange={(e) => setCrew(e.target.value)} className="mt-1 mb-4 w-full px-3 py-2.5 rounded-xl border bg-background text-sm min-h-[44px]">
-          <option value="">Sin asignar</option>
-          {CUADRILLAS.map((c) => <option key={c} value={c}>{c}</option>)}
-        </select>
-
-        {claim.area && (
-          <div className="mb-3 inline-flex items-center gap-1.5 text-[11px] font-bold px-2 py-1 rounded-full bg-muted text-isa-navy">
-            Área asignada: {claim.area}
-          </div>
-        )}
-
-        <label className="text-xs font-bold text-muted-foreground">Estado del ticket</label>
-        <div className="flex gap-2 mt-1 mb-4">
-          {STATUS_LIST.map((s) => (
-            <button
-              key={s}
-              onClick={() => setStatus(s)}
-              className={`flex-1 px-3 py-2 rounded-[20px] text-xs font-bold min-h-[44px] inline-flex items-center justify-center gap-1.5 border-2 transition-all ${
-                status === s ? STATUS_BTN[s] : "bg-card border-border text-muted-foreground"
-              }`}
-            >
-              <span className={`w-2.5 h-2.5 rounded-full ${STATUS_DOT[s]}`} />
-              {STATUS_LABEL[s]}
-            </button>
-          ))}
-        </div>
-
-        <label className="text-xs font-bold text-muted-foreground flex items-center gap-1"><MessageSquare className="w-3 h-3" /> Respuesta predeterminada</label>
-        <select
-          onChange={(e) => {
-            const c = canned.find((x) => x.id === e.target.value);
-            if (c) setResponse(c.body);
-          }}
-          defaultValue=""
-          className="mt-1 mb-3 w-full px-3 py-2.5 rounded-xl border bg-background text-sm min-h-[44px]"
-        >
-          <option value="">— Elegí una plantilla —</option>
-          {canned.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
-        </select>
-
-        <label className="text-xs font-bold text-muted-foreground">Respuesta Oficial del Área</label>
-        <textarea value={response} onChange={(e) => setResponse(e.target.value)} rows={4} placeholder="Escribí o seleccioná una respuesta predefinida…" className="mt-1 w-full px-3 py-2 rounded-xl border bg-background text-sm mb-3 resize-none" />
-
-        {status === "Cerrado" && (
-          <>
-            <label className="text-xs font-bold text-muted-foreground">Foto del trabajo realizado (opcional)</label>
-            <div className="mt-1 mb-3">
-              {photo ? (
-                <div className="relative">
-                  <img src={photo} className="w-full h-40 object-cover rounded-xl" />
-                  <button onClick={() => setPhoto(null)} className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/60 text-white grid place-items-center"><X className="w-4 h-4" /></button>
-                </div>
-              ) : (
-                <button onClick={() => fileRef.current?.click()} className="w-full h-32 rounded-xl border-2 border-dashed grid place-items-center text-muted-foreground">
-                  <div className="text-center"><Camera className="w-6 h-6 mx-auto" /><div className="text-xs mt-1">Subir foto</div></div>
-                </button>
-              )}
-              <input ref={fileRef} type="file" accept="image/*" hidden onChange={onUpload} />
-            </div>
-          </>
-        )}
-
-        <button onClick={save} disabled={saving} className="w-full bg-isa-navy text-isa-white rounded-[20px] py-3 font-bold inline-flex items-center justify-center gap-2 disabled:opacity-60">
-          {saving && <Loader2 className="w-4 h-4 animate-spin" />} Guardar cambios
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function TemplatesDialog({ onClose }: { onClose: () => void }) {
-  const { user } = useAuth();
-  const [items, setItems] = useState<Canned[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [editing, setEditing] = useState<Canned | null>(null);
-  const [label, setLabel] = useState("");
-  const [body, setBody] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  const loadTpl = useCallback(async (isMounted = true) => {
-    setLoading(true);
-    try {
-      const { data } = await supabase
-        .from("claim_canned_responses")
-        .select("*")
-        .order("created_at", { ascending: false });
-      if (isMounted) {
-        setItems((data as Canned[]) || []);
-        setLoading(false);
-      }
-    } catch (err) {
-      console.error("Error al cargar plantillas:", err);
-      if (isMounted) setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    let isMounted = true;
-    loadTpl(isMounted);
-    return () => { isMounted = false; };
-  }, [loadTpl]);
-
-  const startNew = () => {
-    setEditing({ id: "", label: "", body: "", enabled: true });
-    setLabel("");
-    setBody("");
-  };
-  const startEdit = (c: Canned) => {
-    setEditing(c);
-    setLabel(c.label);
-    setBody(c.body);
-  };
-
-  const save = async () => {
-    if (!label.trim() || !body.trim()) {
-      toast.error("Completá título y contenido");
-      return;
-    }
-    setBusy(true);
-    
-    let municipality_id: string | null = null;
-    if (user?.id) {
-      const { data: prof } = await supabase
-        .from("profiles")
-        .select("municipality_id")
-        .eq("id", user.id)
-        .maybeSingle();
-      municipality_id = prof?.municipality_id || null;
-    }
-
-    const payload: CannedPayload = { 
-      label: label.trim(), 
-      body: body.trim(), 
-      enabled: true 
-    };
-    
-    if (municipality_id) {
-      payload.municipality_id = municipality_id;
-    }
-
-    const res = editing && editing.id
-      ? await supabase.from("claim_canned_responses").update(payload).eq("id", editing.id)
-      : await supabase.from("claim_canned_responses").insert(payload);
-      
-    setBusy(false);
-    
-    if (res.error) {
-      toast.error("No se pudo guardar", { description: res.error.message });
-      return;
-    }
-    toast.success("Plantilla guardada");
-    setEditing(null);
-    loadTpl();
-  };
-
-  const remove = async (id: string) => {
-    if (!window.confirm("¿Eliminar esta plantilla?")) return;
-    const { error } = await supabase.from("claim_canned_responses").delete().eq("id", id);
-    if (error) {
-      toast.error("No se pudo eliminar");
-      return;
-    }
-    setItems((xs) => xs.filter((x) => x.id !== id));
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
-      <div className="isa-card p-5 max-w-lg w-full max-h-[90vh] overflow-y-auto">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="font-extrabold text-isa-navy inline-flex items-center gap-2">
-            <FileText className="w-4 h-4" /> Respuestas predeterminadas
-          </h3>
-          <button onClick={onClose} className="w-8 h-8 grid place-items-center rounded-lg hover:bg-muted"><X className="w-4 h-4" /></button>
-        </div>
-
-        {editing ? (
-          <div className="space-y-3">
-            <input
-              value={label}
-              onChange={(e) => setLabel(e.target.value)}
-              placeholder="Título corto · Ej: Bache reparado"
-              className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm"
-            />
-            <textarea
-              value={body}
-              onChange={(e) => setBody(e.target.value)}
-              rows={5}
-              placeholder="Texto de la respuesta…"
-              className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm resize-none"
-            />
-            <div className="flex gap-2">
-              <button onClick={() => setEditing(null)} className="flex-1 px-3 py-2.5 rounded-[14px] border font-bold text-sm">Cancelar</button>
-              <button onClick={save} disabled={busy} className="flex-1 px-3 py-2.5 rounded-[14px] bg-isa-navy text-white font-bold text-sm inline-flex items-center justify-center gap-1 disabled:opacity-60">
-                {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
-                Guardar
-              </button>
-            </div>
-          </div>
-        ) : (
-          <>
-            <button onClick={startNew} className="w-full mb-3 inline-flex items-center justify-center gap-1.5 bg-isa-navy text-white rounded-[14px] py-2.5 text-sm font-bold">
-              <Plus className="w-4 h-4" /> Nueva plantilla
-            </button>
-            {loading && <div className="text-sm text-muted-foreground text-center py-4">Cargando…</div>}
-            {!loading && items.length === 0 && (
-              <div className="text-sm text-muted-foreground text-center py-6 border border-dashed rounded-xl">
-                Aún no hay plantillas. Creá la primera para responder más rápido.
-              </div>
-            )}
-            <ul className="space-y-2">
-              {items.map((c) => (
-                <li key={c.id} className="border rounded-xl p-3 bg-background">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0 flex-1">
-                      <div className="font-bold text-isa-navy text-sm">{c.label}</div>
-                      <p className="text-xs text-muted-foreground line-clamp-2 mt-0.5">{c.body}</p>
-                    </div>
-                    <div className="flex gap-1 shrink-0">
-                      <button onClick={() => startEdit(c)} className="w-8 h-8 grid place-items-center rounded-lg hover:bg-muted text-isa-navy">
-                        <Pencil className="w-3.5 h-3.5" />
-                      </button>
-                      <button onClick={() => remove(c.id)} className="w-8 h-8 grid place-items-center rounded-lg hover:bg-muno-red/10 text-muno-red">
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </>
-        )}
-      </div>
     </div>
   );
 }
@@ -21124,193 +20361,6 @@ export default function Home() {
 }
 </file>
 
-<file path="src/pages/Lugares.tsx">
-import { useState, useMemo, useEffect, ElementType, ReactNode } from "react";
-import { places } from "@/data/mock";
-import { MapPin, Trees, Landmark, Clock, Tag, Info } from "lucide-react";
-import { formatARS } from "@/lib/format";
-import { track } from "@/lib/analytics";
-import { supabase } from "@/integrations/supabase/client";
-import { useAuth } from "@/context/AuthContext";
-import { useMunicipality } from "@/context/MunicipalityContext";
-import FavoriteButton from "@/components/FavoriteButton";
-
-// 1. Tipos estrictos 
-type Cat = "Naturaleza" | "Cultura";
-
-interface PlaceItem {
-  id: string;
-  name: string;
-  type: string;
-  address: string;
-  zone: string;
-  schedule: string;
-  days: string;
-  price?: number;
-  photo_url: string;
-  how_to_get: string;
-  requirements?: string;
-}
-
-interface DBContentItem {
-  id: string;
-  title: string;
-  category?: string;
-  type?: string;
-  description?: string;
-  schedule?: string;
-  days?: string;
-  price?: number | null;
-  photo_url?: string;
-}
-
-const NATURE_TYPES = ["Naturaleza", "Salto", "Parque Nacional", "Río", "Dique"];
-const CULTURE_TYPES = ["Museo", "Cultural", "Monumento", "Cultura"];
-
-const InfoLine = ({ icon: Icon, children }: { icon: ElementType; children: ReactNode }) => (
-  <div className="flex items-start gap-1.5 text-[11px] text-muted-foreground">
-    <Icon strokeWidth={1.5} className="w-3 h-3 mt-0.5 shrink-0" /><span>{children}</span>
-  </div>
-);
-
-const PlaceCard = ({ item }: { item: PlaceItem }) => (
-  <article className="isa-card overflow-hidden hover:-translate-y-0.5 hover:shadow-md transition-all">
-    <div className="relative">
-      <img src={item.photo_url} alt={item.name} loading="lazy" className="w-full h-[140px] object-cover" />
-      <div className="absolute top-2 right-2">
-        <FavoriteButton place={{ id: item.id, name: item.name, type: item.type, photo_url: item.photo_url, zone: item.zone }} />
-      </div>
-    </div>
-    <div className="p-4 space-y-2">
-      <div className="flex items-center justify-between gap-2">
-        <h3 className="font-extrabold text-isa-navy">{item.name}</h3>
-        <span className="isa-chip bg-accent text-isa-navy">{item.type}</span>
-      </div>
-      <InfoLine icon={MapPin}>{item.address}{item.zone && ` · ${item.zone}`}</InfoLine>
-      {item.schedule && <InfoLine icon={Clock}>{item.schedule}{item.days && ` · ${item.days}`}</InfoLine>}
-      {typeof item.price === "number" && <InfoLine icon={Tag}>{item.price === 0 ? "Entrada gratuita" : formatARS(item.price)}</InfoLine>}
-      {item.requirements && item.requirements !== "—" && <InfoLine icon={Info}>{item.requirements}</InfoLine>}
-      <a href={item.how_to_get} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center w-full bg-isa-navy text-isa-white rounded-[16px] py-2.5 text-sm font-bold hover:opacity-90 mt-1 min-h-[44px]">
-        Cómo llegar
-      </a>
-    </div>
-  </article>
-);
-
-// 2. Extraemos el componente fuera del render principal
-const CategoryBtn = ({ 
-  value, 
-  icon: Icon, 
-  label, 
-  isActive, 
-  onClick 
-}: { 
-  value: Cat; 
-  icon: ElementType; 
-  label: string; 
-  isActive: boolean; 
-  onClick: (val: Cat) => void;
-}) => {
-  return (
-    <button
-      onClick={() => { onClick(value); track({ kind: "category_click", category: `Lugares:${value}`, userType: "turista" }); }}
-      className="flex-1 min-h-[88px] rounded-[16px] flex flex-col items-center justify-center gap-1.5 font-extrabold text-sm transition-all"
-      style={{
-        background: isActive ? "#242E44" : "#F5EFE6",
-        color: isActive ? "#FFFFFF" : "#242E44",
-        border: isActive ? "none" : "1px solid rgba(36,46,68,0.12)",
-      }}
-    >
-      <Icon strokeWidth={1.5} className="w-7 h-7" />
-      {label}
-    </button>
-  );
-};
-
-export default function Lugares() {
-  const [cat, setCat] = useState<Cat>("Naturaleza");
-  const { user } = useAuth();
-  const { municipality } = useMunicipality();
-  const [dbPlaces, setDbPlaces] = useState<PlaceItem[]>([]);
-
-  useEffect(() => {
-    let isMounted = true; 
-
-    const fetchLugares = async () => {
-      let munId: string | null = null;
-      
-      if (user?.id) {
-        const { data: prof } = await supabase.from("profiles").select("municipality_id").eq("id", user.id).maybeSingle();
-        munId = prof?.municipality_id ?? null;
-      }
-      
-      if (!munId && municipality) {
-        const { data: m } = await supabase.from("municipalities").select("id").eq("name", municipality).maybeSingle();
-        munId = m?.id ?? null;
-      }
-      
-      let q = supabase.from("content_items").select("*").eq("kind", "Lugar").eq("published", true).order("created_at", { ascending: false });
-      if (munId) q = q.eq("municipality_id", munId);
-      
-      const { data } = await q;
-
-      if (isMounted) {
-        const safeData = (data as unknown as DBContentItem[]) || [];
-        setDbPlaces(
-          safeData.map((it) => ({
-            id: it.id,
-            name: it.title,
-            type: it.category || it.type || "Naturaleza",
-            address: it.description || "",
-            zone: municipality || "",
-            schedule: it.schedule || "",
-            days: it.days || "",
-            price: it.price ?? undefined,
-            photo_url: it.photo_url || "/placeholder.svg",
-            how_to_get: "#",
-          }))
-        );
-      }
-    };
-
-    fetchLugares();
-
-    return () => {
-      isMounted = false;
-    };
-  }, [user?.id, municipality]); 
-
-  const filtered = useMemo(() => {
-    const allow = cat === "Naturaleza" ? NATURE_TYPES : CULTURE_TYPES;
-    
-    const dbFiltered = dbPlaces.filter((p) => allow.includes(p.type));
-    const mockFiltered = places.filter((p) => allow.includes(p.type));
-    
-    return [...dbFiltered, ...mockFiltered];
-  }, [cat, dbPlaces]);
-
-  return (
-    <div className="space-y-5">
-      <header>
-        <h1 className="text-isa-navy font-display font-extrabold text-[20px]">Lugares</h1>
-        <p className="text-sm text-muted-foreground">Naturaleza y cultura de la región.</p>
-      </header>
-      <div className="flex gap-3">
-        <CategoryBtn value="Naturaleza" icon={Trees} label="NATURALEZA" isActive={cat === "Naturaleza"} onClick={setCat} />
-        <CategoryBtn value="Cultura" icon={Landmark} label="CULTURA" isActive={cat === "Cultura"} onClick={setCat} />
-      </div>
-      {filtered.length === 0 ? (
-        <p className="text-sm text-muted-foreground text-center py-6">Sin resultados.</p>
-      ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {filtered.map((p) => <PlaceCard key={p.id} item={p} />)}
-        </div>
-      )}
-    </div>
-  );
-}
-</file>
-
 <file path="src/App.tsx">
 import React, { Component, ErrorInfo, ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -22028,6 +21078,416 @@ export default function ProtectedRoute({
 }
 </file>
 
+<file path="src/pages/admin/AdminContenido.tsx">
+import { useEffect, useRef, useState } from "react";
+import { Camera, X, CheckCircle2, Pencil, Trash2, Loader2 } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/context/AuthContext";
+import { AREAS, type Area } from "@/data/mock";
+import { toast } from "sonner";
+import { formatARS } from "@/lib/format";
+import { can } from "@/security/can";
+import { PERMISSIONS } from "@/security/permissions";
+
+const KINDS = ["Actividad", "Evento", "Taller", "Lugar"] as const;
+type Kind = (typeof KINDS)[number];
+
+type Item = {
+  id: string;
+  area: string;
+  kind: string;
+  title: string;
+  description: string | null;
+  price: number | null;
+  days: string | null;
+  schedule: string | null;
+  photo_url: string | null;
+  published: boolean;
+  created_at: string;
+};
+
+const EMPTY = { title: "", price: "", days: "", schedule: "", desc: "" };
+
+export default function AdminContenido() {
+  const { user, roles, area: adminArea } = useAuth();
+
+  const canCreateContent = can(roles, adminArea, PERMISSIONS.CONTENT_CREATE);
+  const canEditContent = can(roles, adminArea, PERMISSIONS.CONTENT_EDIT);
+  const canDeleteContent = can(roles, adminArea, PERMISSIONS.CONTENT_DELETE);
+  const canEditAllAreas = can(roles, adminArea, PERMISSIONS.SYSTEM_ADMIN);
+
+  const [kind, setKind] = useState<Kind>("Evento");
+  const [area, setArea] = useState<Area>(((adminArea as Area) && AREAS.includes(adminArea as Area)) ? (adminArea as Area) : "Cultura");
+  const [form, setForm] = useState(EMPTY);
+  const [photo, setPhoto] = useState<string | null>(null);
+  const [photoFile, setPhotoFile] = useState<File | null>(null);
+  const [posY, setPosY] = useState<number>(50);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [items, setItems] = useState<Item[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [myMunId, setMyMunId] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  // Efecto 1: Resolver el ID del municipio del usuario
+  useEffect(() => {
+    let isMounted = true;
+    if (!user?.id) return;
+
+    supabase.from("profiles").select("municipality_id").eq("id", user.id).maybeSingle()
+      .then(({ data }) => {
+        if (isMounted) setMyMunId(data?.municipality_id ?? null);
+      });
+
+    return () => { isMounted = false; };
+  }, [user?.id]);
+
+  // Efecto 2: Cargar el contenido en base a los permisos y el área
+  useEffect(() => {
+    let isMounted = true;
+
+    const fetchContent = async () => {
+      setLoading(true);
+      let q = supabase.from("content_items").select("*").order("created_at", { ascending: false });
+      if (!canEditAllAreas) {
+        q = q.eq("area", area);
+      }
+      if (myMunId) q = q.eq("municipality_id", myMunId);
+
+      try {
+        const { data } = await q;
+        if (isMounted) {
+          setItems((data as Item[]) || []);
+          setLoading(false);
+        }
+      } catch (error) {
+        console.error("Error cargando contenido", error);
+        if (isMounted) setLoading(false);
+      }
+    };
+
+    fetchContent();
+
+    return () => { isMounted = false; };
+  }, [area, canEditAllAreas, myMunId]);
+
+  // Exponemos una función load simplificada solo para recargar después de Guardar/Borrar
+  const load = async () => {
+      let q = supabase.from("content_items").select("*").order("created_at", { ascending: false });
+      if (!canEditAllAreas) q = q.eq("area", area);
+      if (myMunId) q = q.eq("municipality_id", myMunId);
+      const { data } = await q;
+      setItems((data as Item[]) || []);
+  };
+
+  const onUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    if (f) {
+      setPhotoFile(f);
+      setPhoto(URL.createObjectURL(f));
+      setPosY(50);
+    }
+  };
+
+  const reset = () => {
+    setForm(EMPTY);
+    setPhoto(null);
+    setPhotoFile(null);
+    setPosY(50);
+    setEditingId(null);
+    if (fileRef.current) fileRef.current.value = "";
+  };
+
+  // Recorta la imagen a 1200x600 (2:1) usando posY (0-100) como encuadre vertical
+  const cropTo2x1 = (file: File): Promise<Blob> =>
+    new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const TW = 1200, TH = 600;
+        const targetRatio = TW / TH;
+        const srcRatio = img.width / img.height;
+        let sx = 0, sy = 0, sw = img.width, sh = img.height;
+        if (srcRatio > targetRatio) {
+          // recortar lados
+          sw = img.height * targetRatio;
+          sx = (img.width - sw) / 2;
+        } else {
+          // recortar arriba/abajo según posY
+          sh = img.width / targetRatio;
+          const maxOffset = img.height - sh;
+          sy = Math.max(0, Math.min(maxOffset, (posY / 100) * maxOffset));
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = TW;
+        canvas.height = TH;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return reject(new Error("Canvas no disponible"));
+        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, TW, TH);
+        canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("Error al generar imagen"))), "image/jpeg", 0.88);
+      };
+      img.onerror = () => reject(new Error("No se pudo cargar la imagen"));
+      img.src = URL.createObjectURL(file);
+    });
+
+  const uploadPhoto = async (): Promise<string | null> => {
+    if (!photoFile || !user) return photo; // si es URL existente
+    let blob: Blob = photoFile;
+    try {
+      blob = await cropTo2x1(photoFile);
+    } catch {
+      blob = photoFile;
+    }
+    const path = `${user.id}/content-${Date.now()}.jpg`;
+    
+    // 🟠 FIX ALTO SRE: Forzamos cache local para evitar desbordes de Egress
+    const { error } = await supabase.storage.from("avatars").upload(path, blob, { 
+      upsert: true, 
+      contentType: "image/jpeg",
+      cacheControl: "31536000" // 1 año en caché de disco del cliente móvil
+    });
+    
+    if (error) return null;
+    const { data } = supabase.storage.from("avatars").getPublicUrl(path);
+    return data.publicUrl;
+  };
+
+  const submit = async () => {
+    if (!canCreateContent && !editingId) {
+      toast.error("No tenés permisos.");
+      return;
+    }
+
+    if (!canEditContent && editingId) {
+      toast.error("No tenés permisos.");
+      return;
+    }
+    if (!form.title.trim()) {
+      toast.error("Falta el título");
+      return;
+    }
+    
+    setBusy(true);
+    const photo_url = await uploadPhoto();
+    
+    // Corrección quirúrgica P1: Detener proceso si la nueva subida falló debido a problemas de red móvil
+    if (photoFile && !photo_url) {
+      toast.error("Error al subir la imagen. Por favor, verificá tu conexión móvil e intentalo de nuevo.");
+      setBusy(false);
+      return;
+    }
+
+    // Vincular al municipio del jefe logueado
+    let municipality_id: string | null = null;
+    if (user?.id) {
+      const { data: prof } = await supabase
+        .from("profiles")
+        .select("municipality_id")
+        .eq("id", user.id)
+        .maybeSingle();
+      municipality_id = prof?.municipality_id ?? null;
+    }
+    
+    const payload = {
+      area,
+      kind,
+      title: form.title.trim(),
+      description: form.desc.trim() || null,
+      price: form.price ? Number(String(form.price).replace(/[^\d.-]/g, "")) || null : null,
+      days: form.days.trim() || null,
+      schedule: form.schedule.trim() || null,
+      photo_url,
+      created_by: user?.id,
+      ...(municipality_id ? { municipality_id } : {}),
+    };
+    
+    let error;
+    if (editingId) {
+      ({ error } = await supabase.from("content_items").update(payload).eq("id", editingId));
+    } else {
+      ({ error } = await supabase.from("content_items").insert(payload));
+    }
+    
+    setBusy(false);
+    
+    if (error) {
+      toast.error(editingId ? "No se pudo actualizar" : "No se pudo publicar", { description: error.message });
+      return;
+    }
+    
+    toast.success(editingId ? "Cambios guardados" : "Publicado correctamente");
+    reset();
+    load();
+  };
+
+  const startEdit = (it: Item) => {
+    if (!canEditContent) {
+      toast.error("No tenés permisos.");
+      return;
+    }
+    setEditingId(it.id);
+    setKind(it.kind as Kind);
+    setForm({
+      title: it.title,
+      price: it.price?.toString() || "",
+      days: it.days || "",
+      schedule: it.schedule || "",
+      desc: it.description || "",
+    });
+    setPhoto(it.photo_url);
+    setPhotoFile(null);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const remove = async (id: string) => {
+    if (!canDeleteContent) {
+      toast.error("No tenés permisos.");
+      return;
+    }
+    if (!confirm("¿Eliminar esta publicación?")) return;
+    const { error } = await supabase.from("content_items").delete().eq("id", id);
+    if (error) {
+      toast.error("No se pudo eliminar");
+      return;
+    }
+    toast.success("Eliminado");
+    setItems((xs) => xs.filter((x) => x.id !== id));
+  };
+
+  return (
+    <div className="space-y-5">
+      {canEditAllAreas && (
+        <div className="isa-card p-3 flex items-center gap-2">
+          <span className="text-[11px] uppercase tracking-wider font-bold text-muted-foreground">Área</span>
+          <select value={area} onChange={(e) => setArea(e.target.value as Area)} className="px-3 py-2 rounded-xl border bg-background text-sm font-bold">
+            {AREAS.map((a) => <option key={a}>{a}</option>)}
+          </select>
+        </div>
+      )}
+
+      <div className="flex gap-2 overflow-x-auto pb-1">
+        {KINDS.map((t) => (
+          <button key={t} onClick={() => setKind(t)} className={`px-3 py-1.5 rounded-[20px] text-xs font-bold ${kind === t ? "bg-isa-navy text-isa-white" : "bg-card border"}`}>{t}</button>
+        ))}
+      </div>
+
+      {(canCreateContent || canEditContent) && (
+        <div className="isa-card p-5 space-y-3">
+          <h3>{editingId ? `Editar ${kind.toLowerCase()}` : `Nuevo ${kind.toLowerCase()}`} · {area}</h3>
+
+          {photo ? (
+            <div className="space-y-2">
+              <div className="relative w-full overflow-hidden rounded-xl bg-muted" style={{ aspectRatio: "2 / 1" }}>
+                <img
+                  src={photo}
+                  className="absolute inset-0 w-full h-full object-cover"
+                  style={{ objectPosition: `center ${posY}%` }}
+                  alt="preview"
+                />
+                <button onClick={() => { setPhoto(null); setPhotoFile(null); }} className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/60 text-white grid place-items-center"><X className="w-4 h-4" /></button>
+              </div>
+              {photoFile && (
+                <div className="space-y-1">
+                  <label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">Reencuadrar (vertical)</label>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={posY}
+                    onChange={(e) => setPosY(parseInt(e.target.value, 10))}
+                    className="w-full"
+                  />
+                </div>
+              )}
+              <p className="text-[11px] text-muted-foreground">Tamaño recomendado: 1200x600px (2:1)</p>
+            </div>
+          ) : (
+            <div className="space-y-1">
+              <button onClick={() => fileRef.current?.click()} className="w-full rounded-xl border-2 border-dashed grid place-items-center text-muted-foreground" style={{ aspectRatio: "2 / 1" }}>
+                <div className="text-center"><Camera className="w-6 h-6 mx-auto" /><div className="text-xs mt-1">Subir foto del evento</div></div>
+              </button>
+              <p className="text-[11px] text-muted-foreground">Tamaño recomendado: 1200x600px (2:1)</p>
+            </div>
+          )}
+          <input ref={fileRef} type="file" accept="image/*" hidden onChange={onUpload} />
+
+          <input placeholder="Título" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm" />
+          <textarea placeholder="Descripción" value={form.desc} onChange={(e) => setForm({ ...form, desc: e.target.value })} rows={3} className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm resize-none" />
+          <div className="grid grid-cols-2 gap-2">
+            <input placeholder="Precio (ej 5000)" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} className="px-3 py-2.5 rounded-xl border bg-background text-sm" />
+            <input placeholder="Días" value={form.days} onChange={(e) => setForm({ ...form, days: e.target.value })} className="px-3 py-2.5 rounded-xl border bg-background text-sm" />
+          </div>
+          <input placeholder="Horario" value={form.schedule} onChange={(e) => setForm({ ...form, schedule: e.target.value })} className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm" />
+
+          <div className="flex gap-2">
+            {((canCreateContent && !editingId) || (canEditContent && editingId)) && (
+              <button
+                onClick={submit}
+                disabled={!form.title || busy}
+                className="flex-1 bg-isa-navy text-isa-white rounded-[20px] py-3 font-bold disabled:opacity-40 flex items-center justify-center gap-2"
+              >
+                {busy ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <CheckCircle2 className="w-4 h-4" />
+                )}
+                {editingId ? "Guardar cambios" : "Publicar"}
+              </button>
+            )}
+            {editingId && (
+              <button onClick={reset} className="px-4 rounded-[20px] border-2 border-isa-navy text-isa-navy font-bold text-sm">Cancelar</button>
+            )}
+          </div>
+        </div>
+      )}
+
+      <section>
+        <div className="flex items-center justify-between mb-3">
+          <h2> Lo publicado {!canEditAllAreas && `· ${area}`} </h2>
+          <span className="text-xs text-muted-foreground">{items.length} ítem(s)</span>
+        </div>
+        {loading ? (
+          <div className="isa-card p-6 text-center text-sm text-muted-foreground">Cargando…</div>
+        ) : items.length === 0 ? (
+          <div className="isa-card p-6 text-center text-sm text-muted-foreground">Aún no hay contenido publicado.</div>
+        ) : (
+          <ul className="space-y-2">
+            {items.map((it) => (
+              <li key={it.id} className="isa-card p-3 flex items-center gap-3">
+                {it.photo_url ? (
+                  <img src={it.photo_url} className="w-14 h-14 rounded-lg object-cover shrink-0" />
+                ) : (
+                  <div className="w-14 h-14 rounded-lg bg-muted shrink-0" />
+                )}
+                <div className="flex-1 min-w-0">
+                  <div className="font-extrabold text-isa-navy text-sm truncate">{it.title}</div>
+                  <div className="text-xs text-muted-foreground truncate">
+                    {it.kind} · {it.area}{it.price ? ` · ${formatARS(it.price)}` : ""}{it.schedule ? ` · ${it.schedule}` : ""}
+                  </div>
+                </div>
+                {canEditContent && (
+                  <button
+                    onClick={() => startEdit(it)}
+                    className="w-9 h-9 grid place-items-center rounded-lg hover:bg-isa-light text-isa-navy" >
+                    <Pencil className="w-4 h-4" />
+                  </button>
+                )}
+                {canDeleteContent && (
+                  <button
+                    onClick={() => remove(it.id)}
+                    className="w-9 h-9 grid place-items-center rounded-lg hover:bg-muno-red/10 text-muno-red" >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+    </div>
+  );
+}
+</file>
+
 <file path="src/pages/admin/AdminNovedadesJefes.tsx">
 import { useEffect, useState, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
@@ -22254,6 +21714,657 @@ function CreateDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () =
         <button disabled={saving} onClick={save} className="mt-4 w-full bg-isa-navy text-white rounded-[12px] py-2.5 text-sm font-bold disabled:opacity-60">
           {saving ? "Publicando…" : "Publicar"}
         </button>
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="src/pages/admin/AdminReclamos.tsx">
+import { useEffect, useState, useRef, useCallback } from "react";
+import { Camera, X, CheckCircle2, Clock, AlertCircle, MapPin, Users, MessageSquare, Plus, Trash2, Pencil, Save, FileText, Loader2 } from "lucide-react";
+import { Link } from "react-router-dom";
+import { toast } from "sonner";
+import { supabase } from "@/integrations/supabase/client";
+import { logActivity } from "@/lib/audit";
+import { useAuth } from "@/context/AuthContext";
+
+import { CLAIM_AREAS } from "@/data/mock";
+
+const CUADRILLAS = ["Cuadrilla A · Alumbrado", "Cuadrilla B · Bacheo", "Cuadrilla C · Limpieza", "Cuadrilla D · Espacios verdes"];
+
+type ClaimStatus = "Pendiente" | "En curso" | "Cerrado";
+const STATUS_LIST: ClaimStatus[] = ["Pendiente", "En curso", "Cerrado"];
+const STATUS_LABEL: Record<string, string> = {
+  "Pendiente": "Pendiente de revisión",
+  "En curso": "En curso",
+  "Cerrado": "Resuelto",
+};
+const STATUS_STYLE: Record<string, string> = {
+  "Pendiente": "bg-muno-amber/15 text-[hsl(var(--muno-amber))]",
+  "En curso": "bg-muno-blue/15 text-muno-blue",
+  "Cerrado": "bg-muno-teal/15 text-muno-teal",
+};
+const STATUS_DOT: Record<string, string> = {
+  "Pendiente": "bg-red-500",
+  "En curso": "bg-amber-400",
+  "Cerrado": "bg-emerald-500",
+};
+const STATUS_BTN: Record<string, string> = {
+  "Pendiente": "border-red-500 bg-red-500/10 text-red-700",
+  "En curso": "border-amber-500 bg-amber-400/15 text-amber-800",
+  "Cerrado": "border-emerald-500 bg-emerald-500/10 text-emerald-700",
+};
+
+type Claim = {
+  id: string;
+  user_id: string;
+  category: string;
+  area: string | null;
+  status: ClaimStatus;
+  address: string | null;
+  description: string | null;
+  evidence_photos: string[] | null;
+  resolution_note: string | null;
+  resolution_photos: string[] | null;
+  resolved_at: string | null;
+  created_at: string;
+};
+
+type Canned = { id: string; label: string; body: string; enabled: boolean };
+
+interface ClaimUpdate {
+  status: ClaimStatus;
+  resolution_note?: string;
+  resolution_photos?: string[];
+  resolved_at?: string;
+}
+
+interface NotificationPayload {
+  title: string;
+  body: string;
+  link: string;
+  audience: string;
+  source_type: string;
+  source_id: string;
+  user_id: string;
+}
+
+interface CannedPayload {
+  label: string;
+  body: string;
+  enabled: boolean;
+  municipality_id?: string;
+}
+
+// 🟡 FIX MEDIO SRE: Compresión asíncrona de imágenes en el Panel Admin
+const compressImage = (file: File): Promise<Blob> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.src = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(img.src);
+      const canvas = document.createElement("canvas");
+      const MAX_WIDTH = 1920;
+      const MAX_HEIGHT = 1080;
+      let width = img.width;
+      let height = img.height;
+
+      if (width > height) {
+        if (width > MAX_WIDTH) { height *= MAX_WIDTH / width; width = MAX_WIDTH; }
+      } else {
+        if (height > MAX_HEIGHT) { width *= MAX_HEIGHT / height; height = MAX_HEIGHT; }
+      }
+
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return reject(new Error("Canvas context is null"));
+      ctx.drawImage(img, 0, 0, width, height);
+      canvas.toBlob((blob) => {
+        if (blob) resolve(blob); else reject(new Error("Blob null"));
+      }, "image/jpeg", 0.75);
+    };
+    img.onerror = (err) => reject(err);
+  });
+};
+
+export default function AdminReclamos() {
+  const { user } = useAuth();
+  const [items, setItems] = useState<Claim[]>([]);
+  const [active, setActive] = useState<Claim | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [showTpl, setShowTpl] = useState(false);
+  const [areaFilter, setAreaFilter] = useState<string>("");
+  const [statusFilter, setStatusFilter] = useState<string>("");
+
+  // 🔴 FIX CRÍTICO SRE: Filtrado en Base de Datos (Zero Seq Scans)
+  const loadClaims = useCallback(async (isMounted = true) => {
+    if (!user) return;
+    setLoading(true);
+    try {
+      // 1. Obtener la jurisdicción (Multi-tenant BOLA fix)
+      const { data: userRole } = await supabase
+        .from("user_roles")
+        .select("municipality_id")
+        .eq("user_id", user.id)
+        .eq("active", true)
+        .maybeSingle();
+
+      const muniId = userRole?.municipality_id;
+
+      // 2. Construir la consulta con filtros directos al motor SQL
+      let q = supabase
+        .from("claims")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(200);
+
+      if (muniId) q = q.eq("municipality_id", muniId);
+      if (areaFilter) q = q.eq("area", areaFilter);
+      if (statusFilter) q = q.eq("status", statusFilter as ClaimStatus);
+        
+      const { data } = await q;
+        
+      if (isMounted) {
+        setItems((data as Claim[]) || []);
+        setLoading(false);
+      }
+    } catch (err) {
+      console.error("Error al cargar reclamos:", err);
+      if (isMounted) setLoading(false);
+    }
+  }, [user, areaFilter, statusFilter]); // Re-ejecuta solo si cambian los filtros
+
+  useEffect(() => {
+    let isMounted = true;
+    loadClaims(isMounted);
+    return () => { isMounted = false; };
+  }, [loadClaims]);
+
+  const update = (c: Claim) => setItems((p) => p.map((x) => x.id === c.id ? c : x));
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <h2 className="font-display text-isa-navy text-[20px] font-extrabold">Bandeja de Reclamos</h2>
+        <button
+          onClick={() => setShowTpl(true)}
+          className="inline-flex items-center gap-1.5 text-xs font-bold bg-isa-navy text-white rounded-[14px] px-3 py-2 min-h-[40px]"
+        >
+          <FileText className="w-3.5 h-3.5" /> Respuestas predeterminadas
+        </button>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-bold text-muted-foreground">Área:</span>
+        <button onClick={() => setAreaFilter("")} className={`px-3 py-1 rounded-full text-xs font-bold border ${!areaFilter ? "bg-isa-navy text-white border-isa-navy" : "bg-card"}`}>Todas</button>
+        {CLAIM_AREAS.map((a) => (
+          <button key={a} onClick={() => setAreaFilter(a)} className={`px-3 py-1 rounded-full text-xs font-bold border ${areaFilter === a ? "bg-isa-navy text-white border-isa-navy" : "bg-card"}`}>{a}</button>
+        ))}
+        <span className="mx-2 h-4 w-px bg-border" />
+        <span className="text-xs font-bold text-muted-foreground">Estado:</span>
+        {["", ...STATUS_LIST].map((s) => (
+          <button key={s || "all"} onClick={() => setStatusFilter(s)} className={`inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-bold border ${statusFilter === s ? "bg-isa-navy text-white border-isa-navy" : "bg-card"}`}>
+            {s && <span className={`w-2 h-2 rounded-full ${STATUS_DOT[s]}`} />}
+            {s || "Todos"}
+          </button>
+        ))}
+      </div>
+
+      {loading && (
+        <div className="text-center text-sm text-muted-foreground py-10 inline-flex items-center gap-2 justify-center w-full">
+          <Loader2 className="w-4 h-4 animate-spin" /> Cargando…
+        </div>
+      )}
+
+      {!loading && items.length === 0 && (
+        <div className="isa-card p-6 text-center text-sm text-muted-foreground">
+          No hay reclamos {areaFilter ? `en ${areaFilter}` : ""} {statusFilter ? `· ${statusFilter}` : ""}.
+        </div>
+      )}
+
+      {!loading && items.length > 0 && (
+        <>
+          {/* Vista Escritorio */}
+          <div className="isa-card overflow-hidden hidden lg:block">
+            <table className="w-full text-sm">
+              <thead className="bg-muted text-isa-navy">
+                <tr>
+                  <th className="text-left p-3">Ticket</th>
+                  <th className="text-left p-3">Categoría</th>
+                  <th className="text-left p-3">Área</th>
+                  <th className="text-left p-3">Fecha</th>
+                  <th className="text-left p-3">Estado</th>
+                  <th className="p-3"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((r) => {
+                  const short = r.id.slice(0, 4).toUpperCase();
+                  return (
+                    <tr key={r.id} className="border-t hover:bg-muted/40 transition-colors">
+                      <td className="p-3 font-bold">
+                        <Link to={`/reclamos/${encodeURIComponent(r.id)}`} className="hover:underline">#MUNO-{short}</Link>
+                      </td>
+                      <td className="p-3">{r.category}</td>
+                      <td className="p-3 text-xs"><span className="px-2 py-1 rounded-full bg-muted">{r.area || "—"}</span></td>
+                      <td className="p-3 text-muted-foreground">{new Date(r.created_at).toLocaleDateString("es-AR")}</td>
+                      <td className="p-3">
+                        <span className={`isa-chip inline-flex items-center gap-1 ${STATUS_STYLE[r.status]}`}>
+                          <span className={`w-2 h-2 rounded-full ${STATUS_DOT[r.status]}`} />
+                          {STATUS_LABEL[r.status] || r.status}
+                        </span>
+                      </td>
+                      <td className="p-3 text-right">
+                        <button onClick={() => setActive(r)} className="text-xs font-bold text-muno-blue hover:underline">Gestionar</button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Vista Móvil */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 lg:hidden">
+            {items.map((r) => {
+              const Icon = r.status === "Cerrado" ? CheckCircle2 : r.status === "En curso" ? Clock : AlertCircle;
+              const short = r.id.slice(0, 4).toUpperCase();
+              return (
+                <article key={r.id} className="isa-card p-4 space-y-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <Link to={`/reclamos/${encodeURIComponent(r.id)}`} className="font-extrabold text-isa-navy text-sm hover:underline">#MUNO-{short}</Link>
+                      <div className="text-xs text-muted-foreground mt-0.5">{r.category} · {new Date(r.created_at).toLocaleDateString("es-AR")}</div>
+                    </div>
+                    <span className={`isa-chip ${STATUS_STYLE[r.status]} inline-flex items-center gap-1 shrink-0`}>
+                      <Icon className="w-3 h-3" /> {STATUS_LABEL[r.status] || r.status}
+                    </span>
+                  </div>
+                  {r.description && <p className="text-xs text-muted-foreground line-clamp-2">{r.description}</p>}
+                  <button
+                    onClick={() => setActive(r)}
+                    className="w-full mt-1 bg-isa-navy text-isa-white rounded-[20px] py-2 text-xs font-bold inline-flex items-center justify-center gap-1.5"
+                  >
+                    <MessageSquare className="w-3.5 h-3.5" /> Gestionar
+                  </button>
+                </article>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {active && <ManageDialog claim={active} onClose={() => setActive(null)} onSaved={(c) => { update(c); setActive(null); }} />}
+      {showTpl && <TemplatesDialog onClose={() => setShowTpl(false)} />}
+    </div>
+  );
+}
+
+function ManageDialog({ claim, onClose, onSaved }: { claim: Claim; onClose: () => void; onSaved: (c: Claim) => void }) {
+  const [status, setStatus] = useState<ClaimStatus>(claim.status);
+  const [response, setResponse] = useState(claim.resolution_note || "");
+  const [photo, setPhoto] = useState<string | null>(claim.resolution_photos?.[0] || null);
+  const [photoFile, setPhotoFile] = useState<File | null>(null); // Añadido estado para el archivo real
+  const [crew, setCrew] = useState<string>("");
+  const [canned, setCanned] = useState<Canned[]>([]);
+  const [saving, setSaving] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const mapHref = `https://maps.google.com/?q=${encodeURIComponent(claim.address || "San Francisco del Monte de Oro")}`;
+  const short = claim.id.slice(0, 4).toUpperCase();
+  const photos = claim.evidence_photos || [];
+
+  useEffect(() => {
+    let isMounted = true;
+    const fetchCanned = async () => {
+      const { data } = await supabase.from("claim_canned_responses").select("id,label,body,enabled").eq("enabled", true);
+      if (isMounted) setCanned((data as Canned[]) || []);
+    };
+    fetchCanned();
+    return () => { isMounted = false; };
+  }, []);
+
+  const onUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    if (f) {
+      setPhotoFile(f);
+      setPhoto(URL.createObjectURL(f));
+    }
+  };
+
+  const save = async () => {
+    if (status === "Cerrado" && !response.trim()) {
+      toast.error("Para cerrar el reclamo, escribí una respuesta.");
+      return;
+    }
+    setSaving(true);
+    
+    const updatePayload: ClaimUpdate = { status };
+    let finalPhotoUrl = photo;
+
+    if (status === "Cerrado") {
+      updatePayload.resolution_note = response.trim();
+      updatePayload.resolved_at = new Date().toISOString();
+
+      // 🟡 FIX MEDIO SRE: Subida real del archivo al bucket en vez de guardar Blob URL local
+      if (photoFile) {
+        try {
+          const compressedBlob = await compressImage(photoFile);
+          const path = `claims/resolutions/${claim.id}-${Date.now()}.jpg`;
+          const { error: uploadError } = await supabase.storage
+            .from("avatars") 
+            .upload(path, compressedBlob, { contentType: "image/jpeg", cacheControl: "31536000", upsert: true });
+          
+          if (!uploadError) {
+            const { data } = supabase.storage.from("avatars").getPublicUrl(path);
+            finalPhotoUrl = data.publicUrl;
+          } else {
+             toast.error("Error al subir imagen de resolución");
+             setSaving(false);
+             return;
+          }
+        } catch (e) {
+           console.error("Compression error", e);
+        }
+      }
+      
+      if (finalPhotoUrl && !finalPhotoUrl.startsWith("blob:")) {
+        updatePayload.resolution_photos = [finalPhotoUrl];
+      }
+    } else if (response.trim()) {
+      updatePayload.resolution_note = response.trim();
+    }
+    
+    const { data, error } = await supabase.from("claims").update(updatePayload).eq("id", claim.id).select("*").single();
+    if (error || !data) {
+      setSaving(false);
+      toast.error("No se pudo guardar", { description: error?.message });
+      return;
+    }
+    
+    if (response.trim() || status !== claim.status) {
+      const areaLabel = claim.area || "tu área";
+      const body =
+        status === "Cerrado"
+          ? `Tu reclamo en ${areaLabel} fue resuelto.`
+          : status === "En curso"
+          ? `Tu reclamo en ${areaLabel} está en curso.`
+          : `Tu reclamo en ${areaLabel} ha sido respondido.`;
+          
+      const notifPayload: NotificationPayload = {
+        title: `Reclamo #MUNO-${claim.id.slice(0, 4).toUpperCase()}`,
+        body,
+        link: `/reclamos/${claim.id}`,
+        audience: "residents",
+        source_type: "claim",
+        source_id: claim.id,
+        user_id: claim.user_id,
+      };
+      
+      await supabase.from("notifications").insert(notifPayload);
+    }
+    setSaving(false);
+    toast.success("Reclamo actualizado · Vecino notificado");
+    logActivity(
+      status === "Cerrado" ? "Cerrar reclamo" : `Actualizar reclamo · ${status}`,
+      { entity: "claim", entity_id: claim.id, meta: { crew, status, area: claim.area } }
+    );
+    onSaved(data as Claim);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
+      <div className="isa-card p-5 max-w-lg w-full max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <div className="text-xs text-muted-foreground">Ticket</div>
+            <h3 className="font-extrabold text-isa-navy">#MUNO-{short}</h3>
+          </div>
+          <button onClick={onClose} className="w-8 h-8 grid place-items-center rounded-lg hover:bg-muted"><X className="w-4 h-4" /></button>
+        </div>
+
+        {photos[0] && <img src={photos[0]} className="w-full h-32 object-cover rounded-xl mb-3" />}
+        {claim.description && <p className="text-sm text-muted-foreground mb-3">{claim.description}</p>}
+
+        {claim.address && (
+          <a href={mapHref} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-[12px] font-bold text-muno-blue mb-4">
+            <MapPin className="w-3.5 h-3.5" /> {claim.address}
+          </a>
+        )}
+
+        <label className="text-xs font-bold text-muted-foreground flex items-center gap-1"><Users className="w-3 h-3" /> Cuadrilla</label>
+        <select value={crew} onChange={(e) => setCrew(e.target.value)} className="mt-1 mb-4 w-full px-3 py-2.5 rounded-xl border bg-background text-sm min-h-[44px]">
+          <option value="">Sin asignar</option>
+          {CUADRILLAS.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+
+        {claim.area && (
+          <div className="mb-3 inline-flex items-center gap-1.5 text-[11px] font-bold px-2 py-1 rounded-full bg-muted text-isa-navy">
+            Área asignada: {claim.area}
+          </div>
+        )}
+
+        <label className="text-xs font-bold text-muted-foreground">Estado del ticket</label>
+        <div className="flex gap-2 mt-1 mb-4">
+          {STATUS_LIST.map((s) => (
+            <button
+              key={s}
+              onClick={() => setStatus(s)}
+              className={`flex-1 px-3 py-2 rounded-[20px] text-xs font-bold min-h-[44px] inline-flex items-center justify-center gap-1.5 border-2 transition-all ${
+                status === s ? STATUS_BTN[s] : "bg-card border-border text-muted-foreground"
+              }`}
+            >
+              <span className={`w-2.5 h-2.5 rounded-full ${STATUS_DOT[s]}`} />
+              {STATUS_LABEL[s]}
+            </button>
+          ))}
+        </div>
+
+        <label className="text-xs font-bold text-muted-foreground flex items-center gap-1"><MessageSquare className="w-3 h-3" /> Respuesta predeterminada</label>
+        <select
+          onChange={(e) => {
+            const c = canned.find((x) => x.id === e.target.value);
+            if (c) setResponse(c.body);
+          }}
+          defaultValue=""
+          className="mt-1 mb-3 w-full px-3 py-2.5 rounded-xl border bg-background text-sm min-h-[44px]"
+        >
+          <option value="">— Elegí una plantilla —</option>
+          {canned.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+        </select>
+
+        <label className="text-xs font-bold text-muted-foreground">Respuesta Oficial del Área</label>
+        <textarea value={response} onChange={(e) => setResponse(e.target.value)} rows={4} placeholder="Escribí o seleccioná una respuesta predefinida…" className="mt-1 w-full px-3 py-2 rounded-xl border bg-background text-sm mb-3 resize-none" />
+
+        {status === "Cerrado" && (
+          <>
+            <label className="text-xs font-bold text-muted-foreground">Foto del trabajo realizado (opcional)</label>
+            <div className="mt-1 mb-3">
+              {photo ? (
+                <div className="relative">
+                  <img src={photo} className="w-full h-40 object-cover rounded-xl" />
+                  <button onClick={() => { setPhoto(null); setPhotoFile(null); }} className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/60 text-white grid place-items-center"><X className="w-4 h-4" /></button>
+                </div>
+              ) : (
+                <button onClick={() => fileRef.current?.click()} className="w-full h-32 rounded-xl border-2 border-dashed grid place-items-center text-muted-foreground">
+                  <div className="text-center"><Camera className="w-6 h-6 mx-auto" /><div className="text-xs mt-1">Subir foto</div></div>
+                </button>
+              )}
+              <input ref={fileRef} type="file" accept="image/*" hidden onChange={onUpload} />
+            </div>
+          </>
+        )}
+
+        <button onClick={save} disabled={saving} className="w-full bg-isa-navy text-isa-white rounded-[20px] py-3 font-bold inline-flex items-center justify-center gap-2 disabled:opacity-60">
+          {saving && <Loader2 className="w-4 h-4 animate-spin" />} Guardar cambios
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function TemplatesDialog({ onClose }: { onClose: () => void }) {
+  const { user } = useAuth();
+  const [items, setItems] = useState<Canned[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState<Canned | null>(null);
+  const [label, setLabel] = useState("");
+  const [body, setBody] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const loadTpl = useCallback(async (isMounted = true) => {
+    setLoading(true);
+    try {
+      const { data } = await supabase
+        .from("claim_canned_responses")
+        .select("*")
+        .order("created_at", { ascending: false });
+      if (isMounted) {
+        setItems((data as Canned[]) || []);
+        setLoading(false);
+      }
+    } catch (err) {
+      console.error("Error al cargar plantillas:", err);
+      if (isMounted) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    let isMounted = true;
+    loadTpl(isMounted);
+    return () => { isMounted = false; };
+  }, [loadTpl]);
+
+  const startNew = () => {
+    setEditing({ id: "", label: "", body: "", enabled: true });
+    setLabel("");
+    setBody("");
+  };
+  const startEdit = (c: Canned) => {
+    setEditing(c);
+    setLabel(c.label);
+    setBody(c.body);
+  };
+
+  const save = async () => {
+    if (!label.trim() || !body.trim()) {
+      toast.error("Completá título y contenido");
+      return;
+    }
+    setBusy(true);
+    
+    let municipality_id: string | null = null;
+    if (user?.id) {
+      const { data: prof } = await supabase
+        .from("profiles")
+        .select("municipality_id")
+        .eq("id", user.id)
+        .maybeSingle();
+      municipality_id = prof?.municipality_id || null;
+    }
+
+    const payload: CannedPayload = { 
+      label: label.trim(), 
+      body: body.trim(), 
+      enabled: true 
+    };
+    
+    if (municipality_id) {
+      payload.municipality_id = municipality_id;
+    }
+
+    const res = editing && editing.id
+      ? await supabase.from("claim_canned_responses").update(payload).eq("id", editing.id)
+      : await supabase.from("claim_canned_responses").insert(payload);
+      
+    setBusy(false);
+    
+    if (res.error) {
+      toast.error("No se pudo guardar", { description: res.error.message });
+      return;
+    }
+    toast.success("Plantilla guardada");
+    setEditing(null);
+    loadTpl();
+  };
+
+  const remove = async (id: string) => {
+    if (!window.confirm("¿Eliminar esta plantilla?")) return;
+    const { error } = await supabase.from("claim_canned_responses").delete().eq("id", id);
+    if (error) {
+      toast.error("No se pudo eliminar");
+      return;
+    }
+    setItems((xs) => xs.filter((x) => x.id !== id));
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
+      <div className="isa-card p-5 max-w-lg w-full max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-extrabold text-isa-navy inline-flex items-center gap-2">
+            <FileText className="w-4 h-4" /> Respuestas predeterminadas
+          </h3>
+          <button onClick={onClose} className="w-8 h-8 grid place-items-center rounded-lg hover:bg-muted"><X className="w-4 h-4" /></button>
+        </div>
+
+        {editing ? (
+          <div className="space-y-3">
+            <input
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              placeholder="Título corto · Ej: Bache reparado"
+              className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm"
+            />
+            <textarea
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              rows={5}
+              placeholder="Texto de la respuesta…"
+              className="w-full px-3 py-2.5 rounded-xl border bg-background text-sm resize-none"
+            />
+            <div className="flex gap-2">
+              <button onClick={() => setEditing(null)} className="flex-1 px-3 py-2.5 rounded-[14px] border font-bold text-sm">Cancelar</button>
+              <button onClick={save} disabled={busy} className="flex-1 px-3 py-2.5 rounded-[14px] bg-isa-navy text-white font-bold text-sm inline-flex items-center justify-center gap-1 disabled:opacity-60">
+                {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                Guardar
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <button onClick={startNew} className="w-full mb-3 inline-flex items-center justify-center gap-1.5 bg-isa-navy text-white rounded-[14px] py-2.5 text-sm font-bold">
+              <Plus className="w-4 h-4" /> Nueva plantilla
+            </button>
+            {loading && <div className="text-sm text-muted-foreground text-center py-4">Cargando…</div>}
+            {!loading && items.length === 0 && (
+              <div className="text-sm text-muted-foreground text-center py-6 border border-dashed rounded-xl">
+                Aún no hay plantillas. Creá la primera para responder más rápido.
+              </div>
+            )}
+            <ul className="space-y-2">
+              {items.map((c) => (
+                <li key={c.id} className="border rounded-xl p-3 bg-background">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="font-bold text-isa-navy text-sm">{c.label}</div>
+                      <p className="text-xs text-muted-foreground line-clamp-2 mt-0.5">{c.body}</p>
+                    </div>
+                    <div className="flex gap-1 shrink-0">
+                      <button onClick={() => startEdit(c)} className="w-8 h-8 grid place-items-center rounded-lg hover:bg-muted text-isa-navy">
+                        <Pencil className="w-3.5 h-3.5" />
+                      </button>
+                      <button onClick={() => remove(c.id)} className="w-8 h-8 grid place-items-center rounded-lg hover:bg-muno-red/10 text-muno-red">
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
       </div>
     </div>
   );
@@ -23014,6 +23125,194 @@ export default function Turismo() {
 }
 </file>
 
+<file path="src/pages/Lugares.tsx">
+import { useState, useMemo, useEffect, ElementType, ReactNode } from "react";
+import { places } from "@/data/mock";
+import { MapPin, Trees, Landmark, Clock, Tag, Info } from "lucide-react";
+import { formatARS } from "@/lib/format";
+import { track } from "@/lib/analytics";
+import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/context/AuthContext";
+import { useMunicipality } from "@/context/MunicipalityContext";
+import FavoriteButton from "@/components/FavoriteButton";
+
+// 1. Tipos estrictos 
+type Cat = "Naturaleza" | "Cultura";
+
+interface PlaceItem {
+  id: string;
+  name: string;
+  type: string;
+  address: string;
+  zone: string;
+  schedule: string;
+  days: string;
+  price?: number;
+  photo_url: string;
+  how_to_get: string;
+  requirements?: string;
+}
+
+interface DBContentItem {
+  id: string;
+  title: string;
+  category?: string;
+  type?: string;
+  description?: string;
+  schedule?: string;
+  days?: string;
+  price?: number | null;
+  photo_url?: string;
+}
+
+const NATURE_TYPES = ["Naturaleza", "Salto", "Parque Nacional", "Río", "Dique"];
+const CULTURE_TYPES = ["Museo", "Cultural", "Monumento", "Cultura"];
+
+const InfoLine = ({ icon: Icon, children }: { icon: ElementType; children: ReactNode }) => (
+  <div className="flex items-start gap-1.5 text-[11px] text-muted-foreground">
+    <Icon strokeWidth={1.5} className="w-3 h-3 mt-0.5 shrink-0" /><span>{children}</span>
+  </div>
+);
+
+const PlaceCard = ({ item }: { item: PlaceItem }) => (
+  <article className="isa-card overflow-hidden hover:-translate-y-0.5 hover:shadow-md transition-all">
+    <div className="relative">
+      <img src={item.photo_url} alt={item.name} loading="lazy" className="w-full h-[140px] object-cover" />
+      <div className="absolute top-2 right-2">
+        <FavoriteButton place={{ id: item.id, name: item.name, type: item.type, photo_url: item.photo_url, zone: item.zone }} />
+      </div>
+    </div>
+    <div className="p-4 space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="font-extrabold text-isa-navy">{item.name}</h3>
+        <span className="isa-chip bg-accent text-isa-navy">{item.type}</span>
+      </div>
+      <InfoLine icon={MapPin}>{item.address}{item.zone && ` · ${item.zone}`}</InfoLine>
+      {item.schedule && <InfoLine icon={Clock}>{item.schedule}{item.days && ` · ${item.days}`}</InfoLine>}
+      {typeof item.price === "number" && <InfoLine icon={Tag}>{item.price === 0 ? "Entrada gratuita" : formatARS(item.price)}</InfoLine>}
+      {item.requirements && item.requirements !== "—" && <InfoLine icon={Info}>{item.requirements}</InfoLine>}
+      <a href={item.how_to_get} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center w-full bg-isa-navy text-isa-white rounded-[16px] py-2.5 text-sm font-bold hover:opacity-90 mt-1 min-h-[44px]">
+        Cómo llegar
+      </a>
+    </div>
+  </article>
+);
+
+// 2. Extraemos el componente fuera del render principal
+const CategoryBtn = ({ 
+  value, 
+  icon: Icon, 
+  label, 
+  isActive, 
+  onClick 
+}: { 
+  value: Cat; 
+  icon: ElementType; 
+  label: string; 
+  isActive: boolean; 
+  onClick: (val: Cat) => void;
+}) => {
+  return (
+    <button
+      onClick={() => { onClick(value); track({ kind: "category_click", category: `Lugares:${value}`, userType: "turista" }); }}
+      className="flex-1 min-h-[88px] rounded-[16px] flex flex-col items-center justify-center gap-1.5 font-extrabold text-sm transition-all"
+      style={{
+        background: isActive ? "#242E44" : "#F5EFE6",
+        color: isActive ? "#FFFFFF" : "#242E44",
+        border: isActive ? "none" : "1px solid rgba(36,46,68,0.12)",
+      }}
+    >
+      <Icon strokeWidth={1.5} className="w-7 h-7" />
+      {label}
+    </button>
+  );
+};
+
+export default function Lugares() {
+  const [cat, setCat] = useState<Cat>("Naturaleza");
+  const { user } = useAuth();
+  const { municipality } = useMunicipality();
+  const [dbPlaces, setDbPlaces] = useState<PlaceItem[]>([]);
+
+  useEffect(() => {
+    let isMounted = true; 
+
+    const fetchLugares = async () => {
+      let munId: string | null = null;
+      
+      if (user?.id) {
+        const { data: prof } = await supabase.from("profiles").select("municipality_id").eq("id", user.id).maybeSingle();
+        munId = prof?.municipality_id ?? null;
+      }
+      
+      if (!munId && municipality) {
+        const { data: m } = await supabase.from("municipalities").select("id").eq("name", municipality).maybeSingle();
+        munId = m?.id ?? null;
+      }
+      
+      // 🔴 FIX CRÍTICO SRE: Añadimos .limit(60) para proteger la RAM del cliente y limitar el Scan en BD
+      let q = supabase.from("content_items").select("*").eq("kind", "Lugar").eq("published", true).order("created_at", { ascending: false }).limit(60);
+      if (munId) q = q.eq("municipality_id", munId);
+      
+      const { data } = await q;
+
+      if (isMounted) {
+        const safeData = (data as unknown as DBContentItem[]) || [];
+        setDbPlaces(
+          safeData.map((it) => ({
+            id: it.id,
+            name: it.title,
+            type: it.category || it.type || "Naturaleza",
+            address: it.description || "",
+            zone: municipality || "",
+            schedule: it.schedule || "",
+            days: it.days || "",
+            price: it.price ?? undefined,
+            photo_url: it.photo_url || "/placeholder.svg",
+            how_to_get: "#",
+          }))
+        );
+      }
+    };
+
+    fetchLugares();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [user?.id, municipality]); 
+
+  const filtered = useMemo(() => {
+    const allow = cat === "Naturaleza" ? NATURE_TYPES : CULTURE_TYPES;
+    
+    const dbFiltered = dbPlaces.filter((p) => allow.includes(p.type));
+    const mockFiltered = places.filter((p) => allow.includes(p.type));
+    
+    return [...dbFiltered, ...mockFiltered];
+  }, [cat, dbPlaces]);
+
+  return (
+    <div className="space-y-5">
+      <header>
+        <h1 className="text-isa-navy font-display font-extrabold text-[20px]">Lugares</h1>
+        <p className="text-sm text-muted-foreground">Naturaleza y cultura de la región.</p>
+      </header>
+      <div className="flex gap-3">
+        <CategoryBtn value="Naturaleza" icon={Trees} label="NATURALEZA" isActive={cat === "Naturaleza"} onClick={setCat} />
+        <CategoryBtn value="Cultura" icon={Landmark} label="CULTURA" isActive={cat === "Cultura"} onClick={setCat} />
+      </div>
+      {filtered.length === 0 ? (
+        <p className="text-sm text-muted-foreground text-center py-6">Sin resultados.</p>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {filtered.map((p) => <PlaceCard key={p.id} item={p} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+</file>
+
 <file path="src/pages/Reclamos.tsx">
 import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
@@ -23427,378 +23726,6 @@ export default function Reclamos() {
           </button>
         )}
       </div>
-    </div>
-  );
-}
-</file>
-
-<file path="src/pages/Turismo.tsx">
-import { useState, useMemo, useEffect, ElementType, ReactNode } from "react";
-import { useSearchParams } from "react-router-dom";
-import { useMunicipality } from "@/context/MunicipalityContext";
-import { places, gastronomy, agenda, commerces, lodging, ZONES, type Zone, type AgendaCategory } from "@/data/mock";
-import { MapPin, Calendar, Search, Clock, Tag, Info, X } from "lucide-react";
-import { formatARS } from "@/lib/format";
-import { track } from "@/lib/analytics";
-import LeadDialog from "@/components/LeadDialog";
-import RatingStars from "@/components/RatingStars";
-import FavoriteButton from "@/components/FavoriteButton";
-import { supabase } from "@/integrations/supabase/client";
-import { useAuth } from "@/context/AuthContext";
-
-const TABS_VECINO = ["Lugares", "Saltos", "Museos", "Cultural", "Gastronomía", "Agenda"] as const;
-const TABS_TURISTA = ["Comercio", "Gastronomía", "Hospedaje"] as const;
-const AGENDA_CATS: AgendaCategory[] = ["Hoy", "Fin de Semana", "Conciertos"];
-
-type TabType = typeof TABS_VECINO[number] | typeof TABS_TURISTA[number];
-
-interface DBTurismoItem {
-  id: string;
-  title: string;
-  description?: string;
-  schedule?: string;
-  days?: string;
-  price?: number | null;
-  photo_url?: string;
-  category?: string;
-  type?: string;
-}
-
-interface PlaceItem {
-  id: string;
-  name: string;
-  type: string;
-  address: string;
-  zone?: string;
-  schedule?: string;
-  days?: string;
-  price?: number;
-  photo_url: string;
-  how_to_get: string;
-  requirements?: string;
-}
-
-interface LodgingItem {
-  id: string;
-  name: string;
-  type: string;
-  address: string;
-  zone?: string;
-  schedule?: string;
-  price?: number;
-  photos: string[];
-  requirements?: string;
-}
-
-interface AgendaItem {
-  id: string;
-  title: string;
-  date: string;
-  place: string;
-  zone?: string;
-  category: string;
-}
-
-const InfoLine = ({ icon: Icon, children }: { icon: ElementType; children: ReactNode }) => (
-  <div className="flex items-start gap-1.5 text-[11px] text-muted-foreground">
-    <Icon strokeWidth={1.5} className="w-3 h-3 mt-0.5 shrink-0" />
-    <span>{children}</span>
-  </div>
-);
-
-const PlaceCard = ({ item, rateable }: { item: PlaceItem; rateable?: boolean }) => (
-  <article className="isa-card overflow-hidden hover:-translate-y-0.5 hover:shadow-md transition-all">
-    <div className="relative">
-      {/* 🟠 FIX MEDIO SRE: Lazy loading nativo en tarjetas de turismo */}
-      <img src={item.photo_url} alt={item.name} loading="lazy" className="w-full h-[120px] object-cover" />
-      <div className="absolute top-2 right-2">
-        <FavoriteButton place={{ id: item.id, name: item.name, type: item.type, photo_url: item.photo_url, zone: item.zone || "" }} />
-      </div>
-    </div>
-    <div className="p-4 space-y-2">
-      <div className="flex items-center justify-between gap-2">
-        <h3 className="font-extrabold text-isa-navy">{item.name}</h3>
-        <span className="isa-chip bg-accent text-isa-navy">{item.type}</span>
-      </div>
-      <InfoLine icon={MapPin}>{item.address}{item.zone && ` · ${item.zone}`}</InfoLine>
-      {item.schedule && <InfoLine icon={Clock}>{item.schedule}{item.days && ` · ${item.days}`}</InfoLine>}
-      {typeof item.price === "number" && <InfoLine icon={Tag}>{item.price === 0 ? "Entrada gratuita" : formatARS(item.price)}</InfoLine>}
-      {item.requirements && item.requirements !== "—" && <InfoLine icon={Info}>{item.requirements}</InfoLine>}
-      {rateable && <RatingStars id={item.id} name={item.name} />}
-      <a href={item.how_to_get} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center w-full bg-isa-navy text-isa-white rounded-[20px] py-2.5 text-sm font-bold hover:opacity-90 mt-1">Cómo llegar</a>
-    </div>
-  </article>
-);
-
-const LodgingCard = ({ item, onConsultar }: { item: LodgingItem; onConsultar: (item: LodgingItem) => void }) => {
-  const [idx, setIdx] = useState(0);
-  return (
-    <article className="isa-card overflow-hidden">
-      <div className="relative">
-        {/* 🟠 FIX MEDIO SRE: Lazy loading nativo en tarjetas de alojamiento */}
-        <img src={item.photos[idx]} alt={item.name} loading="lazy" className="w-full h-48 object-cover" />
-        <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex gap-1.5">
-          {item.photos.map((_, i) => (
-            <button key={i} onClick={() => setIdx(i)} className={`w-2 h-2 rounded-full ${i === idx ? "bg-white" : "bg-white/50"}`} />
-          ))}
-        </div>
-      </div>
-      <div className="p-4 space-y-2">
-        <div className="flex items-center justify-between">
-          <h3 className="font-extrabold text-isa-navy">{item.name}</h3>
-          <span className="isa-chip bg-accent text-isa-navy">{item.type}</span>
-        </div>
-        <InfoLine icon={MapPin}>{item.address}</InfoLine>
-        {item.schedule && <InfoLine icon={Clock}>{item.schedule}</InfoLine>}
-        {item.price && <InfoLine icon={Tag}>Desde {formatARS(item.price)} / noche</InfoLine>}
-        {item.requirements && <InfoLine icon={Info}>{item.requirements}</InfoLine>}
-        <button onClick={() => onConsultar(item)} className="w-full mt-1 bg-isa-navy text-isa-white rounded-[20px] py-2.5 text-sm font-bold">Consultar disponibilidad</button>
-      </div>
-    </article>
-  );
-};
-
-function filterByZoneAndQuery<T extends { zone?: string; name: string }>(items: T[], zone: Zone, q: string): T[] {
-  return items.filter((i) => (zone === "Todas" || i.zone === zone) && i.name.toLowerCase().includes(q.toLowerCase()));
-}
-
-function Grid<T>({ items, render, cols = 3 }: { items: T[]; render: (item: T) => ReactNode; cols?: number }) {
-  if (!items.length) return <p className="text-sm text-muted-foreground text-center py-6">Sin resultados.</p>;
-  return <div className={`grid grid-cols-1 sm:grid-cols-2 ${cols === 2 ? "lg:grid-cols-2" : "lg:grid-cols-3"} gap-4`}>{items.map(render)}</div>;
-}
-
-export default function Turismo() {
-  const { user, roles } = useAuth();
-  const { municipality, municipalityId, setMunicipality } = useMunicipality();
-  const isTurista = roles.includes("tourist");
-  
-  // Tipado estricto sin "as any" o "as readonly string[]"
-  const TABS: readonly TabType[] = isTurista ? TABS_TURISTA : TABS_VECINO;
-  
-  const [params, setParams] = useSearchParams();
-  const urlZone = params.get("zone") as Zone | null;
-  const initialZone: Zone = (urlZone || (municipality as Zone) || "Todas") as Zone;
-  
-  const [tab, setTab] = useState<TabType>(TABS[0]);
-  const [zone, setZone] = useState<Zone>(initialZone);
-  const [q, setQ] = useState("");
-  const [agendaCat, setAgendaCat] = useState<AgendaCategory>("Hoy");
-  const [lodgTarget, setLodgTarget] = useState<LodgingItem | null>(null);
-
-  useEffect(() => {
-    if (urlZone && urlZone !== zone) setZone(urlZone);
-  }, [urlZone, zone]);
-
-  useEffect(() => {
-    if (zone && zone !== "Todas") {
-      setMunicipality(zone);
-      track({ kind: "search_zone", zone, userType: isTurista ? "turista" : "vecino" });
-    }
-  }, [zone, isTurista, setMunicipality]);
-
-  useEffect(() => {
-    track({ kind: "category_click", category: tab, userType: isTurista ? "turista" : "vecino" });
-  }, [tab, isTurista]);
-
-  const clearMunicipality = () => {
-    setMunicipality("");
-    setZone("Todas");
-    setParams({});
-  };
-
-  // Optimización total de memoria: Todos los filtros memorizados
-  const allPlaces = useMemo(() => filterByZoneAndQuery(places, zone, q), [zone, q]);
-  const saltos = useMemo(() => allPlaces.filter((p) => p.type === "Salto"), [allPlaces]);
-  const museos = useMemo(() => allPlaces.filter((p) => p.type === "Museo"), [allPlaces]);
-  const culturales = useMemo(() => allPlaces.filter((p) => p.type === "Cultural"), [allPlaces]);
-  const gastro = useMemo(() => filterByZoneAndQuery(gastronomy, zone, q), [zone, q]);
-  const com = useMemo(() => filterByZoneAndQuery(commerces, zone, q), [zone, q]);
-  const lodg = useMemo(() => filterByZoneAndQuery(lodging, zone, q), [zone, q]);
-  
-  const agendaFiltered = useMemo(() => {
-    return agenda.filter((a) => a.category === agendaCat && (zone === "Todas" || a.zone === zone));
-  }, [agendaCat, zone]);
-
-  const [dbLugares, setDbLugares] = useState<PlaceItem[]>([]);
-  const [dbAgenda, setDbAgenda] = useState<DBTurismoItem[]>([]);
-
-  useEffect(() => {
-    let isMounted = true; 
-
-    const fetchTurismo = async () => {
-      try {
-        let munId: string | null = null;
-        if (user?.id) {
-          const { data: prof } = await supabase.from("profiles").select("municipality_id").eq("id", user.id).maybeSingle();
-          munId = prof?.municipality_id ?? null;
-        }
-        
-        if (!munId && zone && zone !== "Todas") {
-          munId = municipalityId || null;
-        }
-
-        let qLugares = supabase.from("content_items").select("*").eq("published", true).eq("kind", "Lugar").order("created_at", { ascending: false });
-        let qEv = supabase.from("content_items").select("*").eq("published", true).in("kind", ["Evento", "Actividad", "Taller"]).order("created_at", { ascending: false });
-        
-        if (munId) { 
-          qLugares = qLugares.eq("municipality_id", munId); 
-          qEv = qEv.eq("municipality_id", munId); 
-        }
-        
-        const [resLugares, resEv] = await Promise.all([qLugares, qEv]);
-
-        if (isMounted) {
-          const lugData = (resLugares.data as unknown as DBTurismoItem[]) || [];
-          const evData = (resEv.data as unknown as DBTurismoItem[]) || [];
-
-          setDbLugares(lugData.map((it) => ({
-            id: it.id, 
-            name: it.title, 
-            type: it.category || it.type || "Lugar",
-            address: it.description || "", 
-            zone: zone === "Todas" ? "" : zone,
-            schedule: it.schedule || "", 
-            days: it.days || "", 
-            price: it.price ?? undefined,
-            photo_url: it.photo_url || "/placeholder.svg", 
-            how_to_get: "#",
-          })));
-
-          setDbAgenda(evData); 
-        }
-      } catch (err) {
-        console.error("Error cargando turismo:", err);
-      }
-    };
-
-    fetchTurismo();
-
-    return () => {
-      isMounted = false;
-    };
-  }, [user?.id, zone, municipalityId]);
-
-  const lugaresAll = [...dbLugares, ...allPlaces];
-  
-  const agendaAll = useMemo(() => {
-    const dbMapped: AgendaItem[] = dbAgenda.map((it) => ({
-      id: it.id, 
-      title: it.title, 
-      date: it.days || "Próximamente",
-      place: it.schedule || "—", 
-      zone: zone === "Todas" ? "" : zone, 
-      category: it.category || it.type || "Evento",
-    }));
-    return [...dbMapped, ...agendaFiltered];
-  }, [dbAgenda, agendaFiltered, zone]);
-
-  const TURIST_BIG = [
-    { key: "Comercio" as const, label: "COMERCIO" },
-    { key: "Gastronomía" as const, label: "GASTRONOMÍA" },
-    { key: "Hospedaje" as const, label: "HOSPEDAJE" },
-  ];
-
-  return (
-    <div className="space-y-5">
-      {isTurista ? (
-        <header className="space-y-2">
-          <h1 className="text-isa-navy font-display font-extrabold text-[20px]">Turismo</h1>
-          <p className="text-sm text-muted-foreground">
-            {municipality ? `Mostrando información de ${municipality}.` : "Elegí un municipio para ver toda su oferta."}
-          </p>
-          {municipality && (
-            <button
-              onClick={clearMunicipality}
-              className="inline-flex items-center gap-1.5 text-[11px] font-bold bg-muno-blue/15 text-muno-blue px-2.5 py-1 rounded-full"
-            >
-              <MapPin className="w-3 h-3" /> {municipality}
-              <X className="w-3 h-3" />
-            </button>
-          )}
-        </header>
-      ) : (
-        <div className="space-y-3">
-          <div className="relative">
-            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar lugar, hotel…" className="w-full pl-9 pr-3 py-2.5 rounded-[20px] border bg-card text-sm outline-none focus:ring-2 focus:ring-isa-navy" />
-          </div>
-          <div className="flex gap-2 overflow-x-auto pb-1">
-            {ZONES.map((z) => (
-              <button key={z} onClick={() => setZone(z)} className={`px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap min-h-[36px] ${zone === z ? "bg-muno-blue text-white" : "bg-card border text-isa-navy"}`}>{z}</button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {isTurista ? (
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          {TURIST_BIG.map((b) => {
-            const active = tab === b.key;
-            return (
-              <button
-                key={b.key}
-                onClick={() => setTab(b.key)}
-                className="min-h-[88px] rounded-[16px] font-extrabold text-[15px] tracking-wide transition-all"
-                style={{
-                  background: active ? "#242E44" : "#F5EFE6",
-                  color: active ? "#FFFFFF" : "#242E44",
-                  border: active ? "none" : "1px solid rgba(36,46,68,0.12)",
-                }}
-              >
-                {b.label}
-              </button>
-            );
-          })}
-        </div>
-      ) : (
-        <div className="flex flex-wrap gap-2">
-          {TABS.map((t) => (
-            <button key={t} onClick={() => setTab(t)} className={`px-3 py-1.5 rounded-[20px] text-xs font-bold transition-colors min-h-[36px] ${tab === t ? "bg-isa-navy text-isa-white" : "bg-card text-isa-navy hover:bg-muted border"}`}>{t}</button>
-          ))}
-        </div>
-      )}
-
-      {tab === "Lugares" && <Grid items={lugaresAll} render={(p) => <PlaceCard key={p.id} item={p} rateable />} />}
-      {tab === "Saltos" && <Grid items={saltos} render={(p) => <PlaceCard key={p.id} item={p} rateable />} />}
-      {tab === "Museos" && <Grid items={museos} render={(p) => <PlaceCard key={p.id} item={p} rateable />} />}
-      {tab === "Cultural" && <Grid items={culturales} render={(p) => <PlaceCard key={p.id} item={p} rateable />} />}
-      {tab === "Gastronomía" && <Grid items={gastro} render={(p) => <PlaceCard key={p.id} item={p as PlaceItem} />} />}
-      {tab === "Comercio" && <Grid items={com} render={(p) => <PlaceCard key={p.id} item={p as PlaceItem} />} />}
-      {tab === "Hospedaje" && <Grid items={lodg} render={(p) => <LodgingCard key={p.id} item={p as LodgingItem} onConsultar={setLodgTarget} />} />}
-
-      {tab === "Agenda" && (
-        <>
-          <div className="flex gap-2">
-            {AGENDA_CATS.map((c) => (
-              <button key={c} onClick={() => setAgendaCat(c)} className={`px-3 py-1.5 rounded-[20px] text-xs font-bold ${agendaCat === c ? "bg-muno-amber text-white" : "bg-card border"}`}>
-                {c === "Hoy" ? "Eventos del Día" : c}
-              </button>
-            ))}
-          </div>
-          <div className="space-y-3">
-            {agendaAll.length === 0 && <p className="text-sm text-muted-foreground text-center py-6">No hay eventos en esta categoría.</p>}
-            {agendaAll.map((a) => (
-              <div key={a.id} className="isa-card p-4 flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-accent grid place-items-center text-isa-navy"><Calendar strokeWidth={1.5} className="w-5 h-5" /></div>
-                <div className="flex-1">
-                  <div className="font-extrabold text-isa-navy text-sm">{a.title}</div>
-                  <div className="text-xs text-muted-foreground">{a.date} · {a.place} · 📍 {a.zone}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </>
-      )}
-
-      <LeadDialog
-        open={!!lodgTarget}
-        title={`Consultar · ${lodgTarget?.name || ""}`}
-        description="Le enviamos tu consulta al alojamiento."
-        fields={["name", "email", "origin"]}
-        kind="reserva_lead"
-        meta={{ lodging: lodgTarget?.name }}
-        onClose={() => setLodgTarget(null)}
-      />
     </div>
   );
 }
@@ -24566,6 +24493,379 @@ export default function MiCuenta() {
 }
 </file>
 
+<file path="src/pages/Turismo.tsx">
+import { useState, useMemo, useEffect, ElementType, ReactNode } from "react";
+import { useSearchParams } from "react-router-dom";
+import { useMunicipality } from "@/context/MunicipalityContext";
+import { places, gastronomy, agenda, commerces, lodging, ZONES, type Zone, type AgendaCategory } from "@/data/mock";
+import { MapPin, Calendar, Search, Clock, Tag, Info, X } from "lucide-react";
+import { formatARS } from "@/lib/format";
+import { track } from "@/lib/analytics";
+import LeadDialog from "@/components/LeadDialog";
+import RatingStars from "@/components/RatingStars";
+import FavoriteButton from "@/components/FavoriteButton";
+import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/context/AuthContext";
+
+const TABS_VECINO = ["Lugares", "Saltos", "Museos", "Cultural", "Gastronomía", "Agenda"] as const;
+const TABS_TURISTA = ["Comercio", "Gastronomía", "Hospedaje"] as const;
+const AGENDA_CATS: AgendaCategory[] = ["Hoy", "Fin de Semana", "Conciertos"];
+
+type TabType = typeof TABS_VECINO[number] | typeof TABS_TURISTA[number];
+
+interface DBTurismoItem {
+  id: string;
+  title: string;
+  description?: string;
+  schedule?: string;
+  days?: string;
+  price?: number | null;
+  photo_url?: string;
+  category?: string;
+  type?: string;
+}
+
+interface PlaceItem {
+  id: string;
+  name: string;
+  type: string;
+  address: string;
+  zone?: string;
+  schedule?: string;
+  days?: string;
+  price?: number;
+  photo_url: string;
+  how_to_get: string;
+  requirements?: string;
+}
+
+interface LodgingItem {
+  id: string;
+  name: string;
+  type: string;
+  address: string;
+  zone?: string;
+  schedule?: string;
+  price?: number;
+  photos: string[];
+  requirements?: string;
+}
+
+interface AgendaItem {
+  id: string;
+  title: string;
+  date: string;
+  place: string;
+  zone?: string;
+  category: string;
+}
+
+const InfoLine = ({ icon: Icon, children }: { icon: ElementType; children: ReactNode }) => (
+  <div className="flex items-start gap-1.5 text-[11px] text-muted-foreground">
+    <Icon strokeWidth={1.5} className="w-3 h-3 mt-0.5 shrink-0" />
+    <span>{children}</span>
+  </div>
+);
+
+const PlaceCard = ({ item, rateable }: { item: PlaceItem; rateable?: boolean }) => (
+  <article className="isa-card overflow-hidden hover:-translate-y-0.5 hover:shadow-md transition-all">
+    <div className="relative">
+      {/* 🟠 FIX MEDIO SRE: Lazy loading nativo en tarjetas de turismo */}
+      <img src={item.photo_url} alt={item.name} loading="lazy" className="w-full h-[120px] object-cover" />
+      <div className="absolute top-2 right-2">
+        <FavoriteButton place={{ id: item.id, name: item.name, type: item.type, photo_url: item.photo_url, zone: item.zone || "" }} />
+      </div>
+    </div>
+    <div className="p-4 space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="font-extrabold text-isa-navy">{item.name}</h3>
+        <span className="isa-chip bg-accent text-isa-navy">{item.type}</span>
+      </div>
+      <InfoLine icon={MapPin}>{item.address}{item.zone && ` · ${item.zone}`}</InfoLine>
+      {item.schedule && <InfoLine icon={Clock}>{item.schedule}{item.days && ` · ${item.days}`}</InfoLine>}
+      {typeof item.price === "number" && <InfoLine icon={Tag}>{item.price === 0 ? "Entrada gratuita" : formatARS(item.price)}</InfoLine>}
+      {item.requirements && item.requirements !== "—" && <InfoLine icon={Info}>{item.requirements}</InfoLine>}
+      {rateable && <RatingStars id={item.id} name={item.name} />}
+      <a href={item.how_to_get} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center w-full bg-isa-navy text-isa-white rounded-[20px] py-2.5 text-sm font-bold hover:opacity-90 mt-1">Cómo llegar</a>
+    </div>
+  </article>
+);
+
+const LodgingCard = ({ item, onConsultar }: { item: LodgingItem; onConsultar: (item: LodgingItem) => void }) => {
+  const [idx, setIdx] = useState(0);
+  return (
+    <article className="isa-card overflow-hidden">
+      <div className="relative">
+        {/* 🟠 FIX MEDIO SRE: Lazy loading nativo en tarjetas de alojamiento */}
+        <img src={item.photos[idx]} alt={item.name} loading="lazy" className="w-full h-48 object-cover" />
+        <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex gap-1.5">
+          {item.photos.map((_, i) => (
+            <button key={i} onClick={() => setIdx(i)} className={`w-2 h-2 rounded-full ${i === idx ? "bg-white" : "bg-white/50"}`} />
+          ))}
+        </div>
+      </div>
+      <div className="p-4 space-y-2">
+        <div className="flex items-center justify-between">
+          <h3 className="font-extrabold text-isa-navy">{item.name}</h3>
+          <span className="isa-chip bg-accent text-isa-navy">{item.type}</span>
+        </div>
+        <InfoLine icon={MapPin}>{item.address}</InfoLine>
+        {item.schedule && <InfoLine icon={Clock}>{item.schedule}</InfoLine>}
+        {item.price && <InfoLine icon={Tag}>Desde {formatARS(item.price)} / noche</InfoLine>}
+        {item.requirements && <InfoLine icon={Info}>{item.requirements}</InfoLine>}
+        <button onClick={() => onConsultar(item)} className="w-full mt-1 bg-isa-navy text-isa-white rounded-[20px] py-2.5 text-sm font-bold">Consultar disponibilidad</button>
+      </div>
+    </article>
+  );
+};
+
+function filterByZoneAndQuery<T extends { zone?: string; name: string }>(items: T[], zone: Zone, q: string): T[] {
+  return items.filter((i) => (zone === "Todas" || i.zone === zone) && i.name.toLowerCase().includes(q.toLowerCase()));
+}
+
+function Grid<T>({ items, render, cols = 3 }: { items: T[]; render: (item: T) => ReactNode; cols?: number }) {
+  if (!items.length) return <p className="text-sm text-muted-foreground text-center py-6">Sin resultados.</p>;
+  return <div className={`grid grid-cols-1 sm:grid-cols-2 ${cols === 2 ? "lg:grid-cols-2" : "lg:grid-cols-3"} gap-4`}>{items.map(render)}</div>;
+}
+
+export default function Turismo() {
+  const { user, roles } = useAuth();
+  const { municipality, municipalityId, setMunicipality } = useMunicipality();
+  const isTurista = roles.includes("tourist");
+  
+  // Tipado estricto sin "as any" o "as readonly string[]"
+  const TABS: readonly TabType[] = isTurista ? TABS_TURISTA : TABS_VECINO;
+  
+  const [params, setParams] = useSearchParams();
+  const urlZone = params.get("zone") as Zone | null;
+  const initialZone: Zone = (urlZone || (municipality as Zone) || "Todas") as Zone;
+  
+  const [tab, setTab] = useState<TabType>(TABS[0]);
+  const [zone, setZone] = useState<Zone>(initialZone);
+  const [q, setQ] = useState("");
+  const [agendaCat, setAgendaCat] = useState<AgendaCategory>("Hoy");
+  const [lodgTarget, setLodgTarget] = useState<LodgingItem | null>(null);
+
+  useEffect(() => {
+    if (urlZone && urlZone !== zone) setZone(urlZone);
+  }, [urlZone, zone]);
+
+  useEffect(() => {
+    if (zone && zone !== "Todas") {
+      setMunicipality(zone);
+      track({ kind: "search_zone", zone, userType: isTurista ? "turista" : "vecino" });
+    }
+  }, [zone, isTurista, setMunicipality]);
+
+  useEffect(() => {
+    track({ kind: "category_click", category: tab, userType: isTurista ? "turista" : "vecino" });
+  }, [tab, isTurista]);
+
+  const clearMunicipality = () => {
+    setMunicipality("");
+    setZone("Todas");
+    setParams({});
+  };
+
+  // Optimización total de memoria: Todos los filtros memorizados
+  const allPlaces = useMemo(() => filterByZoneAndQuery(places, zone, q), [zone, q]);
+  const saltos = useMemo(() => allPlaces.filter((p) => p.type === "Salto"), [allPlaces]);
+  const museos = useMemo(() => allPlaces.filter((p) => p.type === "Museo"), [allPlaces]);
+  const culturales = useMemo(() => allPlaces.filter((p) => p.type === "Cultural"), [allPlaces]);
+  const gastro = useMemo(() => filterByZoneAndQuery(gastronomy, zone, q), [zone, q]);
+  const com = useMemo(() => filterByZoneAndQuery(commerces, zone, q), [zone, q]);
+  const lodg = useMemo(() => filterByZoneAndQuery(lodging, zone, q), [zone, q]);
+  
+  const agendaFiltered = useMemo(() => {
+    return agenda.filter((a) => a.category === agendaCat && (zone === "Todas" || a.zone === zone));
+  }, [agendaCat, zone]);
+
+  const [dbLugares, setDbLugares] = useState<PlaceItem[]>([]);
+  const [dbAgenda, setDbAgenda] = useState<DBTurismoItem[]>([]);
+
+  useEffect(() => {
+    let isMounted = true; 
+
+    const fetchTurismo = async () => {
+      try {
+        let munId: string | null = null;
+        if (user?.id) {
+          const { data: prof } = await supabase.from("profiles").select("municipality_id").eq("id", user.id).maybeSingle();
+          munId = prof?.municipality_id ?? null;
+        }
+        
+        if (!munId && zone && zone !== "Todas") {
+          munId = municipalityId || null;
+        }
+
+        // 🔴 FIX CRÍTICO SRE: Añadimos .limit(60) para prevenir desbordes de memoria en cliente y Sequential Scans infinitos
+        let qLugares = supabase.from("content_items").select("*").eq("published", true).eq("kind", "Lugar").order("created_at", { ascending: false }).limit(60);
+        let qEv = supabase.from("content_items").select("*").eq("published", true).in("kind", ["Evento", "Actividad", "Taller"]).order("created_at", { ascending: false }).limit(60);
+        
+        if (munId) { 
+          qLugares = qLugares.eq("municipality_id", munId); 
+          qEv = qEv.eq("municipality_id", munId); 
+        }
+        
+        const [resLugares, resEv] = await Promise.all([qLugares, qEv]);
+
+        if (isMounted) {
+          const lugData = (resLugares.data as unknown as DBTurismoItem[]) || [];
+          const evData = (resEv.data as unknown as DBTurismoItem[]) || [];
+
+          setDbLugares(lugData.map((it) => ({
+            id: it.id, 
+            name: it.title, 
+            type: it.category || it.type || "Lugar",
+            address: it.description || "", 
+            zone: zone === "Todas" ? "" : zone,
+            schedule: it.schedule || "", 
+            days: it.days || "", 
+            price: it.price ?? undefined,
+            photo_url: it.photo_url || "/placeholder.svg", 
+            how_to_get: "#",
+          })));
+
+          setDbAgenda(evData); 
+        }
+      } catch (err) {
+        console.error("Error cargando turismo:", err);
+      }
+    };
+
+    fetchTurismo();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [user?.id, zone, municipalityId]);
+
+  const lugaresAll = [...dbLugares, ...allPlaces];
+  
+  const agendaAll = useMemo(() => {
+    const dbMapped: AgendaItem[] = dbAgenda.map((it) => ({
+      id: it.id, 
+      title: it.title, 
+      date: it.days || "Próximamente",
+      place: it.schedule || "—", 
+      zone: zone === "Todas" ? "" : zone, 
+      category: it.category || it.type || "Evento",
+    }));
+    return [...dbMapped, ...agendaFiltered];
+  }, [dbAgenda, agendaFiltered, zone]);
+
+  const TURIST_BIG = [
+    { key: "Comercio" as const, label: "COMERCIO" },
+    { key: "Gastronomía" as const, label: "GASTRONOMÍA" },
+    { key: "Hospedaje" as const, label: "HOSPEDAJE" },
+  ];
+
+  return (
+    <div className="space-y-5">
+      {isTurista ? (
+        <header className="space-y-2">
+          <h1 className="text-isa-navy font-display font-extrabold text-[20px]">Turismo</h1>
+          <p className="text-sm text-muted-foreground">
+            {municipality ? `Mostrando información de ${municipality}.` : "Elegí un municipio para ver toda su oferta."}
+          </p>
+          {municipality && (
+            <button
+              onClick={clearMunicipality}
+              className="inline-flex items-center gap-1.5 text-[11px] font-bold bg-muno-blue/15 text-muno-blue px-2.5 py-1 rounded-full"
+            >
+              <MapPin className="w-3 h-3" /> {municipality}
+              <X className="w-3 h-3" />
+            </button>
+          )}
+        </header>
+      ) : (
+        <div className="space-y-3">
+          <div className="relative">
+            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar lugar, hotel…" className="w-full pl-9 pr-3 py-2.5 rounded-[20px] border bg-card text-sm outline-none focus:ring-2 focus:ring-isa-navy" />
+          </div>
+          <div className="flex gap-2 overflow-x-auto pb-1">
+            {ZONES.map((z) => (
+              <button key={z} onClick={() => setZone(z)} className={`px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap min-h-[36px] ${zone === z ? "bg-muno-blue text-white" : "bg-card border text-isa-navy"}`}>{z}</button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {isTurista ? (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          {TURIST_BIG.map((b) => {
+            const active = tab === b.key;
+            return (
+              <button
+                key={b.key}
+                onClick={() => setTab(b.key)}
+                className="min-h-[88px] rounded-[16px] font-extrabold text-[15px] tracking-wide transition-all"
+                style={{
+                  background: active ? "#242E44" : "#F5EFE6",
+                  color: active ? "#FFFFFF" : "#242E44",
+                  border: active ? "none" : "1px solid rgba(36,46,68,0.12)",
+                }}
+              >
+                {b.label}
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          {TABS.map((t) => (
+            <button key={t} onClick={() => setTab(t)} className={`px-3 py-1.5 rounded-[20px] text-xs font-bold transition-colors min-h-[36px] ${tab === t ? "bg-isa-navy text-isa-white" : "bg-card text-isa-navy hover:bg-muted border"}`}>{t}</button>
+          ))}
+        </div>
+      )}
+
+      {tab === "Lugares" && <Grid items={lugaresAll} render={(p) => <PlaceCard key={p.id} item={p} rateable />} />}
+      {tab === "Saltos" && <Grid items={saltos} render={(p) => <PlaceCard key={p.id} item={p} rateable />} />}
+      {tab === "Museos" && <Grid items={museos} render={(p) => <PlaceCard key={p.id} item={p} rateable />} />}
+      {tab === "Cultural" && <Grid items={culturales} render={(p) => <PlaceCard key={p.id} item={p} rateable />} />}
+      {tab === "Gastronomía" && <Grid items={gastro} render={(p) => <PlaceCard key={p.id} item={p as PlaceItem} />} />}
+      {tab === "Comercio" && <Grid items={com} render={(p) => <PlaceCard key={p.id} item={p as PlaceItem} />} />}
+      {tab === "Hospedaje" && <Grid items={lodg} render={(p) => <LodgingCard key={p.id} item={p as LodgingItem} onConsultar={setLodgTarget} />} />}
+
+      {tab === "Agenda" && (
+        <>
+          <div className="flex gap-2">
+            {AGENDA_CATS.map((c) => (
+              <button key={c} onClick={() => setAgendaCat(c)} className={`px-3 py-1.5 rounded-[20px] text-xs font-bold ${agendaCat === c ? "bg-muno-amber text-white" : "bg-card border"}`}>
+                {c === "Hoy" ? "Eventos del Día" : c}
+              </button>
+            ))}
+          </div>
+          <div className="space-y-3">
+            {agendaAll.length === 0 && <p className="text-sm text-muted-foreground text-center py-6">No hay eventos en esta categoría.</p>}
+            {agendaAll.map((a) => (
+              <div key={a.id} className="isa-card p-4 flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-accent grid place-items-center text-isa-navy"><Calendar strokeWidth={1.5} className="w-5 h-5" /></div>
+                <div className="flex-1">
+                  <div className="font-extrabold text-isa-navy text-sm">{a.title}</div>
+                  <div className="text-xs text-muted-foreground">{a.date} · {a.place} · 📍 {a.zone}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      <LeadDialog
+        open={!!lodgTarget}
+        title={`Consultar · ${lodgTarget?.name || ""}`}
+        description="Le enviamos tu consulta al alojamiento."
+        fields={["name", "email", "origin"]}
+        kind="reserva_lead"
+        meta={{ lodging: lodgTarget?.name }}
+        onClose={() => setLodgTarget(null)}
+      />
+    </div>
+  );
+}
+</file>
+
 <file path="src/components/MisInscripciones.tsx">
 import { useEffect, useState } from "react";
 import { CalendarCheck, X, Users } from "lucide-react";
@@ -24790,6 +25090,11 @@ export default function NotificationsBell() {
         .order("created_at", { ascending: false })
         .limit(30);
 
+      // 🟡 FIX MEDIO SRE: Filtrado estricto por municipio en la carga inicial (Evita Cross-Tenant Data Leak)
+      if (municipalityId) {
+        query = query.eq("municipality_id", municipalityId);
+      }
+
       if (userId) {
         query = query.or(`user_id.eq.${userId},and(user_id.is.null,audience.in.(${audienceFilter.join(",")}))`);
       } else {
@@ -24819,8 +25124,7 @@ export default function NotificationsBell() {
     load();
 
     // 🔴 FIX CRÍTICO SRE: Prevención de Tormenta de Difusión (Broadcast Storm)
-    // Usamos filtros a nivel de base de datos para saltarnos la validación unihilo de RLS de Supabase Realtime
-    
+    // Extraemos el 'payload.new' directamente de la memoria del socket en lugar de hacer 'load()'. Cero lecturas a disco.
     if (municipalityId) {
       const muniChannel = supabase
         .channel(`notif_muni_${municipalityId}`)
@@ -24830,9 +25134,16 @@ export default function NotificationsBell() {
             event: "INSERT",
             schema: "public",
             table: "notifications",
-            filter: `municipality_id=eq.${municipalityId}` // Filtro mágico en servidor
+            filter: `municipality_id=eq.${municipalityId}`
           },
-          () => { if (isMounted) load(); }
+          (payload) => { 
+            if (!isMounted) return;
+            const newNotif = payload.new as Notif;
+            // Filtro local de seguridad adicional
+            if (!newNotif.user_id || newNotif.user_id === userId) {
+              setItems((prev) => [newNotif, ...prev].slice(0, 30));
+            }
+          }
         )
         .subscribe();
       channels.push(muniChannel);
@@ -24847,9 +25158,13 @@ export default function NotificationsBell() {
             event: "INSERT",
             schema: "public",
             table: "notifications",
-            filter: `user_id=eq.${userId}` // Filtro mágico en servidor
+            filter: `user_id=eq.${userId}`
           },
-          () => { if (isMounted) load(); }
+          (payload) => { 
+            if (!isMounted) return;
+            const newNotif = payload.new as Notif;
+            setItems((prev) => [newNotif, ...prev].slice(0, 30));
+          }
         )
         .subscribe();
       channels.push(userChannel);

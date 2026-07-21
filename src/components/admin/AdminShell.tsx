@@ -35,24 +35,24 @@ type Item = {
 // Extraemos el tipo estricto que espera la función can() de forma automática
 type AppRoles = Parameters<typeof can>[0];
 
-// Generación dinámica de menú basada estrictamente en PERMISOS, no en roles hardcodeados.
+// Generación dinámica de menú basada estrictamente en PERMISOS (Fix SRE: Deuda Técnica)
 function generateMenu(roles: string[], area: string): Item[] {
   const menu: Item[] = [];
   
-  // Casteo seguro de TypeScript: Le garantizamos al compilador que este array de strings
-  // contiene los roles oficiales de la app para que la función can() no arroje error.
+  // Casteo seguro de TypeScript para el motor de permisos
   const safeRoles = roles as AppRoles;
 
   // Módulo Global ISA
-  if (can(safeRoles, area, PERMISSIONS.ANALYTICS_VIEW) && (roles.includes("isa_super_admin") || roles.includes("isa_consultant"))) {
+  if (can(safeRoles, area, PERMISSIONS.SYSTEM_ADMIN) && (roles.includes("isa_super_admin") || roles.includes("isa_consultant"))) {
     return [{ to: "/isa/panel", label: "Panel ISA", icon: BarChart3 }];
   }
 
   // Dashboard General (Todos los internos lo ven)
   menu.push({ to: "/admin", label: "Inicio", icon: LayoutDashboard });
 
-  // Intendente Dashboard Ejecutivo
-  if (roles.includes("mayor")) {
+  // Intendente Dashboard Ejecutivo (Solo lectura analítica sin poder crear contenido)
+  const isMayor = can(safeRoles, area, PERMISSIONS.ANALYTICS_VIEW) && !can(safeRoles, area, PERMISSIONS.CONTENT_CREATE);
+  if (isMayor) {
     menu.push({ to: "/admin/dashboard-intendente", label: "Dashboard Ejecutivo", icon: LayoutDashboard });
   }
 
@@ -115,12 +115,12 @@ export default function AdminShell({ children }: { children?: ReactNode }) {
   const { pathname } = useLocation();
 
   const safeRoles = roles as AppRoles;
-  const isMayor = roles.includes("mayor");
+  const isMayor = can(safeRoles, area, PERMISSIONS.ANALYTICS_VIEW) && !can(safeRoles, area, PERMISSIONS.CONTENT_CREATE);
   const isAdmin = can(safeRoles, area, PERMISSIONS.SYSTEM_ADMIN);
 
   // Determinación de etiqueta visual del área
   const visualArea = roles.includes("isa_super_admin") || roles.includes("isa_consultant")
-    ? "ISA" : roles.includes("mayor") ? "Intendencia" : area || "Área General";
+    ? "ISA" : isMayor ? "Intendencia" : area || "Área General";
 
   const items = generateMenu(roles, area);
 

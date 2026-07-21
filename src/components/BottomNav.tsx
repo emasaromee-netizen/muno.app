@@ -32,31 +32,35 @@ export default function BottomNav() {
     icon: LucideIcon;
   }[] = [];
 
-  // 1. ISA Consultant / Super Admin
-  if (roles.includes("isa_super_admin") || roles.includes("isa_consultant")) {
+  // 1. ISA Consultant / Super Admin (Centralizado en el motor de permisos)
+  if (can(safeRoles, area, PERMISSIONS.SYSTEM_ADMIN)) {
     items = [
       { to: "/isa/global", label: "Panel Global", icon: LayoutDashboard },
       { to: "/mi-cuenta", label: "Perfil", icon: Settings },
     ];
   }
 
-  // 2. Personal del Gabinete Municipal (Admins, Intendente, Jefes)
+  // 2. Personal del Gabinete Municipal (Autorización basada en capacidades, no roles estáticos)
   else if (
-    roles.includes("admin") ||
-    roles.includes("mayor") ||
-    roles.includes("tourism_chief") ||
-    roles.includes("area_manager")
+    can(safeRoles, area, PERMISSIONS.TASKS_MANAGE) ||
+    can(safeRoles, area, PERMISSIONS.ANALYTICS_VIEW) ||
+    can(safeRoles, area, PERMISSIONS.CONTENT_CREATE)
   ) {
-    // Todos ven el inicio
+    // Todos los miembros del staff ven el inicio
     items.push({ to: "/admin", label: "Inicio", icon: LayoutDashboard });
 
-    // Solo quienes tienen acceso analítico ven Métricas (Admin e Intendente)
+    // Solo quienes tienen acceso analítico ven Métricas
     if (can(safeRoles, area, PERMISSIONS.ANALYTICS_VIEW)) {
       items.push({ to: "/admin/metricas", label: "Métricas", icon: BarChart3 });
     }
 
     // Solo Admins, Hacienda, Intendencia o Turismo ven Comercios
-    if (can(safeRoles, area, PERMISSIONS.SYSTEM_ADMIN) || area === "Hacienda" || area === "Turismo" || area === "Intendencia") {
+    if (
+      can(safeRoles, area, PERMISSIONS.SYSTEM_ADMIN) || 
+      area === "Hacienda" || 
+      area === "Turismo" || 
+      area === "Intendencia"
+    ) {
       items.push({ to: "/admin/comercios", label: "Comercios", icon: Store });
     }
 

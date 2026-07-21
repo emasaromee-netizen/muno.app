@@ -29,6 +29,7 @@ export default function MisReclamos() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    let isMounted = true; // 🔴 FIX MEDIO: Bandera de montado para evitar Memory Leaks
     if (!user) {
       setLoading(false);
       return;
@@ -40,9 +41,15 @@ export default function MisReclamos() {
       .order("created_at", { ascending: false })
       .limit(20)
       .then(({ data }) => {
-        setItems((data as Claim[]) || []);
-        setLoading(false);
+        if (isMounted) {
+          setItems((data as Claim[]) || []);
+          setLoading(false);
+        }
       });
+
+    return () => {
+      isMounted = false; // Compuerta cerrada si el usuario abandona la vista
+    };
   }, [user]);
 
   return (

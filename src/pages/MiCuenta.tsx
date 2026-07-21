@@ -170,8 +170,9 @@ export default function MiCuenta() {
       const path = `${user.id}/avatar-${Date.now()}.${ext}`;
       
       const { error: upErr } = await supabase.storage.from("profiles").upload(path, compressedBlob, { 
-        upsert: true,
-        contentType: "image/jpeg" 
+         upsert: true, 
+         contentType: "image/jpeg",
+         cacheControl: "31536000" 
       });
       
       if (upErr) {

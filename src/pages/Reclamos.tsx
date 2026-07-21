@@ -135,35 +135,36 @@ export default function Reclamos() {
     }
     setSaving(true);
 
-    const uploadedUrls: string[] = [];
-    for (let i = 0; i < photoFiles.length; i++) {
-      const file = photoFiles[i];
-      const fileExt = "jpg"; // Forzamos formato por la compresión
-      const filePath = `claims/${user.id}/${Date.now()}-${i}.${fileExt}`;
-      
+    let uploadedUrls: string[] = [];
+
+    // 🟠 FIX MEDIO SRE: Subida y compresión en Paralelo (Promise.all)
+    if (photoFiles.length > 0) {
       try {
-        // Ejecutamos la compresión asíncrona reduciendo drásticamente el payload
-        const compressedBlob = await compressImage(file);
-        
-        const { error: uploadError } = await supabase.storage
-          .from("avatars") 
-          .upload(filePath, compressedBlob, { 
-            contentType: "image/jpeg",
-            cacheControl: "31536000",
-            upsert: true
-          });
+        const uploadPromises = photoFiles.map(async (file, i) => {
+          const fileExt = "jpg";
+          const filePath = `claims/${user.id}/${Date.now()}-${i}.${fileExt}`;
+          const compressedBlob = await compressImage(file);
+          
+          const { error: uploadError } = await supabase.storage
+            .from("avatars") 
+            .upload(filePath, compressedBlob, { 
+              contentType: "image/jpeg",
+              cacheControl: "31536000", // 🟠 FIX ALTO SRE: Caché de 1 año para ahorrar Egress
+              upsert: true
+            });
 
-        if (uploadError) {
-          setSaving(false);
-          toast.error(`Error de conexión al subir la imagen ${i + 1}`);
-          return;
-        }
+          if (uploadError) {
+            throw new Error(`Error al subir imagen ${i + 1}`);
+          }
 
-        const { data: urlData } = supabase.storage.from("avatars").getPublicUrl(filePath);
-        uploadedUrls.push(urlData.publicUrl);
+          const { data: urlData } = supabase.storage.from("avatars").getPublicUrl(filePath);
+          return urlData.publicUrl;
+        });
+
+        uploadedUrls = await Promise.all(uploadPromises);
       } catch (err) {
         setSaving(false);
-        toast.error("Error al procesar la imagen en tu dispositivo.");
+        toast.error(err instanceof Error ? err.message : "Error al procesar las imágenes.");
         console.error(err);
         return;
       }

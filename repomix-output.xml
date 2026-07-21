@@ -7090,27 +7090,6 @@ END;
 $$;
 </file>
 
-<file path="supabase/migrations/20260720130000_sre_titanium_indexes.sql">
--- 🔴 CRÍTICO 1: Índice parcial para Inscripciones Activas
-CREATE INDEX IF NOT EXISTS idx_registrations_user_active 
-ON public.registrations (user_id) 
-WHERE (deleted_at IS NULL AND status = 'activa');
-
--- 🔴 CRÍTICO 2: Índice de Cobertura (INCLUDE) para evitar Heap Scans en RLS
-CREATE INDEX IF NOT EXISTS idx_user_roles_rls_cover 
-ON public.user_roles (user_id, active, role) 
-INCLUDE (municipality_id, area);
-
--- 🟡 MEDIO 1: Índice parcial para la guía de Puntos Turísticos
-CREATE INDEX IF NOT EXISTS idx_tourism_items_muni_category 
-ON public.tourism_items (municipality_id, category) 
-WHERE (published = true);
-
--- 🟡 MEDIO 2: Prevenir contención por alta concurrencia en calificaciones
-ALTER INDEX IF EXISTS unique_user_muni_rating SET (fillfactor = 90);
-REINDEX INDEX unique_user_muni_rating;
-</file>
-
 <file path=".env.example">
 # Variables de entorno - MUNO
 # Copiá este archivo como .env y completá los valores reales.
@@ -7978,92 +7957,6 @@ Para preservar el estado de "Cero Vulnerabilidades":
 
 # 7. Estado de Certificación
 ✅ **Sistema consolidado, tipado bajo TypeScript estricto, con 100% de cobertura de pruebas unitarias al cierre del Hito 2.**
-</file>
-
-<file path="src/components/admin/StaffNewsWidget.tsx">
-import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
-import { Bell, ArrowRight } from "lucide-react";
-import { supabase } from "@/integrations/supabase/client";
-// Importamos el esquema de tipos estáticos de la base de datos
-import type { Database } from "@/integrations/supabase/types";
-
-// SOLUCIÓN QUIRÚRGICA: Tipado dinámico atado a la tabla real de Supabase
-type Row = Database["public"]["Tables"]["staff_announcements"]["Row"];
-
-export default function StaffNewsWidget() {
-  const [rows, setRows] = useState<Row[]>([]);
-
-  useEffect(() => {
-    let isMounted = true; // CRÍTICO MOBILE: Control de fugas de memoria
-
-    const load = async () => {
-      try {
-        const { data, error } = await supabase
-          .from("staff_announcements")
-          .select("*") // Usamos "*" para que coincida perfectamente con el tipo 'Row'
-          .order("created_at", { ascending: false })
-          .limit(3);
-
-        if (error) throw error;
-
-        // Eliminamos el casteo inseguro
-        if (isMounted && data) {
-          setRows(data);
-        }
-      } catch (err) {
-        console.error("Error al cargar el widget de novedades:", err);
-      }
-    };
-
-    load();
-
-    const channel = supabase
-      .channel("staff_ann_widget_changes")
-      .on(
-        "postgres_changes", 
-        { event: "*", schema: "public", table: "staff_announcements" }, 
-        () => {
-          if (isMounted) load();
-        }
-      )
-      .subscribe();
-
-    return () => {
-      isMounted = false;
-      supabase.removeChannel(channel);
-    };
-  }, []);
-
-  if (rows.length === 0) return null;
-
-  return (
-    <div className="bg-white border rounded-[16px] p-4">
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-lg bg-isa-navy text-white grid place-items-center">
-            <Bell className="w-4 h-4" strokeWidth={1.5} />
-          </div>
-          <h3 className="font-extrabold text-isa-navy text-sm">Novedades del Intendente</h3>
-        </div>
-        <Link to="/admin/novedades" className="text-[11px] font-bold text-muno-blue inline-flex items-center gap-1">
-          Ver todas <ArrowRight className="w-3 h-3" />
-        </Link>
-      </div>
-      <ul className="space-y-2">
-        {rows.map((r) => (
-          <li key={r.id} className="border-l-2 border-isa-navy pl-3 py-1">
-            <div className="font-bold text-isa-navy text-sm">{r.title}</div>
-            <div className="text-[11px] text-muted-foreground">
-              {new Date(r.created_at).toLocaleDateString("es-AR")}
-            </div>
-            <p className="text-xs text-isa-navy mt-1 line-clamp-2">{r.body}</p>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
 </file>
 
 <file path="src/components/ui/badge.tsx">
@@ -9386,338 +9279,6 @@ export default function FavoriteButton({ place, className = "" }: { place: Place
         <Heart strokeWidth={2} className={`w-4 h-4 ${active ? "fill-muno-red text-muno-red" : "text-isa-navy"}`} />
       )}
     </button>
-  );
-}
-</file>
-
-<file path="src/components/HomeBanners.tsx">
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { AlertTriangle, ArrowRight, X, MapPin, Phone, CalendarDays, Clock, type LucideIcon } from "lucide-react";
-import { useBanners, COLOR_BG, type CustomBanner } from "@/context/BannersContext";
-
-type Audience = "vecino" | "turista" | "all";
-
-// Tipado extendido para evitar "any"
-type ExtendedBanner = CustomBanner & { 
-  audience?: string; 
-  meta?: { 
-    schedule?: string; 
-    zones?: string; 
-  } 
-};
-
-const VECINO_TAGS = ["comunidad", "cultura", "deporte", "noticias_municipales"];
-const EXCLUDE_FOR_VECINO = ["hospedaje_turistico"];
-
-const AREA_LABEL: Record<string, string> = {
-  cultura: "Cultura",
-  deporte: "Deporte",
-  comunidad: "Comunidad",
-  noticias_municipales: "Noticias",
-};
-
-function pickAreaTag(tags: string[] = []) {
-  return tags.find((t) => AREA_LABEL[t]);
-}
-
-export default function HomeBanners({ audience = "vecino" }: { audience?: Audience }) {
-  const { banners, loading } = useBanners();
-  const [i, setI] = useState(0);
-  const [open, setOpen] = useState<CustomBanner | null>(null);
-  const scrollerRef = useRef<HTMLDivElement>(null);
-  const pausedRef = useRef(false);
-  const navigate = useNavigate();
-
-  const slides = useMemo(() => {
-    const audienceMatch = (b: CustomBanner) => {
-      const extendedBanner = b as ExtendedBanner;
-      const aud = extendedBanner.audience;
-      if (!aud) return audience === "vecino"; // legacy default = residents
-      if (audience === "turista") return aud === "tourists" || aud === "both";
-      return aud === "residents" || aud === "both";
-    };
-    
-    const enabled = banners.filter((b) => b.enabled !== false).filter(audienceMatch);
-    
-    if (audience === "turista") {
-      // Banner MUNO (navy) + cualquiera marcado para turistas
-      const muno = banners.filter((b) => b.enabled !== false && b.color === "navy");
-      const merged = [...muno, ...enabled.filter((b) => b.color !== "navy")];
-      return merged.sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0));
-    }
-    
-    const filtered = enabled.filter((b) => {
-      const tags = b.tags || [];
-      if (audience === "vecino") {
-        if (tags.some((t) => EXCLUDE_FOR_VECINO.includes(t))) return false;
-        if (tags.length === 0) return true;
-        return tags.some((t) => VECINO_TAGS.includes(t));
-      }
-      return true;
-    });
-    
-    return filtered.sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0));
-  }, [banners, audience]);
-
-  // Auto-rotate infinito cada 5s + primer movimiento inmediato al montar
-  useEffect(() => {
-    if (slides.length <= 1) return;
-    const kickoff = setTimeout(() => {
-      if (!pausedRef.current) setI((v) => (v + 1) % slides.length);
-    }, 1500);
-    const t = setInterval(() => {
-      if (pausedRef.current) return;
-      setI((v) => (v + 1) % slides.length);
-    }, 5000);
-    return () => {
-      clearTimeout(kickoff);
-      clearInterval(t);
-    };
-  }, [slides.length]);
-
-  // Smooth scroll al slide activo
-  useEffect(() => {
-    const el = scrollerRef.current;
-    if (!el) return;
-    const child = el.children[i] as HTMLElement | undefined;
-    if (child) el.scrollTo({ left: child.offsetLeft, behavior: "smooth" });
-  }, [i]);
-
-  const onScroll = () => {
-    const el = scrollerRef.current;
-    if (!el) return;
-    const idx = Math.round(el.scrollLeft / el.clientWidth);
-    if (idx !== i) setI(idx);
-  };
-
-  if (loading) {
-    return (
-      <div className="relative z-10 min-h-[200px] rounded-[16px] bg-gradient-to-br from-isa-navy/10 to-isa-navy/5 animate-pulse" />
-    );
-  }
-  if (slides.length === 0) {
-    return <div className="relative z-10 min-h-[200px] rounded-[16px] bg-isa-navy/5" />;
-  }
-
-  return (
-    <>
-      <div
-        ref={scrollerRef}
-        onScroll={onScroll}
-        onPointerDown={() => (pausedRef.current = true)}
-        onPointerUp={() => {
-          setTimeout(() => (pausedRef.current = false), 4000);
-        }}
-        className="relative z-10 flex overflow-x-auto overflow-y-visible snap-x snap-mandatory scrollbar-none -mx-1 px-1 min-h-[200px]"
-        style={{ scrollbarWidth: "none" }}
-      >
-        {slides.map((s) => {
-          const areaTag = pickAreaTag(s.tags);
-          return (
-            <div key={s.id} className="snap-center shrink-0 w-full px-1">
-              <button
-                onClick={() => setOpen(s)}
-                className="block w-full text-left rounded-[16px] overflow-hidden focus:outline-none focus:ring-2 focus:ring-isa-navy relative min-h-[200px]"
-              >
-                {areaTag && (
-                  <span className="absolute top-3 right-3 z-10 text-[10px] uppercase tracking-wider font-extrabold bg-white/95 text-isa-navy px-2 py-1 rounded-full">
-                    {AREA_LABEL[areaTag]}
-                  </span>
-                )}
-                {s.color === "navy" && <IdentityBanner b={s} />}
-                {s.color === "red" && <AlertBanner b={s} />}
-                {s.color === "emerald" && <CultureBanner b={s} />}
-              </button>
-            </div>
-          );
-        })}
-      </div>
-
-      {open && <BannerModal banner={open} onClose={() => setOpen(null)} navigate={navigate} />}
-    </>
-  );
-}
-
-function BannerModal({
-  banner,
-  onClose,
-  navigate,
-}: {
-  banner: CustomBanner;
-  onClose: () => void;
-  navigate: (to: string) => void;
-}) {
-  const extendedBanner = banner as ExtendedBanner;
-  const isAlert = extendedBanner.color === "red";
-  const ctaLabel = extendedBanner.cta || (isAlert ? "Más información" : "Ver detalle");
-  const ctaTo = extendedBanner.ctaTo;
-
-  // Heurística para botón de acción según destino con tipado estricto LucideIcon
-  let actionIcon: LucideIcon = ArrowRight;
-  let actionLabel = ctaLabel;
-  
-  if (ctaTo?.startsWith("tel:")) { actionIcon = Phone; actionLabel = "Llamar ahora"; }
-  else if (ctaTo?.startsWith("http") && ctaTo.includes("google.com/maps")) { actionIcon = MapPin; actionLabel = "Ir a Google Maps"; }
-  else if (ctaTo === "/eventos") { actionIcon = CalendarDays; actionLabel = "Ver Agenda"; }
-
-  const onAction = () => {
-    if (!ctaTo) return onClose();
-    
-    // OPTIMIZACIÓN: Abrir enlaces HTTP en pestaña nueva para no matar la SPA.
-    // tel: y mailto: se manejan nativamente sin romper el navegador.
-    if (ctaTo.startsWith("http")) {
-      window.open(ctaTo, "_blank", "noopener,noreferrer");
-    } else if (ctaTo.startsWith("tel:") || ctaTo.startsWith("mailto:")) {
-      window.location.href = ctaTo;
-    } else {
-      navigate(ctaTo);
-    }
-    
-    onClose();
-  };
-
-  const Icon = actionIcon;
-  const meta = extendedBanner.meta;
-
-  return (
-    <div
-      className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm grid place-items-end md:place-items-center p-0 md:p-4 animate-fade-in"
-      onClick={onClose}
-    >
-      <div
-        className="w-full md:max-w-md rounded-t-[24px] md:rounded-[16px] overflow-hidden animate-scale-in relative bg-white"
-        onClick={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-      >
-        <button
-          onClick={onClose}
-          className="absolute top-3 right-3 z-10 w-9 h-9 grid place-items-center rounded-full bg-isa-navy text-white hover:opacity-90"
-          aria-label="Cerrar"
-        >
-          <X strokeWidth={2} className="w-4 h-4" />
-        </button>
-
-        {extendedBanner.image && (
-          <img src={extendedBanner.image} alt={extendedBanner.title} className="w-full h-52 object-cover" />
-        )}
-
-        <div className="p-5 space-y-3">
-          <div className="flex items-center gap-2">
-            {isAlert && (
-              <span className="w-7 h-7 rounded-full grid place-items-center" style={{ background: COLOR_BG.red, color: "#fff" }}>
-                <AlertTriangle strokeWidth={1.5} className="w-4 h-4" />
-              </span>
-            )}
-            <span className="text-[10px] uppercase tracking-[0.22em] font-bold text-isa-navy/70">
-              {isAlert ? "Aviso de Servicio" : extendedBanner.color === "emerald" ? "Cultura · Deporte" : "Novedad"}
-            </span>
-          </div>
-
-          <h3 className="font-display font-extrabold text-isa-navy text-[22px] leading-tight">
-            {extendedBanner.title}
-          </h3>
-
-          <p className="text-[14px] text-isa-navy/80 leading-relaxed whitespace-pre-line">
-            {extendedBanner.description}
-          </p>
-
-          {/* Bloque limpio y tipado para la metadata (horarios y zonas) */}
-          {isAlert && meta && (
-            <div className="rounded-[12px] bg-white p-3 border border-isa-navy/10 space-y-1.5">
-              {meta.schedule && (
-                <div className="flex items-center gap-2 text-[13px] text-isa-navy">
-                  <Clock strokeWidth={1.5} className="w-4 h-4" />
-                  <span><strong>Horario:</strong> {meta.schedule}</span>
-                </div>
-              )}
-              {meta.zones && (
-                <div className="flex items-start gap-2 text-[13px] text-isa-navy">
-                  <MapPin strokeWidth={1.5} className="w-4 h-4 mt-0.5" />
-                  <span><strong>Zonas afectadas:</strong> {meta.zones}</span>
-                </div>
-              )}
-            </div>
-          )}
-
-          <div className="pt-1 grid grid-cols-1 gap-2">
-            {ctaTo && (
-              <button
-                onClick={onAction}
-                className="inline-flex items-center justify-center gap-2 w-full bg-isa-navy text-white rounded-[14px] py-3 text-sm font-bold min-h-[44px]"
-              >
-                <Icon strokeWidth={2} className="w-4 h-4" /> {actionLabel}
-              </button>
-            )}
-            <button
-              onClick={onClose}
-              className="w-full rounded-[14px] py-3 text-sm font-bold border border-isa-navy/20 text-isa-navy bg-transparent min-h-[44px]"
-            >
-              Cerrar
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function IdentityBanner({ b }: { b: CustomBanner }) {
-  return (
-    <div className="p-6 text-isa-white relative overflow-hidden rounded-[16px] min-h-[200px]" style={{ background: "hsl(var(--isa-navy))" }}>
-      <div
-        aria-hidden
-        className="absolute -right-12 -top-12 w-44 h-44 rounded-full opacity-10"
-        style={{ background: "hsl(var(--isa-dusty))" }}
-      />
-      <div className="text-[10px] uppercase tracking-[0.3em] font-bold text-isa-dusty">Plataforma</div>
-      <h2 className="!text-white font-display text-[40px] leading-none font-extrabold mt-2 tracking-tight">
-        {b.title}
-      </h2>
-      <p className="text-[13px] mt-2 text-[hsl(var(--isa-light))]/90 italic line-clamp-2">{b.description}</p>
-    </div>
-  );
-}
-
-function AlertBanner({ b }: { b: CustomBanner }) {
-  return (
-    <div className="p-5 text-isa-white relative rounded-[16px] min-h-[200px]" style={{ background: COLOR_BG.red }}>
-      <div className="flex items-start gap-3">
-        <div className="w-9 h-9 rounded-full bg-white/20 grid place-items-center shrink-0">
-          <AlertTriangle strokeWidth={1.5} className="w-5 h-5" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="text-[10px] uppercase tracking-[0.25em] font-bold opacity-90">Aviso de Servicio</div>
-          <h3 className="!text-white font-display text-[18px] font-extrabold mt-1 leading-snug">{b.title}</h3>
-          <p className="text-[12px] opacity-90 mt-1 line-clamp-2">{b.description}</p>
-          <div className="mt-3 inline-flex items-center gap-1 text-[12px] font-bold">
-            {b.cta || "Ver detalle"} <ArrowRight strokeWidth={1.5} className="w-3.5 h-3.5" />
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function CultureBanner({ b }: { b: CustomBanner }) {
-  return (
-    <div className="relative text-isa-white overflow-hidden rounded-[16px]" style={{ background: COLOR_BG[b.color] }}>
-      {b.image && (
-        <>
-          <img src={b.image} alt="" className="absolute inset-0 w-full h-full object-cover" />
-          <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/40 to-black/20" />
-        </>
-      )}
-      <div className="relative p-5 min-h-[200px] flex flex-col justify-end">
-        <div className="text-[10px] uppercase tracking-[0.25em] font-bold opacity-90">Cultura · Deporte</div>
-        <h3 className="!text-white font-display text-[20px] font-extrabold mt-1 leading-tight">{b.title}</h3>
-        <p className="text-[12px] opacity-90 mt-1 line-clamp-2">{b.description}</p>
-        <div className="mt-3 inline-flex items-center gap-1 text-[12px] font-bold self-start bg-white/20 px-3 py-1.5 rounded-full">
-          {b.cta || "Ver más"} <ArrowRight strokeWidth={1.5} className="w-3.5 h-3.5" />
-        </div>
-      </div>
-    </div>
   );
 }
 </file>
@@ -15013,6 +14574,38 @@ WITH CHECK (
 );
 </file>
 
+<file path="supabase/migrations/20260720130000_sre_titanium_indexes.sql">
+-- 🔴 CRÍTICO 1: Índice parcial para Inscripciones Activas
+CREATE INDEX IF NOT EXISTS idx_registrations_user_active 
+ON public.registrations (user_id) 
+WHERE (deleted_at IS NULL AND status = 'activa');
+
+-- 🔴 CRÍTICO 2: Índice de Cobertura (INCLUDE) para evitar Heap Scans en RLS
+CREATE INDEX IF NOT EXISTS idx_user_roles_rls_cover 
+ON public.user_roles (user_id, active, role) 
+INCLUDE (municipality_id, area);
+
+-- 🟡 MEDIO 1: Índice parcial para la guía de Puntos Turísticos
+CREATE INDEX IF NOT EXISTS idx_tourism_items_muni_category 
+ON public.tourism_items (municipality_id, category) 
+WHERE (published = true);
+
+-- 🟡 MEDIO 2: Prevenir contención por alta concurrencia en calificaciones
+ALTER INDEX IF EXISTS unique_user_muni_rating SET (fillfactor = 90);
+REINDEX INDEX unique_user_muni_rating;
+
+-- 🔴 CRÍTICO 1: Índice parcial para optimizar el conteo y filtrado de reclamos activos
+-- Ignora por completo los reclamos cerrados, reduciendo el tamaño del índice en un ~90%
+CREATE INDEX IF NOT EXISTS idx_claims_muni_active_status
+ON public.claims (municipality_id, status)
+WHERE (status != 'Cerrado'::public.claim_status);
+
+-- 🔴 CRÍTICO 2: Índice compuesto de cobertura para consultas de auditoría
+-- Evita el "External Merge Sort" (ordenamiento en disco) al listar logs de actividad
+CREATE INDEX IF NOT EXISTS idx_activity_logs_muni_created_desc
+ON public.activity_logs (municipality_id, created_at DESC);
+</file>
+
 <file path="supabase/config.toml">
 project_id = "jljjgehinjqpwkrixbnm"
 </file>
@@ -15754,6 +15347,83 @@ function pageSubtitle(p: string) {
 }
 </file>
 
+<file path="src/components/admin/StaffNewsWidget.tsx">
+import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import { Bell, ArrowRight } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
+// Importamos el esquema de tipos estáticos de la base de datos
+import type { Database } from "@/integrations/supabase/types";
+
+// SOLUCIÓN QUIRÚRGICA: Tipado dinámico atado a la tabla real de Supabase
+type Row = Database["public"]["Tables"]["staff_announcements"]["Row"];
+
+export default function StaffNewsWidget() {
+  const [rows, setRows] = useState<Row[]>([]);
+
+  useEffect(() => {
+    let isMounted = true; // CRÍTICO MOBILE: Control de fugas de memoria
+
+    const load = async () => {
+      try {
+        const { data, error } = await supabase
+          .from("staff_announcements")
+          .select("*") // Usamos "*" para que coincida perfectamente con el tipo 'Row'
+          .order("created_at", { ascending: false })
+          .limit(3);
+
+        if (error) throw error;
+
+        // Eliminamos el casteo inseguro
+        if (isMounted && data) {
+          setRows(data);
+        }
+      } catch (err) {
+        console.error("Error al cargar el widget de novedades:", err);
+      }
+    };
+
+    load();
+
+    // 🟠 FIX ALTO SRE: WebSocket eliminado por completo. 
+    // Evitamos saturar el connection pool de Supabase Realtime con canales inactivos y redundantes.
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  if (rows.length === 0) return null;
+
+  return (
+    <div className="bg-white border rounded-[16px] p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <div className="w-8 h-8 rounded-lg bg-isa-navy text-white grid place-items-center">
+            <Bell className="w-4 h-4" strokeWidth={1.5} />
+          </div>
+          <h3 className="font-extrabold text-isa-navy text-sm">Novedades del Intendente</h3>
+        </div>
+        <Link to="/admin/novedades" className="text-[11px] font-bold text-muno-blue inline-flex items-center gap-1">
+          Ver todas <ArrowRight className="w-3 h-3" />
+        </Link>
+      </div>
+      <ul className="space-y-2">
+        {rows.map((r) => (
+          <li key={r.id} className="border-l-2 border-isa-navy pl-3 py-1">
+            <div className="font-bold text-isa-navy text-sm">{r.title}</div>
+            <div className="text-[11px] text-muted-foreground">
+              {new Date(r.created_at).toLocaleDateString("es-AR")}
+            </div>
+            <p className="text-xs text-isa-navy mt-1 line-clamp-2">{r.body}</p>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+</file>
+
 <file path="src/components/AppLayout.tsx">
 import { useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
@@ -15990,6 +15660,345 @@ export default function BottomNav() {
         ))}
       </div>
     </nav>
+  );
+}
+</file>
+
+<file path="src/components/HomeBanners.tsx">
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { AlertTriangle, ArrowRight, X, MapPin, Phone, CalendarDays, Clock, type LucideIcon } from "lucide-react";
+import { useBanners, COLOR_BG, type CustomBanner } from "@/context/BannersContext";
+
+type Audience = "vecino" | "turista" | "all";
+
+// Tipado extendido para evitar "any"
+type ExtendedBanner = CustomBanner & { 
+  audience?: string; 
+  meta?: { 
+    schedule?: string; 
+    zones?: string; 
+  } 
+};
+
+const VECINO_TAGS = ["comunidad", "cultura", "deporte", "noticias_municipales"];
+const EXCLUDE_FOR_VECINO = ["hospedaje_turistico"];
+
+const AREA_LABEL: Record<string, string> = {
+  cultura: "Cultura",
+  deporte: "Deporte",
+  comunidad: "Comunidad",
+  noticias_municipales: "Noticias",
+};
+
+function pickAreaTag(tags: string[] = []) {
+  return tags.find((t) => AREA_LABEL[t]);
+}
+
+export default function HomeBanners({ audience = "vecino" }: { audience?: Audience }) {
+  const { banners, loading } = useBanners();
+  const [i, setI] = useState(0);
+  const [open, setOpen] = useState<CustomBanner | null>(null);
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  const pausedRef = useRef(false);
+  const navigate = useNavigate();
+
+  const slides = useMemo(() => {
+    const audienceMatch = (b: CustomBanner) => {
+      const extendedBanner = b as ExtendedBanner;
+      const aud = extendedBanner.audience;
+      if (!aud) return audience === "vecino"; // legacy default = residents
+      if (audience === "turista") return aud === "tourists" || aud === "both";
+      return aud === "residents" || aud === "both";
+    };
+    
+    const enabled = banners.filter((b) => b.enabled !== false).filter(audienceMatch);
+    
+    if (audience === "turista") {
+      // Banner MUNO (navy) + cualquiera marcado para turistas
+      const muno = banners.filter((b) => b.enabled !== false && b.color === "navy");
+      const merged = [...muno, ...enabled.filter((b) => b.color !== "navy")];
+      return merged.sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0));
+    }
+    
+    const filtered = enabled.filter((b) => {
+      const tags = b.tags || [];
+      if (audience === "vecino") {
+        if (tags.some((t) => EXCLUDE_FOR_VECINO.includes(t))) return false;
+        if (tags.length === 0) return true;
+        return tags.some((t) => VECINO_TAGS.includes(t));
+      }
+      return true;
+    });
+    
+    return filtered.sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0));
+  }, [banners, audience]);
+
+  // Auto-rotate infinito cada 5s + primer movimiento inmediato al montar
+  useEffect(() => {
+    if (slides.length <= 1) return;
+    const kickoff = setTimeout(() => {
+      if (!pausedRef.current) setI((v) => (v + 1) % slides.length);
+    }, 1500);
+    const t = setInterval(() => {
+      if (pausedRef.current) return;
+      setI((v) => (v + 1) % slides.length);
+    }, 5000);
+    return () => {
+      clearTimeout(kickoff);
+      clearInterval(t);
+    };
+  }, [slides.length]);
+
+  // Smooth scroll al slide activo
+  useEffect(() => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    const child = el.children[i] as HTMLElement | undefined;
+    if (child) el.scrollTo({ left: child.offsetLeft, behavior: "smooth" });
+  }, [i]);
+
+  const onScroll = () => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    const idx = Math.round(el.scrollLeft / el.clientWidth);
+    if (idx !== i) setI(idx);
+  };
+
+  if (loading) {
+    return (
+      <div className="relative z-10 min-h-[200px] rounded-[16px] bg-gradient-to-br from-isa-navy/10 to-isa-navy/5 animate-pulse" />
+    );
+  }
+  if (slides.length === 0) {
+    return <div className="relative z-10 min-h-[200px] rounded-[16px] bg-isa-navy/5" />;
+  }
+
+  return (
+    <>
+      <div
+        ref={scrollerRef}
+        onScroll={onScroll}
+        onPointerDown={() => (pausedRef.current = true)}
+        onPointerUp={() => {
+          setTimeout(() => (pausedRef.current = false), 4000);
+        }}
+        className="relative z-10 flex overflow-x-auto overflow-y-visible snap-x snap-mandatory scrollbar-none -mx-1 px-1 min-h-[200px]"
+        style={{ scrollbarWidth: "none" }}
+      >
+        {slides.map((s) => {
+          const areaTag = pickAreaTag(s.tags);
+          return (
+            <div key={s.id} className="snap-center shrink-0 w-full px-1">
+              <button
+                onClick={() => setOpen(s)}
+                className="block w-full text-left rounded-[16px] overflow-hidden focus:outline-none focus:ring-2 focus:ring-isa-navy relative min-h-[200px]"
+              >
+                {areaTag && (
+                  <span className="absolute top-3 right-3 z-10 text-[10px] uppercase tracking-wider font-extrabold bg-white/95 text-isa-navy px-2 py-1 rounded-full">
+                    {AREA_LABEL[areaTag]}
+                  </span>
+                )}
+                {s.color === "navy" && <IdentityBanner b={s} />}
+                {s.color === "red" && <AlertBanner b={s} />}
+                {s.color === "emerald" && <CultureBanner b={s} />}
+              </button>
+            </div>
+          );
+        })}
+      </div>
+
+      {open && <BannerModal banner={open} onClose={() => setOpen(null)} navigate={navigate} />}
+    </>
+  );
+}
+
+function BannerModal({
+  banner,
+  onClose,
+  navigate,
+}: {
+  banner: CustomBanner;
+  onClose: () => void;
+  navigate: (to: string) => void;
+}) {
+  const extendedBanner = banner as ExtendedBanner;
+  const isAlert = extendedBanner.color === "red";
+  const ctaLabel = extendedBanner.cta || (isAlert ? "Más información" : "Ver detalle");
+  const ctaTo = extendedBanner.ctaTo;
+
+  // Heurística para botón de acción según destino con tipado estricto LucideIcon
+  let actionIcon: LucideIcon = ArrowRight;
+  let actionLabel = ctaLabel;
+  
+  if (ctaTo?.startsWith("tel:")) { actionIcon = Phone; actionLabel = "Llamar ahora"; }
+  else if (ctaTo?.startsWith("http") && ctaTo.includes("google.com/maps")) { actionIcon = MapPin; actionLabel = "Ir a Google Maps"; }
+  else if (ctaTo === "/eventos") { actionIcon = CalendarDays; actionLabel = "Ver Agenda"; }
+
+  const onAction = () => {
+    if (!ctaTo) return onClose();
+    
+    // OPTIMIZACIÓN: Abrir enlaces HTTP en pestaña nueva para no matar la SPA.
+    // tel: y mailto: se manejan nativamente sin romper el navegador.
+    if (ctaTo.startsWith("http")) {
+      window.open(ctaTo, "_blank", "noopener,noreferrer");
+    } else if (ctaTo.startsWith("tel:") || ctaTo.startsWith("mailto:")) {
+      window.location.href = ctaTo;
+    } else {
+      navigate(ctaTo);
+    }
+    
+    onClose();
+  };
+
+  const Icon = actionIcon;
+  const meta = extendedBanner.meta;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm grid place-items-end md:place-items-center p-0 md:p-4 animate-fade-in"
+      onClick={onClose}
+    >
+      <div
+        className="w-full md:max-w-md rounded-t-[24px] md:rounded-[16px] overflow-hidden animate-scale-in relative bg-white"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+      >
+        <button
+          onClick={onClose}
+          className="absolute top-3 right-3 z-10 w-9 h-9 grid place-items-center rounded-full bg-isa-navy text-white hover:opacity-90"
+          aria-label="Cerrar"
+        >
+          <X strokeWidth={2} className="w-4 h-4" />
+        </button>
+
+        {extendedBanner.image && (
+          // 🟠 FIX MEDIO SRE: Optimización de red móvil (Bandwidth-Safe)
+          <img 
+            src={extendedBanner.image} 
+            alt={extendedBanner.title} 
+            className="w-full h-52 object-cover"
+            loading="lazy" 
+          />
+        )}
+
+        <div className="p-5 space-y-3">
+          <div className="flex items-center gap-2">
+            {isAlert && (
+              <span className="w-7 h-7 rounded-full grid place-items-center" style={{ background: COLOR_BG.red, color: "#fff" }}>
+                <AlertTriangle strokeWidth={1.5} className="w-4 h-4" />
+              </span>
+            )}
+            <span className="text-[10px] uppercase tracking-[0.22em] font-bold text-isa-navy/70">
+              {isAlert ? "Aviso de Servicio" : extendedBanner.color === "emerald" ? "Cultura · Deporte" : "Novedad"}
+            </span>
+          </div>
+
+          <h3 className="font-display font-extrabold text-isa-navy text-[22px] leading-tight">
+            {extendedBanner.title}
+          </h3>
+
+          <p className="text-[14px] text-isa-navy/80 leading-relaxed whitespace-pre-line">
+            {extendedBanner.description}
+          </p>
+
+          {/* Bloque limpio y tipado para la metadata (horarios y zonas) */}
+          {isAlert && meta && (
+            <div className="rounded-[12px] bg-white p-3 border border-isa-navy/10 space-y-1.5">
+              {meta.schedule && (
+                <div className="flex items-center gap-2 text-[13px] text-isa-navy">
+                  <Clock strokeWidth={1.5} className="w-4 h-4" />
+                  <span><strong>Horario:</strong> {meta.schedule}</span>
+                </div>
+              )}
+              {meta.zones && (
+                <div className="flex items-start gap-2 text-[13px] text-isa-navy">
+                  <MapPin strokeWidth={1.5} className="w-4 h-4 mt-0.5" />
+                  <span><strong>Zonas afectadas:</strong> {meta.zones}</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="pt-1 grid grid-cols-1 gap-2">
+            {ctaTo && (
+              <button
+                onClick={onAction}
+                className="inline-flex items-center justify-center gap-2 w-full bg-isa-navy text-white rounded-[14px] py-3 text-sm font-bold min-h-[44px]"
+              >
+                <Icon strokeWidth={2} className="w-4 h-4" /> {actionLabel}
+              </button>
+            )}
+            <button
+              onClick={onClose}
+              className="w-full rounded-[14px] py-3 text-sm font-bold border border-isa-navy/20 text-isa-navy bg-transparent min-h-[44px]"
+            >
+              Cerrar
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function IdentityBanner({ b }: { b: CustomBanner }) {
+  return (
+    <div className="p-6 text-isa-white relative overflow-hidden rounded-[16px] min-h-[200px]" style={{ background: "hsl(var(--isa-navy))" }}>
+      <div
+        aria-hidden
+        className="absolute -right-12 -top-12 w-44 h-44 rounded-full opacity-10"
+        style={{ background: "hsl(var(--isa-dusty))" }}
+      />
+      <div className="text-[10px] uppercase tracking-[0.3em] font-bold text-isa-dusty">Plataforma</div>
+      <h2 className="!text-white font-display text-[40px] leading-none font-extrabold mt-2 tracking-tight">
+        {b.title}
+      </h2>
+      <p className="text-[13px] mt-2 text-[hsl(var(--isa-light))]/90 italic line-clamp-2">{b.description}</p>
+    </div>
+  );
+}
+
+function AlertBanner({ b }: { b: CustomBanner }) {
+  return (
+    <div className="p-5 text-isa-white relative rounded-[16px] min-h-[200px]" style={{ background: COLOR_BG.red }}>
+      <div className="flex items-start gap-3">
+        <div className="w-9 h-9 rounded-full bg-white/20 grid place-items-center shrink-0">
+          <AlertTriangle strokeWidth={1.5} className="w-5 h-5" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-[10px] uppercase tracking-[0.25em] font-bold opacity-90">Aviso de Servicio</div>
+          <h3 className="!text-white font-display text-[18px] font-extrabold mt-1 leading-snug">{b.title}</h3>
+          <p className="text-[12px] opacity-90 mt-1 line-clamp-2">{b.description}</p>
+          <div className="mt-3 inline-flex items-center gap-1 text-[12px] font-bold">
+            {b.cta || "Ver detalle"} <ArrowRight strokeWidth={1.5} className="w-3.5 h-3.5" />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CultureBanner({ b }: { b: CustomBanner }) {
+  return (
+    <div className="relative text-isa-white overflow-hidden rounded-[16px]" style={{ background: COLOR_BG[b.color] }}>
+      {b.image && (
+        <>
+          {/* 🟠 FIX MEDIO SRE: Lazy loading para no bloquear el Main Thread */}
+          <img src={b.image} alt="" className="absolute inset-0 w-full h-full object-cover" loading="lazy" />
+          <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/40 to-black/20" />
+        </>
+      )}
+      <div className="relative p-5 min-h-[200px] flex flex-col justify-end">
+        <div className="text-[10px] uppercase tracking-[0.25em] font-bold opacity-90">Cultura · Deporte</div>
+        <h3 className="!text-white font-display text-[20px] font-extrabold mt-1 leading-tight">{b.title}</h3>
+        <p className="text-[12px] opacity-90 mt-1 line-clamp-2">{b.description}</p>
+        <div className="mt-3 inline-flex items-center gap-1 text-[12px] font-bold self-start bg-white/20 px-3 py-1.5 rounded-full">
+          {b.cta || "Ver más"} <ArrowRight strokeWidth={1.5} className="w-3.5 h-3.5" />
+        </div>
+      </div>
+    </div>
   );
 }
 </file>
@@ -18294,246 +18303,6 @@ function ChartCard({ title, children, className = "" }: ChartCardProps) {
     <div className={`bg-white rounded-[16px] p-5 border ${className}`}>
       <div className="font-extrabold text-isa-navy text-sm mb-3">{title}</div>
       {children}
-    </div>
-  );
-}
-</file>
-
-<file path="src/pages/admin/AdminNovedadesJefes.tsx">
-import { useEffect, useState, useCallback, useRef } from "react";
-import { supabase } from "@/integrations/supabase/client";
-import { useAuth } from "@/context/AuthContext";
-import { toast } from "sonner";
-import { Bell, Plus, Trash2, X } from "lucide-react";
-import { can } from "@/security/can";
-import { PERMISSIONS } from "@/security/permissions";
-
-// --- TIPOS ESTRICTOS ---
-type Row = { 
-  id: string; 
-  title: string; 
-  body: string; 
-  created_at: string; 
-  created_by: string | null;
-  municipality_id?: string | null;
-};
-
-interface DBStaffAnnouncement {
-  id: string;
-  title: string;
-  body: string;
-  created_at: string;
-  created_by: string | null;
-  municipality_id?: string | null;
-}
-
-export default function AdminNovedadesJefes() {
-  const { user, roles, area } = useAuth();
-  
-  const canPublish = can(roles, area, PERMISSIONS.CONTENT_PUBLISH);
-  
-  const [rows, setRows] = useState<Row[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [creating, setCreating] = useState(false);
-
-  // 1. SOLUCIÓN: Referencia mutable para prevenir condiciones de carrera
-  const isMounted = useRef(true);
-
-  // 2. Quitamos el parámetro falso y usamos el objeto en memoria
-  const load = useCallback(async () => {
-    if (!user?.id) return;
-    if (isMounted.current) setLoading(true);
-    
-    try {
-      // Obtener jurisdicción del usuario para blindaje BOLA
-      const { data: userRole } = await supabase
-        .from("user_roles")
-        .select("municipality_id")
-        .eq("user_id", user.id)
-        .eq("active", true)
-        .maybeSingle();
-
-      const currentMuniId = userRole?.municipality_id;
-
-      let q = supabase
-        .from("staff_announcements")
-        .select("*")
-        .order("created_at", { ascending: false });
-
-      // Aplicar filtro estricto por inquilino
-      if (currentMuniId) {
-        q = q.eq("municipality_id", currentMuniId);
-      }
-
-      const { data, error } = await q;
-      if (error) throw error;
-
-      // 3. Leemos el `.current`
-      if (isMounted.current) {
-        setRows((data as DBStaffAnnouncement[]) || []);
-      }
-    } catch (err) {
-      console.error("Error al cargar novedades:", err);
-      toast.error("Error al cargar las novedades");
-    } finally {
-      if (isMounted.current) setLoading(false);
-    }
-  }, [user?.id]);
-
-  useEffect(() => {
-    isMounted.current = true;
-    
-    load();
-    
-    const channel = supabase
-      .channel("staff_ann_changes")
-      .on(
-        "postgres_changes", 
-        { event: "*", schema: "public", table: "staff_announcements" }, 
-        () => {
-          if (isMounted.current) load();
-        }
-      )
-      .subscribe();
-      
-    return () => {
-      // 4. Se apaga la referencia al desmontar
-      isMounted.current = false;
-      supabase.removeChannel(channel);
-    };
-  }, [load]);
-
-  const remove = async (id: string) => {
-    if (!window.confirm("¿Eliminar esta novedad?")) return;
-    
-    try {
-      const { error } = await supabase
-        .from("staff_announcements")
-        .delete()
-        .eq("id", id);
-        
-      if (error) throw error;
-      
-      toast.success("Eliminada");
-    } catch (err: unknown) {
-      console.error(err);
-      toast.error("No se pudo eliminar");
-    }
-  };
-
-  return (
-    <div className="space-y-5">
-      <div className="flex items-center justify-between gap-3 flex-wrap">
-        <div>
-          <h2 className="font-extrabold text-isa-navy text-lg">Novedades para Jefes</h2>
-          <p className="text-xs text-muted-foreground">Comunicaciones internas del Intendente. Visibles solo para personal municipal.</p>
-        </div>
-        {canPublish && (
-          <button
-            onClick={() => setCreating(true)}
-            className="inline-flex items-center gap-2 bg-isa-navy text-white rounded-[12px] px-4 py-2.5 text-[13px] font-bold"
-          >
-            <Plus className="w-4 h-4" /> Nueva novedad
-          </button>
-        )}
-      </div>
-
-      <div className="space-y-3">
-        {loading && <div className="text-sm text-muted-foreground">Cargando…</div>}
-        {!loading && rows.length === 0 && (
-          <div className="text-sm text-muted-foreground bg-white border rounded-[16px] p-6 text-center">
-            Aún no hay novedades publicadas.
-          </div>
-        )}
-        {rows.map((r) => (
-          <div key={r.id} className="bg-white border rounded-[16px] p-4 flex items-start gap-3">
-            <div className="w-10 h-10 rounded-xl bg-isa-navy text-white grid place-items-center shrink-0">
-              <Bell className="w-5 h-5" strokeWidth={1.5} />
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="font-bold text-isa-navy">{r.title}</div>
-              <div className="text-xs text-muted-foreground mb-2">
-                {new Date(r.created_at).toLocaleString("es-AR")}
-              </div>
-              <p className="text-sm text-isa-navy whitespace-pre-wrap">{r.body}</p>
-            </div>
-            {canPublish && r.created_by === user?.id && (
-              <button onClick={() => remove(r.id)} className="text-muno-red p-1.5 hover:bg-muted rounded-lg">
-                <Trash2 className="w-4 h-4" />
-              </button>
-            )}
-          </div>
-        ))}
-      </div>
-
-      {creating && <CreateDialog onClose={() => setCreating(false)} onSaved={() => { setCreating(false); load(); }} />}
-    </div>
-  );
-}
-
-function CreateDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
-  const { user } = useAuth();
-  const [title, setTitle] = useState("");
-  const [body, setBody] = useState("");
-  const [saving, setSaving] = useState(false);
-
-  const save = async () => {
-    if (!title.trim() || !body.trim() || !user?.id) {
-      toast.error("Completá título y mensaje");
-      return;
-    }
-    
-    setSaving(true);
-    
-    try {
-      // 1. Averiguamos a qué municipio pertenece el usuario que publica
-      const { data: userRole } = await supabase
-        .from("user_roles")
-        .select("municipality_id")
-        .eq("user_id", user.id)
-        .eq("active", true)
-        .maybeSingle();
-
-      // 2. Insertamos la novedad anclada a ese municipio
-      const { error } = await supabase
-        .from("staff_announcements")
-        .insert({ 
-          title: title.trim(), 
-          body: body.trim(), 
-          created_by: user.id,
-          municipality_id: userRole?.municipality_id
-        });
-        
-      if (error) throw error;
-      
-      toast.success("Novedad publicada");
-      onSaved();
-    } catch (err: unknown) {
-      console.error(err);
-      const errorMessage = err instanceof Error ? err.message : "No se pudo publicar";
-      toast.error("Error: " + errorMessage);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
-      <div className="bg-white rounded-[16px] p-5 max-w-md w-full">
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="font-extrabold text-isa-navy">Nueva novedad</h3>
-          <button onClick={onClose} className="w-8 h-8 grid place-items-center rounded-lg hover:bg-muted">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-        <label className="text-xs font-bold text-muted-foreground">Título</label>
-        <input value={title} onChange={(e) => setTitle(e.target.value)} className="mt-1 mb-3 w-full px-3 py-2.5 rounded-xl border bg-background text-sm" />
-        <label className="text-xs font-bold text-muted-foreground">Mensaje</label>
-        <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={5} className="mt-1 w-full px-3 py-2.5 rounded-xl border bg-background text-sm resize-none" />
-        <button disabled={saving} onClick={save} className="mt-4 w-full bg-isa-navy text-white rounded-[12px] py-2.5 text-sm font-bold disabled:opacity-60">
-          {saving ? "Publicando…" : "Publicar"}
-        </button>
-      </div>
     </div>
   );
 }
@@ -22327,376 +22096,6 @@ export default function Reclamos() {
 }
 </file>
 
-<file path="src/pages/Turismo.tsx">
-import { useState, useMemo, useEffect, ElementType, ReactNode } from "react";
-import { useSearchParams } from "react-router-dom";
-import { useMunicipality } from "@/context/MunicipalityContext";
-import { places, gastronomy, agenda, commerces, lodging, ZONES, type Zone, type AgendaCategory } from "@/data/mock";
-import { MapPin, Calendar, Search, Clock, Tag, Info, X } from "lucide-react";
-import { formatARS } from "@/lib/format";
-import { track } from "@/lib/analytics";
-import LeadDialog from "@/components/LeadDialog";
-import RatingStars from "@/components/RatingStars";
-import FavoriteButton from "@/components/FavoriteButton";
-import { supabase } from "@/integrations/supabase/client";
-import { useAuth } from "@/context/AuthContext";
-
-const TABS_VECINO = ["Lugares", "Saltos", "Museos", "Cultural", "Gastronomía", "Agenda"] as const;
-const TABS_TURISTA = ["Comercio", "Gastronomía", "Hospedaje"] as const;
-const AGENDA_CATS: AgendaCategory[] = ["Hoy", "Fin de Semana", "Conciertos"];
-
-type TabType = typeof TABS_VECINO[number] | typeof TABS_TURISTA[number];
-
-interface DBTurismoItem {
-  id: string;
-  title: string;
-  description?: string;
-  schedule?: string;
-  days?: string;
-  price?: number | null;
-  photo_url?: string;
-  category?: string;
-  type?: string;
-}
-
-interface PlaceItem {
-  id: string;
-  name: string;
-  type: string;
-  address: string;
-  zone?: string;
-  schedule?: string;
-  days?: string;
-  price?: number;
-  photo_url: string;
-  how_to_get: string;
-  requirements?: string;
-}
-
-interface LodgingItem {
-  id: string;
-  name: string;
-  type: string;
-  address: string;
-  zone?: string;
-  schedule?: string;
-  price?: number;
-  photos: string[];
-  requirements?: string;
-}
-
-interface AgendaItem {
-  id: string;
-  title: string;
-  date: string;
-  place: string;
-  zone?: string;
-  category: string;
-}
-
-const InfoLine = ({ icon: Icon, children }: { icon: ElementType; children: ReactNode }) => (
-  <div className="flex items-start gap-1.5 text-[11px] text-muted-foreground">
-    <Icon strokeWidth={1.5} className="w-3 h-3 mt-0.5 shrink-0" />
-    <span>{children}</span>
-  </div>
-);
-
-const PlaceCard = ({ item, rateable }: { item: PlaceItem; rateable?: boolean }) => (
-  <article className="isa-card overflow-hidden hover:-translate-y-0.5 hover:shadow-md transition-all">
-    <div className="relative">
-      <img src={item.photo_url} alt={item.name} loading="lazy" className="w-full h-[120px] object-cover" />
-      <div className="absolute top-2 right-2">
-        <FavoriteButton place={{ id: item.id, name: item.name, type: item.type, photo_url: item.photo_url, zone: item.zone || "" }} />
-      </div>
-    </div>
-    <div className="p-4 space-y-2">
-      <div className="flex items-center justify-between gap-2">
-        <h3 className="font-extrabold text-isa-navy">{item.name}</h3>
-        <span className="isa-chip bg-accent text-isa-navy">{item.type}</span>
-      </div>
-      <InfoLine icon={MapPin}>{item.address}{item.zone && ` · ${item.zone}`}</InfoLine>
-      {item.schedule && <InfoLine icon={Clock}>{item.schedule}{item.days && ` · ${item.days}`}</InfoLine>}
-      {typeof item.price === "number" && <InfoLine icon={Tag}>{item.price === 0 ? "Entrada gratuita" : formatARS(item.price)}</InfoLine>}
-      {item.requirements && item.requirements !== "—" && <InfoLine icon={Info}>{item.requirements}</InfoLine>}
-      {rateable && <RatingStars id={item.id} name={item.name} />}
-      <a href={item.how_to_get} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center w-full bg-isa-navy text-isa-white rounded-[20px] py-2.5 text-sm font-bold hover:opacity-90 mt-1">Cómo llegar</a>
-    </div>
-  </article>
-);
-
-const LodgingCard = ({ item, onConsultar }: { item: LodgingItem; onConsultar: (item: LodgingItem) => void }) => {
-  const [idx, setIdx] = useState(0);
-  return (
-    <article className="isa-card overflow-hidden">
-      <div className="relative">
-        <img src={item.photos[idx]} alt={item.name} className="w-full h-48 object-cover" />
-        <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex gap-1.5">
-          {item.photos.map((_, i) => (
-            <button key={i} onClick={() => setIdx(i)} className={`w-2 h-2 rounded-full ${i === idx ? "bg-white" : "bg-white/50"}`} />
-          ))}
-        </div>
-      </div>
-      <div className="p-4 space-y-2">
-        <div className="flex items-center justify-between">
-          <h3 className="font-extrabold text-isa-navy">{item.name}</h3>
-          <span className="isa-chip bg-accent text-isa-navy">{item.type}</span>
-        </div>
-        <InfoLine icon={MapPin}>{item.address}</InfoLine>
-        {item.schedule && <InfoLine icon={Clock}>{item.schedule}</InfoLine>}
-        {item.price && <InfoLine icon={Tag}>Desde {formatARS(item.price)} / noche</InfoLine>}
-        {item.requirements && <InfoLine icon={Info}>{item.requirements}</InfoLine>}
-        <button onClick={() => onConsultar(item)} className="w-full mt-1 bg-isa-navy text-isa-white rounded-[20px] py-2.5 text-sm font-bold">Consultar disponibilidad</button>
-      </div>
-    </article>
-  );
-};
-
-function filterByZoneAndQuery<T extends { zone?: string; name: string }>(items: T[], zone: Zone, q: string): T[] {
-  return items.filter((i) => (zone === "Todas" || i.zone === zone) && i.name.toLowerCase().includes(q.toLowerCase()));
-}
-
-function Grid<T>({ items, render, cols = 3 }: { items: T[]; render: (item: T) => ReactNode; cols?: number }) {
-  if (!items.length) return <p className="text-sm text-muted-foreground text-center py-6">Sin resultados.</p>;
-  return <div className={`grid grid-cols-1 sm:grid-cols-2 ${cols === 2 ? "lg:grid-cols-2" : "lg:grid-cols-3"} gap-4`}>{items.map(render)}</div>;
-}
-
-export default function Turismo() {
-  const { user, roles } = useAuth();
-  const { municipality, municipalityId, setMunicipality } = useMunicipality();
-  const isTurista = roles.includes("tourist");
-  
-  // Tipado estricto sin "as any" o "as readonly string[]"
-  const TABS: readonly TabType[] = isTurista ? TABS_TURISTA : TABS_VECINO;
-  
-  const [params, setParams] = useSearchParams();
-  const urlZone = params.get("zone") as Zone | null;
-  const initialZone: Zone = (urlZone || (municipality as Zone) || "Todas") as Zone;
-  
-  const [tab, setTab] = useState<TabType>(TABS[0]);
-  const [zone, setZone] = useState<Zone>(initialZone);
-  const [q, setQ] = useState("");
-  const [agendaCat, setAgendaCat] = useState<AgendaCategory>("Hoy");
-  const [lodgTarget, setLodgTarget] = useState<LodgingItem | null>(null);
-
-  useEffect(() => {
-    if (urlZone && urlZone !== zone) setZone(urlZone);
-  }, [urlZone, zone]);
-
-  useEffect(() => {
-    if (zone && zone !== "Todas") {
-      setMunicipality(zone);
-      track({ kind: "search_zone", zone, userType: isTurista ? "turista" : "vecino" });
-    }
-  }, [zone, isTurista, setMunicipality]);
-
-  useEffect(() => {
-    track({ kind: "category_click", category: tab, userType: isTurista ? "turista" : "vecino" });
-  }, [tab, isTurista]);
-
-  const clearMunicipality = () => {
-    setMunicipality("");
-    setZone("Todas");
-    setParams({});
-  };
-
-  // Optimización total de memoria: Todos los filtros memorizados
-  const allPlaces = useMemo(() => filterByZoneAndQuery(places, zone, q), [zone, q]);
-  const saltos = useMemo(() => allPlaces.filter((p) => p.type === "Salto"), [allPlaces]);
-  const museos = useMemo(() => allPlaces.filter((p) => p.type === "Museo"), [allPlaces]);
-  const culturales = useMemo(() => allPlaces.filter((p) => p.type === "Cultural"), [allPlaces]);
-  const gastro = useMemo(() => filterByZoneAndQuery(gastronomy, zone, q), [zone, q]);
-  const com = useMemo(() => filterByZoneAndQuery(commerces, zone, q), [zone, q]);
-  const lodg = useMemo(() => filterByZoneAndQuery(lodging, zone, q), [zone, q]);
-  
-  const agendaFiltered = useMemo(() => {
-    return agenda.filter((a) => a.category === agendaCat && (zone === "Todas" || a.zone === zone));
-  }, [agendaCat, zone]);
-
-  const [dbLugares, setDbLugares] = useState<PlaceItem[]>([]);
-  const [dbAgenda, setDbAgenda] = useState<DBTurismoItem[]>([]);
-
-  useEffect(() => {
-    let isMounted = true; 
-
-    const fetchTurismo = async () => {
-      try {
-        let munId: string | null = null;
-        if (user?.id) {
-          const { data: prof } = await supabase.from("profiles").select("municipality_id").eq("id", user.id).maybeSingle();
-          munId = prof?.municipality_id ?? null;
-        }
-        
-        if (!munId && zone && zone !== "Todas") {
-          munId = municipalityId || null;
-        }
-
-        let qLugares = supabase.from("content_items").select("*").eq("published", true).eq("kind", "Lugar").order("created_at", { ascending: false });
-        let qEv = supabase.from("content_items").select("*").eq("published", true).in("kind", ["Evento", "Actividad", "Taller"]).order("created_at", { ascending: false });
-        
-        if (munId) { 
-          qLugares = qLugares.eq("municipality_id", munId); 
-          qEv = qEv.eq("municipality_id", munId); 
-        }
-        
-        const [resLugares, resEv] = await Promise.all([qLugares, qEv]);
-
-        if (isMounted) {
-          const lugData = (resLugares.data as unknown as DBTurismoItem[]) || [];
-          const evData = (resEv.data as unknown as DBTurismoItem[]) || [];
-
-          setDbLugares(lugData.map((it) => ({
-            id: it.id, 
-            name: it.title, 
-            type: it.category || it.type || "Lugar",
-            address: it.description || "", 
-            zone: zone === "Todas" ? "" : zone,
-            schedule: it.schedule || "", 
-            days: it.days || "", 
-            price: it.price ?? undefined,
-            photo_url: it.photo_url || "/placeholder.svg", 
-            how_to_get: "#",
-          })));
-
-          setDbAgenda(evData); 
-        }
-      } catch (err) {
-        console.error("Error cargando turismo:", err);
-      }
-    };
-
-    fetchTurismo();
-
-    return () => {
-      isMounted = false;
-    };
-  }, [user?.id, zone, municipalityId]);
-
-  const lugaresAll = [...dbLugares, ...allPlaces];
-  
-  const agendaAll = useMemo(() => {
-    const dbMapped: AgendaItem[] = dbAgenda.map((it) => ({
-      id: it.id, 
-      title: it.title, 
-      date: it.days || "Próximamente",
-      place: it.schedule || "—", 
-      zone: zone === "Todas" ? "" : zone, 
-      category: it.category || it.type || "Evento",
-    }));
-    return [...dbMapped, ...agendaFiltered];
-  }, [dbAgenda, agendaFiltered, zone]);
-
-  const TURIST_BIG = [
-    { key: "Comercio" as const, label: "COMERCIO" },
-    { key: "Gastronomía" as const, label: "GASTRONOMÍA" },
-    { key: "Hospedaje" as const, label: "HOSPEDAJE" },
-  ];
-
-  return (
-    <div className="space-y-5">
-      {isTurista ? (
-        <header className="space-y-2">
-          <h1 className="text-isa-navy font-display font-extrabold text-[20px]">Turismo</h1>
-          <p className="text-sm text-muted-foreground">
-            {municipality ? `Mostrando información de ${municipality}.` : "Elegí un municipio para ver toda su oferta."}
-          </p>
-          {municipality && (
-            <button
-              onClick={clearMunicipality}
-              className="inline-flex items-center gap-1.5 text-[11px] font-bold bg-muno-blue/15 text-muno-blue px-2.5 py-1 rounded-full"
-            >
-              <MapPin className="w-3 h-3" /> {municipality}
-              <X className="w-3 h-3" />
-            </button>
-          )}
-        </header>
-      ) : (
-        <div className="space-y-3">
-          <div className="relative">
-            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar lugar, hotel…" className="w-full pl-9 pr-3 py-2.5 rounded-[20px] border bg-card text-sm outline-none focus:ring-2 focus:ring-isa-navy" />
-          </div>
-          <div className="flex gap-2 overflow-x-auto pb-1">
-            {ZONES.map((z) => (
-              <button key={z} onClick={() => setZone(z)} className={`px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap min-h-[36px] ${zone === z ? "bg-muno-blue text-white" : "bg-card border text-isa-navy"}`}>{z}</button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {isTurista ? (
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          {TURIST_BIG.map((b) => {
-            const active = tab === b.key;
-            return (
-              <button
-                key={b.key}
-                onClick={() => setTab(b.key)}
-                className="min-h-[88px] rounded-[16px] font-extrabold text-[15px] tracking-wide transition-all"
-                style={{
-                  background: active ? "#242E44" : "#F5EFE6",
-                  color: active ? "#FFFFFF" : "#242E44",
-                  border: active ? "none" : "1px solid rgba(36,46,68,0.12)",
-                }}
-              >
-                {b.label}
-              </button>
-            );
-          })}
-        </div>
-      ) : (
-        <div className="flex flex-wrap gap-2">
-          {TABS.map((t) => (
-            <button key={t} onClick={() => setTab(t)} className={`px-3 py-1.5 rounded-[20px] text-xs font-bold transition-colors min-h-[36px] ${tab === t ? "bg-isa-navy text-isa-white" : "bg-card text-isa-navy hover:bg-muted border"}`}>{t}</button>
-          ))}
-        </div>
-      )}
-
-      {tab === "Lugares" && <Grid items={lugaresAll} render={(p) => <PlaceCard key={p.id} item={p} rateable />} />}
-      {tab === "Saltos" && <Grid items={saltos} render={(p) => <PlaceCard key={p.id} item={p} rateable />} />}
-      {tab === "Museos" && <Grid items={museos} render={(p) => <PlaceCard key={p.id} item={p} rateable />} />}
-      {tab === "Cultural" && <Grid items={culturales} render={(p) => <PlaceCard key={p.id} item={p} rateable />} />}
-      {tab === "Gastronomía" && <Grid items={gastro} render={(p) => <PlaceCard key={p.id} item={p as PlaceItem} />} />}
-      {tab === "Comercio" && <Grid items={com} render={(p) => <PlaceCard key={p.id} item={p as PlaceItem} />} />}
-      {tab === "Hospedaje" && <Grid items={lodg} render={(p) => <LodgingCard key={p.id} item={p as LodgingItem} onConsultar={setLodgTarget} />} />}
-
-      {tab === "Agenda" && (
-        <>
-          <div className="flex gap-2">
-            {AGENDA_CATS.map((c) => (
-              <button key={c} onClick={() => setAgendaCat(c)} className={`px-3 py-1.5 rounded-[20px] text-xs font-bold ${agendaCat === c ? "bg-muno-amber text-white" : "bg-card border"}`}>
-                {c === "Hoy" ? "Eventos del Día" : c}
-              </button>
-            ))}
-          </div>
-          <div className="space-y-3">
-            {agendaAll.length === 0 && <p className="text-sm text-muted-foreground text-center py-6">No hay eventos en esta categoría.</p>}
-            {agendaAll.map((a) => (
-              <div key={a.id} className="isa-card p-4 flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-accent grid place-items-center text-isa-navy"><Calendar strokeWidth={1.5} className="w-5 h-5" /></div>
-                <div className="flex-1">
-                  <div className="font-extrabold text-isa-navy text-sm">{a.title}</div>
-                  <div className="text-xs text-muted-foreground">{a.date} · {a.place} · 📍 {a.zone}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </>
-      )}
-
-      <LeadDialog
-        open={!!lodgTarget}
-        title={`Consultar · ${lodgTarget?.name || ""}`}
-        description="Le enviamos tu consulta al alojamiento."
-        fields={["name", "email", "origin"]}
-        kind="reserva_lead"
-        meta={{ lodging: lodgTarget?.name }}
-        onClose={() => setLodgTarget(null)}
-      />
-    </div>
-  );
-}
-</file>
-
 <file path="src/App.tsx">
 import React, { Component, ErrorInfo, ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -23414,6 +22813,238 @@ export default function ProtectedRoute({
 }
 </file>
 
+<file path="src/pages/admin/AdminNovedadesJefes.tsx">
+import { useEffect, useState, useCallback, useRef } from "react";
+import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/context/AuthContext";
+import { toast } from "sonner";
+import { Bell, Plus, Trash2, X } from "lucide-react";
+import { can } from "@/security/can";
+import { PERMISSIONS } from "@/security/permissions";
+
+// --- TIPOS ESTRICTOS ---
+type Row = { 
+  id: string; 
+  title: string; 
+  body: string; 
+  created_at: string; 
+  created_by: string | null;
+  municipality_id?: string | null;
+};
+
+interface DBStaffAnnouncement {
+  id: string;
+  title: string;
+  body: string;
+  created_at: string;
+  created_by: string | null;
+  municipality_id?: string | null;
+}
+
+export default function AdminNovedadesJefes() {
+  const { user, roles, area } = useAuth();
+  
+  const canPublish = can(roles, area, PERMISSIONS.CONTENT_PUBLISH);
+  
+  const [rows, setRows] = useState<Row[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+
+  // 1. SOLUCIÓN: Referencia mutable para prevenir condiciones de carrera
+  const isMounted = useRef(true);
+
+  // 2. Quitamos el parámetro falso y usamos el objeto en memoria
+  const load = useCallback(async () => {
+    if (!user?.id) return;
+    if (isMounted.current) setLoading(true);
+    
+    try {
+      // Obtener jurisdicción del usuario para blindaje BOLA
+      const { data: userRole } = await supabase
+        .from("user_roles")
+        .select("municipality_id")
+        .eq("user_id", user.id)
+        .eq("active", true)
+        .maybeSingle();
+
+      const currentMuniId = userRole?.municipality_id;
+
+      let q = supabase
+        .from("staff_announcements")
+        .select("*")
+        .order("created_at", { ascending: false });
+
+      // Aplicar filtro estricto por inquilino
+      if (currentMuniId) {
+        q = q.eq("municipality_id", currentMuniId);
+      }
+
+      const { data, error } = await q;
+      if (error) throw error;
+
+      // 3. Leemos el `.current`
+      if (isMounted.current) {
+        setRows((data as DBStaffAnnouncement[]) || []);
+      }
+    } catch (err) {
+      console.error("Error al cargar novedades:", err);
+      toast.error("Error al cargar las novedades");
+    } finally {
+      if (isMounted.current) setLoading(false);
+    }
+  }, [user?.id]);
+
+  useEffect(() => {
+    isMounted.current = true;
+    
+    load();
+    
+    // 🟠 FIX ALTO SRE: Extirpación de WebSocket redundante.
+    // La carga se realiza exclusivamente bajo demanda (on-mount) ahorrando conexiones TCP/IP constantes.
+
+    return () => {
+      // 4. Se apaga la referencia al desmontar
+      isMounted.current = false;
+    };
+  }, [load]);
+
+  const remove = async (id: string) => {
+    if (!window.confirm("¿Eliminar esta novedad?")) return;
+    
+    try {
+      const { error } = await supabase
+        .from("staff_announcements")
+        .delete()
+        .eq("id", id);
+        
+      if (error) throw error;
+      
+      toast.success("Eliminada");
+      load(); // Recargamos tras eliminar (en lugar de esperar un socket)
+    } catch (err: unknown) {
+      console.error(err);
+      toast.error("No se pudo eliminar");
+    }
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h2 className="font-extrabold text-isa-navy text-lg">Novedades para Jefes</h2>
+          <p className="text-xs text-muted-foreground">Comunicaciones internas del Intendente. Visibles solo para personal municipal.</p>
+        </div>
+        {canPublish && (
+          <button
+            onClick={() => setCreating(true)}
+            className="inline-flex items-center gap-2 bg-isa-navy text-white rounded-[12px] px-4 py-2.5 text-[13px] font-bold"
+          >
+            <Plus className="w-4 h-4" /> Nueva novedad
+          </button>
+        )}
+      </div>
+
+      <div className="space-y-3">
+        {loading && <div className="text-sm text-muted-foreground">Cargando…</div>}
+        {!loading && rows.length === 0 && (
+          <div className="text-sm text-muted-foreground bg-white border rounded-[16px] p-6 text-center">
+            Aún no hay novedades publicadas.
+          </div>
+        )}
+        {rows.map((r) => (
+          <div key={r.id} className="bg-white border rounded-[16px] p-4 flex items-start gap-3">
+            <div className="w-10 h-10 rounded-xl bg-isa-navy text-white grid place-items-center shrink-0">
+              <Bell className="w-5 h-5" strokeWidth={1.5} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="font-bold text-isa-navy">{r.title}</div>
+              <div className="text-xs text-muted-foreground mb-2">
+                {new Date(r.created_at).toLocaleString("es-AR")}
+              </div>
+              <p className="text-sm text-isa-navy whitespace-pre-wrap">{r.body}</p>
+            </div>
+            {canPublish && r.created_by === user?.id && (
+              <button onClick={() => remove(r.id)} className="text-muno-red p-1.5 hover:bg-muted rounded-lg">
+                <Trash2 className="w-4 h-4" />
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {creating && <CreateDialog onClose={() => setCreating(false)} onSaved={() => { setCreating(false); load(); }} />}
+    </div>
+  );
+}
+
+function CreateDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
+  const { user } = useAuth();
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const save = async () => {
+    if (!title.trim() || !body.trim() || !user?.id) {
+      toast.error("Completá título y mensaje");
+      return;
+    }
+    
+    setSaving(true);
+    
+    try {
+      // 1. Averiguamos a qué municipio pertenece el usuario que publica
+      const { data: userRole } = await supabase
+        .from("user_roles")
+        .select("municipality_id")
+        .eq("user_id", user.id)
+        .eq("active", true)
+        .maybeSingle();
+
+      // 2. Insertamos la novedad anclada a ese municipio
+      const { error } = await supabase
+        .from("staff_announcements")
+        .insert({ 
+          title: title.trim(), 
+          body: body.trim(), 
+          created_by: user.id,
+          municipality_id: userRole?.municipality_id
+        });
+        
+      if (error) throw error;
+      
+      toast.success("Novedad publicada");
+      onSaved();
+    } catch (err: unknown) {
+      console.error(err);
+      const errorMessage = err instanceof Error ? err.message : "No se pudo publicar";
+      toast.error("Error: " + errorMessage);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
+      <div className="bg-white rounded-[16px] p-5 max-w-md w-full">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="font-extrabold text-isa-navy">Nueva novedad</h3>
+          <button onClick={onClose} className="w-8 h-8 grid place-items-center rounded-lg hover:bg-muted">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+        <label className="text-xs font-bold text-muted-foreground">Título</label>
+        <input value={title} onChange={(e) => setTitle(e.target.value)} className="mt-1 mb-3 w-full px-3 py-2.5 rounded-xl border bg-background text-sm" />
+        <label className="text-xs font-bold text-muted-foreground">Mensaje</label>
+        <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={5} className="mt-1 w-full px-3 py-2.5 rounded-xl border bg-background text-sm resize-none" />
+        <button disabled={saving} onClick={save} className="mt-4 w-full bg-isa-navy text-white rounded-[12px] py-2.5 text-sm font-bold disabled:opacity-60">
+          {saving ? "Publicando…" : "Publicar"}
+        </button>
+      </div>
+    </div>
+  );
+}
+</file>
+
 <file path="src/pages/admin/AdminUsuariosMunicipales.tsx">
 import { useEffect, useState, ReactNode, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
@@ -24078,6 +23709,378 @@ export default function MiCuenta() {
           <LogOut className="w-4 h-4" /> Cerrar sesión
         </button>
       )}
+    </div>
+  );
+}
+</file>
+
+<file path="src/pages/Turismo.tsx">
+import { useState, useMemo, useEffect, ElementType, ReactNode } from "react";
+import { useSearchParams } from "react-router-dom";
+import { useMunicipality } from "@/context/MunicipalityContext";
+import { places, gastronomy, agenda, commerces, lodging, ZONES, type Zone, type AgendaCategory } from "@/data/mock";
+import { MapPin, Calendar, Search, Clock, Tag, Info, X } from "lucide-react";
+import { formatARS } from "@/lib/format";
+import { track } from "@/lib/analytics";
+import LeadDialog from "@/components/LeadDialog";
+import RatingStars from "@/components/RatingStars";
+import FavoriteButton from "@/components/FavoriteButton";
+import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/context/AuthContext";
+
+const TABS_VECINO = ["Lugares", "Saltos", "Museos", "Cultural", "Gastronomía", "Agenda"] as const;
+const TABS_TURISTA = ["Comercio", "Gastronomía", "Hospedaje"] as const;
+const AGENDA_CATS: AgendaCategory[] = ["Hoy", "Fin de Semana", "Conciertos"];
+
+type TabType = typeof TABS_VECINO[number] | typeof TABS_TURISTA[number];
+
+interface DBTurismoItem {
+  id: string;
+  title: string;
+  description?: string;
+  schedule?: string;
+  days?: string;
+  price?: number | null;
+  photo_url?: string;
+  category?: string;
+  type?: string;
+}
+
+interface PlaceItem {
+  id: string;
+  name: string;
+  type: string;
+  address: string;
+  zone?: string;
+  schedule?: string;
+  days?: string;
+  price?: number;
+  photo_url: string;
+  how_to_get: string;
+  requirements?: string;
+}
+
+interface LodgingItem {
+  id: string;
+  name: string;
+  type: string;
+  address: string;
+  zone?: string;
+  schedule?: string;
+  price?: number;
+  photos: string[];
+  requirements?: string;
+}
+
+interface AgendaItem {
+  id: string;
+  title: string;
+  date: string;
+  place: string;
+  zone?: string;
+  category: string;
+}
+
+const InfoLine = ({ icon: Icon, children }: { icon: ElementType; children: ReactNode }) => (
+  <div className="flex items-start gap-1.5 text-[11px] text-muted-foreground">
+    <Icon strokeWidth={1.5} className="w-3 h-3 mt-0.5 shrink-0" />
+    <span>{children}</span>
+  </div>
+);
+
+const PlaceCard = ({ item, rateable }: { item: PlaceItem; rateable?: boolean }) => (
+  <article className="isa-card overflow-hidden hover:-translate-y-0.5 hover:shadow-md transition-all">
+    <div className="relative">
+      {/* 🟠 FIX MEDIO SRE: Lazy loading nativo en tarjetas de turismo */}
+      <img src={item.photo_url} alt={item.name} loading="lazy" className="w-full h-[120px] object-cover" />
+      <div className="absolute top-2 right-2">
+        <FavoriteButton place={{ id: item.id, name: item.name, type: item.type, photo_url: item.photo_url, zone: item.zone || "" }} />
+      </div>
+    </div>
+    <div className="p-4 space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="font-extrabold text-isa-navy">{item.name}</h3>
+        <span className="isa-chip bg-accent text-isa-navy">{item.type}</span>
+      </div>
+      <InfoLine icon={MapPin}>{item.address}{item.zone && ` · ${item.zone}`}</InfoLine>
+      {item.schedule && <InfoLine icon={Clock}>{item.schedule}{item.days && ` · ${item.days}`}</InfoLine>}
+      {typeof item.price === "number" && <InfoLine icon={Tag}>{item.price === 0 ? "Entrada gratuita" : formatARS(item.price)}</InfoLine>}
+      {item.requirements && item.requirements !== "—" && <InfoLine icon={Info}>{item.requirements}</InfoLine>}
+      {rateable && <RatingStars id={item.id} name={item.name} />}
+      <a href={item.how_to_get} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center w-full bg-isa-navy text-isa-white rounded-[20px] py-2.5 text-sm font-bold hover:opacity-90 mt-1">Cómo llegar</a>
+    </div>
+  </article>
+);
+
+const LodgingCard = ({ item, onConsultar }: { item: LodgingItem; onConsultar: (item: LodgingItem) => void }) => {
+  const [idx, setIdx] = useState(0);
+  return (
+    <article className="isa-card overflow-hidden">
+      <div className="relative">
+        {/* 🟠 FIX MEDIO SRE: Lazy loading nativo en tarjetas de alojamiento */}
+        <img src={item.photos[idx]} alt={item.name} loading="lazy" className="w-full h-48 object-cover" />
+        <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex gap-1.5">
+          {item.photos.map((_, i) => (
+            <button key={i} onClick={() => setIdx(i)} className={`w-2 h-2 rounded-full ${i === idx ? "bg-white" : "bg-white/50"}`} />
+          ))}
+        </div>
+      </div>
+      <div className="p-4 space-y-2">
+        <div className="flex items-center justify-between">
+          <h3 className="font-extrabold text-isa-navy">{item.name}</h3>
+          <span className="isa-chip bg-accent text-isa-navy">{item.type}</span>
+        </div>
+        <InfoLine icon={MapPin}>{item.address}</InfoLine>
+        {item.schedule && <InfoLine icon={Clock}>{item.schedule}</InfoLine>}
+        {item.price && <InfoLine icon={Tag}>Desde {formatARS(item.price)} / noche</InfoLine>}
+        {item.requirements && <InfoLine icon={Info}>{item.requirements}</InfoLine>}
+        <button onClick={() => onConsultar(item)} className="w-full mt-1 bg-isa-navy text-isa-white rounded-[20px] py-2.5 text-sm font-bold">Consultar disponibilidad</button>
+      </div>
+    </article>
+  );
+};
+
+function filterByZoneAndQuery<T extends { zone?: string; name: string }>(items: T[], zone: Zone, q: string): T[] {
+  return items.filter((i) => (zone === "Todas" || i.zone === zone) && i.name.toLowerCase().includes(q.toLowerCase()));
+}
+
+function Grid<T>({ items, render, cols = 3 }: { items: T[]; render: (item: T) => ReactNode; cols?: number }) {
+  if (!items.length) return <p className="text-sm text-muted-foreground text-center py-6">Sin resultados.</p>;
+  return <div className={`grid grid-cols-1 sm:grid-cols-2 ${cols === 2 ? "lg:grid-cols-2" : "lg:grid-cols-3"} gap-4`}>{items.map(render)}</div>;
+}
+
+export default function Turismo() {
+  const { user, roles } = useAuth();
+  const { municipality, municipalityId, setMunicipality } = useMunicipality();
+  const isTurista = roles.includes("tourist");
+  
+  // Tipado estricto sin "as any" o "as readonly string[]"
+  const TABS: readonly TabType[] = isTurista ? TABS_TURISTA : TABS_VECINO;
+  
+  const [params, setParams] = useSearchParams();
+  const urlZone = params.get("zone") as Zone | null;
+  const initialZone: Zone = (urlZone || (municipality as Zone) || "Todas") as Zone;
+  
+  const [tab, setTab] = useState<TabType>(TABS[0]);
+  const [zone, setZone] = useState<Zone>(initialZone);
+  const [q, setQ] = useState("");
+  const [agendaCat, setAgendaCat] = useState<AgendaCategory>("Hoy");
+  const [lodgTarget, setLodgTarget] = useState<LodgingItem | null>(null);
+
+  useEffect(() => {
+    if (urlZone && urlZone !== zone) setZone(urlZone);
+  }, [urlZone, zone]);
+
+  useEffect(() => {
+    if (zone && zone !== "Todas") {
+      setMunicipality(zone);
+      track({ kind: "search_zone", zone, userType: isTurista ? "turista" : "vecino" });
+    }
+  }, [zone, isTurista, setMunicipality]);
+
+  useEffect(() => {
+    track({ kind: "category_click", category: tab, userType: isTurista ? "turista" : "vecino" });
+  }, [tab, isTurista]);
+
+  const clearMunicipality = () => {
+    setMunicipality("");
+    setZone("Todas");
+    setParams({});
+  };
+
+  // Optimización total de memoria: Todos los filtros memorizados
+  const allPlaces = useMemo(() => filterByZoneAndQuery(places, zone, q), [zone, q]);
+  const saltos = useMemo(() => allPlaces.filter((p) => p.type === "Salto"), [allPlaces]);
+  const museos = useMemo(() => allPlaces.filter((p) => p.type === "Museo"), [allPlaces]);
+  const culturales = useMemo(() => allPlaces.filter((p) => p.type === "Cultural"), [allPlaces]);
+  const gastro = useMemo(() => filterByZoneAndQuery(gastronomy, zone, q), [zone, q]);
+  const com = useMemo(() => filterByZoneAndQuery(commerces, zone, q), [zone, q]);
+  const lodg = useMemo(() => filterByZoneAndQuery(lodging, zone, q), [zone, q]);
+  
+  const agendaFiltered = useMemo(() => {
+    return agenda.filter((a) => a.category === agendaCat && (zone === "Todas" || a.zone === zone));
+  }, [agendaCat, zone]);
+
+  const [dbLugares, setDbLugares] = useState<PlaceItem[]>([]);
+  const [dbAgenda, setDbAgenda] = useState<DBTurismoItem[]>([]);
+
+  useEffect(() => {
+    let isMounted = true; 
+
+    const fetchTurismo = async () => {
+      try {
+        let munId: string | null = null;
+        if (user?.id) {
+          const { data: prof } = await supabase.from("profiles").select("municipality_id").eq("id", user.id).maybeSingle();
+          munId = prof?.municipality_id ?? null;
+        }
+        
+        if (!munId && zone && zone !== "Todas") {
+          munId = municipalityId || null;
+        }
+
+        let qLugares = supabase.from("content_items").select("*").eq("published", true).eq("kind", "Lugar").order("created_at", { ascending: false });
+        let qEv = supabase.from("content_items").select("*").eq("published", true).in("kind", ["Evento", "Actividad", "Taller"]).order("created_at", { ascending: false });
+        
+        if (munId) { 
+          qLugares = qLugares.eq("municipality_id", munId); 
+          qEv = qEv.eq("municipality_id", munId); 
+        }
+        
+        const [resLugares, resEv] = await Promise.all([qLugares, qEv]);
+
+        if (isMounted) {
+          const lugData = (resLugares.data as unknown as DBTurismoItem[]) || [];
+          const evData = (resEv.data as unknown as DBTurismoItem[]) || [];
+
+          setDbLugares(lugData.map((it) => ({
+            id: it.id, 
+            name: it.title, 
+            type: it.category || it.type || "Lugar",
+            address: it.description || "", 
+            zone: zone === "Todas" ? "" : zone,
+            schedule: it.schedule || "", 
+            days: it.days || "", 
+            price: it.price ?? undefined,
+            photo_url: it.photo_url || "/placeholder.svg", 
+            how_to_get: "#",
+          })));
+
+          setDbAgenda(evData); 
+        }
+      } catch (err) {
+        console.error("Error cargando turismo:", err);
+      }
+    };
+
+    fetchTurismo();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [user?.id, zone, municipalityId]);
+
+  const lugaresAll = [...dbLugares, ...allPlaces];
+  
+  const agendaAll = useMemo(() => {
+    const dbMapped: AgendaItem[] = dbAgenda.map((it) => ({
+      id: it.id, 
+      title: it.title, 
+      date: it.days || "Próximamente",
+      place: it.schedule || "—", 
+      zone: zone === "Todas" ? "" : zone, 
+      category: it.category || it.type || "Evento",
+    }));
+    return [...dbMapped, ...agendaFiltered];
+  }, [dbAgenda, agendaFiltered, zone]);
+
+  const TURIST_BIG = [
+    { key: "Comercio" as const, label: "COMERCIO" },
+    { key: "Gastronomía" as const, label: "GASTRONOMÍA" },
+    { key: "Hospedaje" as const, label: "HOSPEDAJE" },
+  ];
+
+  return (
+    <div className="space-y-5">
+      {isTurista ? (
+        <header className="space-y-2">
+          <h1 className="text-isa-navy font-display font-extrabold text-[20px]">Turismo</h1>
+          <p className="text-sm text-muted-foreground">
+            {municipality ? `Mostrando información de ${municipality}.` : "Elegí un municipio para ver toda su oferta."}
+          </p>
+          {municipality && (
+            <button
+              onClick={clearMunicipality}
+              className="inline-flex items-center gap-1.5 text-[11px] font-bold bg-muno-blue/15 text-muno-blue px-2.5 py-1 rounded-full"
+            >
+              <MapPin className="w-3 h-3" /> {municipality}
+              <X className="w-3 h-3" />
+            </button>
+          )}
+        </header>
+      ) : (
+        <div className="space-y-3">
+          <div className="relative">
+            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar lugar, hotel…" className="w-full pl-9 pr-3 py-2.5 rounded-[20px] border bg-card text-sm outline-none focus:ring-2 focus:ring-isa-navy" />
+          </div>
+          <div className="flex gap-2 overflow-x-auto pb-1">
+            {ZONES.map((z) => (
+              <button key={z} onClick={() => setZone(z)} className={`px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap min-h-[36px] ${zone === z ? "bg-muno-blue text-white" : "bg-card border text-isa-navy"}`}>{z}</button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {isTurista ? (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          {TURIST_BIG.map((b) => {
+            const active = tab === b.key;
+            return (
+              <button
+                key={b.key}
+                onClick={() => setTab(b.key)}
+                className="min-h-[88px] rounded-[16px] font-extrabold text-[15px] tracking-wide transition-all"
+                style={{
+                  background: active ? "#242E44" : "#F5EFE6",
+                  color: active ? "#FFFFFF" : "#242E44",
+                  border: active ? "none" : "1px solid rgba(36,46,68,0.12)",
+                }}
+              >
+                {b.label}
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          {TABS.map((t) => (
+            <button key={t} onClick={() => setTab(t)} className={`px-3 py-1.5 rounded-[20px] text-xs font-bold transition-colors min-h-[36px] ${tab === t ? "bg-isa-navy text-isa-white" : "bg-card text-isa-navy hover:bg-muted border"}`}>{t}</button>
+          ))}
+        </div>
+      )}
+
+      {tab === "Lugares" && <Grid items={lugaresAll} render={(p) => <PlaceCard key={p.id} item={p} rateable />} />}
+      {tab === "Saltos" && <Grid items={saltos} render={(p) => <PlaceCard key={p.id} item={p} rateable />} />}
+      {tab === "Museos" && <Grid items={museos} render={(p) => <PlaceCard key={p.id} item={p} rateable />} />}
+      {tab === "Cultural" && <Grid items={culturales} render={(p) => <PlaceCard key={p.id} item={p} rateable />} />}
+      {tab === "Gastronomía" && <Grid items={gastro} render={(p) => <PlaceCard key={p.id} item={p as PlaceItem} />} />}
+      {tab === "Comercio" && <Grid items={com} render={(p) => <PlaceCard key={p.id} item={p as PlaceItem} />} />}
+      {tab === "Hospedaje" && <Grid items={lodg} render={(p) => <LodgingCard key={p.id} item={p as LodgingItem} onConsultar={setLodgTarget} />} />}
+
+      {tab === "Agenda" && (
+        <>
+          <div className="flex gap-2">
+            {AGENDA_CATS.map((c) => (
+              <button key={c} onClick={() => setAgendaCat(c)} className={`px-3 py-1.5 rounded-[20px] text-xs font-bold ${agendaCat === c ? "bg-muno-amber text-white" : "bg-card border"}`}>
+                {c === "Hoy" ? "Eventos del Día" : c}
+              </button>
+            ))}
+          </div>
+          <div className="space-y-3">
+            {agendaAll.length === 0 && <p className="text-sm text-muted-foreground text-center py-6">No hay eventos en esta categoría.</p>}
+            {agendaAll.map((a) => (
+              <div key={a.id} className="isa-card p-4 flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-accent grid place-items-center text-isa-navy"><Calendar strokeWidth={1.5} className="w-5 h-5" /></div>
+                <div className="flex-1">
+                  <div className="font-extrabold text-isa-navy text-sm">{a.title}</div>
+                  <div className="text-xs text-muted-foreground">{a.date} · {a.place} · 📍 {a.zone}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      <LeadDialog
+        open={!!lodgTarget}
+        title={`Consultar · ${lodgTarget?.name || ""}`}
+        description="Le enviamos tu consulta al alojamiento."
+        fields={["name", "email", "origin"]}
+        kind="reserva_lead"
+        meta={{ lodging: lodgTarget?.name }}
+        onClose={() => setLodgTarget(null)}
+      />
     </div>
   );
 }

@@ -91,8 +91,9 @@ function FormularioCarga() {
       const path = `tourism/${user.id}/${Date.now()}.${ext}`;
       
       const { error } = await supabase.storage.from("avatars").upload(path, compressedBlob, { 
-        upsert: true,
-        contentType: "image/jpeg"
+        upsert: true, 
+        contentType: "image/jpeg",
+       cacheControl: "31536000" 
       });
       
       if (error) {

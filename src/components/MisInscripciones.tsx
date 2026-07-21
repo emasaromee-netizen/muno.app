@@ -49,6 +49,7 @@ export default function MisInscripciones() {
           .select("id,event_title,event_date,event_type,event_place,companions")
           .eq("user_id", userId)
           .eq("status", "activa") // FIX: Filtramos las canceladas lógicamente
+          .is("deleted_at", null) // 🟠 FIX ALTO SRE: Fuerza a PostgreSQL a usar el índice parcial idx_registrations_user_active
           .order("created_at", { ascending: false })
           .limit(50); // FIX 1.2: Límite de carga (evita Unbounded Payloads)
 

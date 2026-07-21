@@ -22,7 +22,6 @@ const STATUS_STYLE: Record<string, string> = {
   "En curso": "bg-muno-blue/15 text-muno-blue",
   "Cerrado": "bg-muno-teal/15 text-muno-teal",
 };
-// Selectores de color del modal: Rojo / Amarillo / Verde
 const STATUS_DOT: Record<string, string> = {
   "Pendiente": "bg-red-500",
   "En curso": "bg-amber-400",
@@ -51,7 +50,6 @@ type Claim = {
 
 type Canned = { id: string; label: string; body: string; enabled: boolean };
 
-// Interfaces estrictas para eliminar 'any'
 interface ClaimUpdate {
   status: ClaimStatus;
   resolution_note?: string;
@@ -77,6 +75,7 @@ interface CannedPayload {
 }
 
 export default function AdminReclamos() {
+  const { user } = useAuth();
   const [items, setItems] = useState<Claim[]>([]);
   const [active, setActive] = useState<Claim | null>(null);
   const [loading, setLoading] = useState(true);
@@ -84,14 +83,33 @@ export default function AdminReclamos() {
   const [areaFilter, setAreaFilter] = useState<string>("");
   const [statusFilter, setStatusFilter] = useState<string>("");
 
+  // 🔴 FIX CRÍTICO SRE: Filtrado en Base de Datos (Zero Seq Scans)
   const loadClaims = useCallback(async (isMounted = true) => {
+    if (!user) return;
     setLoading(true);
     try {
-      const { data } = await supabase
+      // 1. Obtener la jurisdicción (Multi-tenant BOLA fix)
+      const { data: userRole } = await supabase
+        .from("user_roles")
+        .select("municipality_id")
+        .eq("user_id", user.id)
+        .eq("active", true)
+        .maybeSingle();
+
+      const muniId = userRole?.municipality_id;
+
+      // 2. Construir la consulta con filtros directos al motor SQL
+      let q = supabase
         .from("claims")
         .select("*")
         .order("created_at", { ascending: false })
         .limit(200);
+
+      if (muniId) q = q.eq("municipality_id", muniId);
+      if (areaFilter) q = q.eq("area", areaFilter);
+      if (statusFilter) q = q.eq("status", statusFilter as ClaimStatus);
+        
+      const { data } = await q;
         
       if (isMounted) {
         setItems((data as Claim[]) || []);
@@ -101,7 +119,7 @@ export default function AdminReclamos() {
       console.error("Error al cargar reclamos:", err);
       if (isMounted) setLoading(false);
     }
-  }, []);
+  }, [user, areaFilter, statusFilter]); // Re-ejecuta solo si cambian los filtros
 
   useEffect(() => {
     let isMounted = true;
@@ -145,87 +163,83 @@ export default function AdminReclamos() {
         </div>
       )}
 
-      {(() => {
-        const filtered = items.filter((r) => (!areaFilter || r.area === areaFilter) && (!statusFilter || r.status === statusFilter));
-        if (!loading && filtered.length === 0) {
-          return (
-            <div className="isa-card p-6 text-center text-sm text-muted-foreground">
-              No hay reclamos {areaFilter ? `en ${areaFilter}` : ""} {statusFilter ? `· ${statusFilter}` : ""}.
-            </div>
-          );
-        }
-        return (
-          <>
-            {/* Vista Escritorio */}
-            <div className="isa-card overflow-hidden hidden lg:block">
-              <table className="w-full text-sm">
-                <thead className="bg-muted text-isa-navy">
-                  <tr>
-                    <th className="text-left p-3">Ticket</th>
-                    <th className="text-left p-3">Categoría</th>
-                    <th className="text-left p-3">Área</th>
-                    <th className="text-left p-3">Fecha</th>
-                    <th className="text-left p-3">Estado</th>
-                    <th className="p-3"></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filtered.map((r) => {
-                    const short = r.id.slice(0, 4).toUpperCase();
-                    return (
-                      <tr key={r.id} className="border-t hover:bg-muted/40 transition-colors">
-                        <td className="p-3 font-bold">
-                          <Link to={`/reclamos/${encodeURIComponent(r.id)}`} className="hover:underline">#MUNO-{short}</Link>
-                        </td>
-                        <td className="p-3">{r.category}</td>
-                        <td className="p-3 text-xs"><span className="px-2 py-1 rounded-full bg-muted">{r.area || "—"}</span></td>
-                        <td className="p-3 text-muted-foreground">{new Date(r.created_at).toLocaleDateString("es-AR")}</td>
-                        <td className="p-3">
-                          <span className={`isa-chip inline-flex items-center gap-1 ${STATUS_STYLE[r.status]}`}>
-                            <span className={`w-2 h-2 rounded-full ${STATUS_DOT[r.status]}`} />
-                            {STATUS_LABEL[r.status] || r.status}
-                          </span>
-                        </td>
-                        <td className="p-3 text-right">
-                          <button onClick={() => setActive(r)} className="text-xs font-bold text-muno-blue hover:underline">Gestionar</button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </>
-        );
-      })()}
+      {!loading && items.length === 0 && (
+        <div className="isa-card p-6 text-center text-sm text-muted-foreground">
+          No hay reclamos {areaFilter ? `en ${areaFilter}` : ""} {statusFilter ? `· ${statusFilter}` : ""}.
+        </div>
+      )}
 
-      {/* Vista Móvil */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 lg:hidden">
-        {items.map((r) => {
-          const Icon = r.status === "Cerrado" ? CheckCircle2 : r.status === "En curso" ? Clock : AlertCircle;
-          const short = r.id.slice(0, 4).toUpperCase();
-          return (
-            <article key={r.id} className="isa-card p-4 space-y-2">
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <Link to={`/reclamos/${encodeURIComponent(r.id)}`} className="font-extrabold text-isa-navy text-sm hover:underline">#MUNO-{short}</Link>
-                  <div className="text-xs text-muted-foreground mt-0.5">{r.category} · {new Date(r.created_at).toLocaleDateString("es-AR")}</div>
-                </div>
-                <span className={`isa-chip ${STATUS_STYLE[r.status]} inline-flex items-center gap-1 shrink-0`}>
-                  <Icon className="w-3 h-3" /> {STATUS_LABEL[r.status] || r.status}
-                </span>
-              </div>
-              {r.description && <p className="text-xs text-muted-foreground line-clamp-2">{r.description}</p>}
-              <button
-                onClick={() => setActive(r)}
-                className="w-full mt-1 bg-isa-navy text-isa-white rounded-[20px] py-2 text-xs font-bold inline-flex items-center justify-center gap-1.5"
-              >
-                <MessageSquare className="w-3.5 h-3.5" /> Gestionar
-              </button>
-            </article>
-          );
-        })}
-      </div>
+      {!loading && items.length > 0 && (
+        <>
+          {/* Vista Escritorio */}
+          <div className="isa-card overflow-hidden hidden lg:block">
+            <table className="w-full text-sm">
+              <thead className="bg-muted text-isa-navy">
+                <tr>
+                  <th className="text-left p-3">Ticket</th>
+                  <th className="text-left p-3">Categoría</th>
+                  <th className="text-left p-3">Área</th>
+                  <th className="text-left p-3">Fecha</th>
+                  <th className="text-left p-3">Estado</th>
+                  <th className="p-3"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((r) => {
+                  const short = r.id.slice(0, 4).toUpperCase();
+                  return (
+                    <tr key={r.id} className="border-t hover:bg-muted/40 transition-colors">
+                      <td className="p-3 font-bold">
+                        <Link to={`/reclamos/${encodeURIComponent(r.id)}`} className="hover:underline">#MUNO-{short}</Link>
+                      </td>
+                      <td className="p-3">{r.category}</td>
+                      <td className="p-3 text-xs"><span className="px-2 py-1 rounded-full bg-muted">{r.area || "—"}</span></td>
+                      <td className="p-3 text-muted-foreground">{new Date(r.created_at).toLocaleDateString("es-AR")}</td>
+                      <td className="p-3">
+                        <span className={`isa-chip inline-flex items-center gap-1 ${STATUS_STYLE[r.status]}`}>
+                          <span className={`w-2 h-2 rounded-full ${STATUS_DOT[r.status]}`} />
+                          {STATUS_LABEL[r.status] || r.status}
+                        </span>
+                      </td>
+                      <td className="p-3 text-right">
+                        <button onClick={() => setActive(r)} className="text-xs font-bold text-muno-blue hover:underline">Gestionar</button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Vista Móvil */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 lg:hidden">
+            {items.map((r) => {
+              const Icon = r.status === "Cerrado" ? CheckCircle2 : r.status === "En curso" ? Clock : AlertCircle;
+              const short = r.id.slice(0, 4).toUpperCase();
+              return (
+                <article key={r.id} className="isa-card p-4 space-y-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <Link to={`/reclamos/${encodeURIComponent(r.id)}`} className="font-extrabold text-isa-navy text-sm hover:underline">#MUNO-{short}</Link>
+                      <div className="text-xs text-muted-foreground mt-0.5">{r.category} · {new Date(r.created_at).toLocaleDateString("es-AR")}</div>
+                    </div>
+                    <span className={`isa-chip ${STATUS_STYLE[r.status]} inline-flex items-center gap-1 shrink-0`}>
+                      <Icon className="w-3 h-3" /> {STATUS_LABEL[r.status] || r.status}
+                    </span>
+                  </div>
+                  {r.description && <p className="text-xs text-muted-foreground line-clamp-2">{r.description}</p>}
+                  <button
+                    onClick={() => setActive(r)}
+                    className="w-full mt-1 bg-isa-navy text-isa-white rounded-[20px] py-2 text-xs font-bold inline-flex items-center justify-center gap-1.5"
+                  >
+                    <MessageSquare className="w-3.5 h-3.5" /> Gestionar
+                  </button>
+                </article>
+              );
+            })}
+          </div>
+        </>
+      )}
 
       {active && <ManageDialog claim={active} onClose={() => setActive(null)} onSaved={(c) => { update(c); setActive(null); }} />}
       {showTpl && <TemplatesDialog onClose={() => setShowTpl(false)} />}

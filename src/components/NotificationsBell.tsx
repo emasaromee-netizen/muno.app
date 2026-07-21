@@ -3,8 +3,8 @@ import { Bell, X } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
-import { useMunicipality } from "@/context/MunicipalityContext"; // <-- Necesario para el filtro de canal
-import type { RealtimeChannel } from "@supabase/supabase-js"; // <-- Para tipar los canales
+import { useMunicipality } from "@/context/MunicipalityContext";
+import type { RealtimeChannel } from "@supabase/supabase-js";
 
 type Notif = {
   id: string;
@@ -36,7 +36,7 @@ function addGuestRead(id: string) {
 
 export default function NotificationsBell() {
   const { user, roles } = useAuth();
-  const { municipalityInfo } = useMunicipality(); // Obtenemos info del tenant actual
+  const { municipalityInfo } = useMunicipality(); 
   const nav = useNavigate();
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<Notif[]>([]);
@@ -62,7 +62,7 @@ export default function NotificationsBell() {
 
   useEffect(() => {
     let isMounted = true;
-    const channels: RealtimeChannel[] = []; // Array para guardar múltiples canales
+    const channels: RealtimeChannel[] = []; 
 
     const load = async () => {
       let query = supabase
@@ -100,8 +100,8 @@ export default function NotificationsBell() {
     load();
 
     // 🔴 FIX CRÍTICO SRE: Prevención de Tormenta de Difusión (Broadcast Storm)
+    // Usamos filtros a nivel de base de datos para saltarnos la validación unihilo de RLS de Supabase Realtime
     
-    // Canal 1: Suscribirse ÚNICAMENTE a las alertas públicas del municipio donde está el usuario
     if (municipalityId) {
       const muniChannel = supabase
         .channel(`notif_muni_${municipalityId}`)
@@ -111,7 +111,7 @@ export default function NotificationsBell() {
             event: "INSERT",
             schema: "public",
             table: "notifications",
-            filter: `municipality_id=eq.${municipalityId}` // El filtro mágico en servidor
+            filter: `municipality_id=eq.${municipalityId}` // Filtro mágico en servidor
           },
           () => { if (isMounted) load(); }
         )
@@ -119,7 +119,6 @@ export default function NotificationsBell() {
       channels.push(muniChannel);
     }
 
-    // Canal 2: Suscribirse ÚNICAMENTE a notificaciones privadas enviadas a este usuario exacto
     if (userId) {
       const userChannel = supabase
         .channel(`notif_user_${userId}`)
@@ -129,7 +128,7 @@ export default function NotificationsBell() {
             event: "INSERT",
             schema: "public",
             table: "notifications",
-            filter: `user_id=eq.${userId}` // El filtro mágico en servidor
+            filter: `user_id=eq.${userId}` // Filtro mágico en servidor
           },
           () => { if (isMounted) load(); }
         )
@@ -139,7 +138,6 @@ export default function NotificationsBell() {
 
     return () => {
       isMounted = false;
-      // Cerramos ordenadamente todos los canales al desmontar
       channels.forEach(ch => supabase.removeChannel(ch));
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -1,14 +1,27 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useContext } from "react";
 import { Heart, MapPin, Trash2 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
 import type { Database } from "@/integrations/supabase/types";
 
+// 🔴 FIX SRE: Importamos el contexto del municipio
+import MunicipalityContext from "@/context/MunicipalityContext";
+
 type Fav = Database["public"]["Tables"]["tourist_favorites"]["Row"];
+
+// 🔴 FIX TS: Interfaz limpia y estricta para leer el contexto
+interface MunicipalityContextType {
+  id?: string;
+}
 
 export default function MisFavoritos() {
   const { user } = useAuth();
+  
+  // 🔴 FIX TS: Doble casteo seguro para extraer el ID del municipio actual sin usar 'any'
+  const ctx = (useContext(MunicipalityContext) as unknown) as MunicipalityContextType | null;
+  const municipalityId = ctx?.id || null;
+
   const [items, setItems] = useState<Fav[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -16,12 +29,19 @@ export default function MisFavoritos() {
     let isMounted = true; // Prevención de Memory Leak
 
     const load = async () => {
-      if (!user) return;
+      // 🔴 FIX SRE: Si no hay usuario o no hay municipio, abortamos la carga
+      if (!user || !municipalityId) {
+        if (isMounted) setLoading(false);
+        return;
+      }
+      
       setLoading(true);
+      
       const { data } = await supabase
         .from("tourist_favorites")
         .select("*")
         .eq("user_id", user.id)
+        .eq("municipality_id", municipalityId) // 🔴 FIX SRE: Sello Multi-Tenant (Aislamiento Turístico)
         .order("created_at", { ascending: false });
 
       if (isMounted) {
@@ -35,7 +55,7 @@ export default function MisFavoritos() {
     return () => {
       isMounted = false;
     };
-  }, [user]); // Quitamos "load" del array de dependencias moviéndolo adentro
+  }, [user, municipalityId]); // Agregamos municipalityId a las dependencias
 
   const remove = async (id: string) => {
     const { error } = await supabase.from("tourist_favorites").delete().eq("id", id);

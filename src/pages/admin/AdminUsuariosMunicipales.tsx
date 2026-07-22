@@ -26,16 +26,19 @@ type Row = {
 
 export default function AdminUsuariosMunicipales() {
   const { user, roles, area: adminArea } = useAuth();
-  const canManageUsers = can(roles, adminArea, PERMISSIONS.USERS_MANAGE);
+  
+  // Tipado estricto para evitar 'any' en el llamado a can()
+  type AppRoles = Parameters<typeof can>[0];
+  const safeRoles = roles as AppRoles;
+  
+  const canManageUsers = can(safeRoles, adminArea, PERMISSIONS.USERS_MANAGE);
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<Row | null>(null);
   const [creating, setCreating] = useState(false);
 
-  // 1. Candado en memoria para validación sincrónica
   const isMounted = useRef(true);
 
-  // 2. Remoción del falso booleano
   const load = useCallback(async () => {
     if (!user?.id) return;
     if (isMounted.current) setLoading(true);
@@ -50,8 +53,16 @@ export default function AdminUsuariosMunicipales() {
 
       const currentMuniId = adminRole?.municipality_id;
 
-      // FIX N+1: Resource Embedding
-      let q = supabase
+      // 🔴 FIX AUDITORÍA: Salvaguarda temprana para evitar peticiones sin ID de municipio
+      if (!currentMuniId) {
+        if (isMounted.current) {
+          setRows([]);
+          setLoading(false);
+        }
+        return;
+      }
+
+      const { data: ur } = await supabase
         .from("user_roles")
         .select(`
           id,
@@ -62,13 +73,8 @@ export default function AdminUsuariosMunicipales() {
           created_at,
           profiles ( email, full_name )
         `)
-        .in("role", ROLES_VISIBLE);
-
-      if (currentMuniId) {
-        q = q.eq("municipality_id", currentMuniId);
-      }
-
-      const { data: ur } = await q;
+        .in("role", ROLES_VISIBLE)
+        .eq("municipality_id", currentMuniId);
       
       if (isMounted.current) {
         // Tipado estricto para eliminar el error de 'any'
@@ -109,7 +115,6 @@ export default function AdminUsuariosMunicipales() {
     load();
     
     return () => { 
-      // 4. Apagar la referencia si el usuario sale de la pantalla
       isMounted.current = false; 
     };
   }, [load]);

@@ -14,7 +14,14 @@ export function useSession() {
   // Usuario autenticado
   if (user) {
     const isResident = roles.includes("resident");
-    const isTourist = !isResident;
+    
+    // 🔴 FIX AUDITORÍA: Detectamos a todo el Staff y Comercios para no bloquearlos
+    const isStaffOrMerchant = roles.some(r => 
+      ["admin", "mayor", "tourism_chief", "area_manager", "merchant", "isa_super_admin", "isa_consultant"].includes(r)
+    );
+    
+    // Si no es residente y tampoco es del staff, entonces SÍ es turista
+    const isTourist = !isResident && !isStaffOrMerchant;
 
     return {
       isLoggedIn: true,

@@ -1,5 +1,5 @@
 /* eslint-disable react-refresh/only-export-components */
-import { createContext, useContext, useEffect, useState, ReactNode } from "react";
+import { createContext, useContext, useEffect, useState, ReactNode, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
 
 const KEY_NAME = "muno.municipality.v1";
@@ -25,7 +25,7 @@ const C = createContext<Ctx>({
   setMunicipality: () => {} 
 });
 
-// 🟡 FIX MEDIO SRE: Caché estática en memoria (RAM)
+// Caché estática en memoria (RAM)
 // Sobrevive a los re-renderizados y evita llamadas redundantes al servidor.
 const municipalityCache = new Map<string, MunicipalityInfo>();
 
@@ -55,53 +55,8 @@ export function MunicipalityProvider({ children }: { children: ReactNode }) {
     }
   });
 
-  // Resolver el municipio por defecto en el primer montaje si no hay caché
-  useEffect(() => {
-    let isMounted = true;
-
-    const fetchDefaultMunicipality = async () => {
-      // Usamos el valor del local storage en lugar del state para evitar referencias obsoletas
-      const rawInfo = localStorage.getItem(KEY_INFO);
-      
-      if (!rawInfo) {
-        try {
-          const { data } = await supabase
-            .from("municipalities")
-            .select("id, name, slug")
-            .eq("is_default", true)
-            .maybeSingle();
-
-          if (data && isMounted) {
-            const info: MunicipalityInfo = {
-              id: data.id,
-              name: data.name,
-              slug: data.slug,
-            };
-            municipalityCache.set(data.name, info); // Guardamos en caché
-            setMun(data.name);
-            setMunInfo(info);
-            try {
-              localStorage.setItem(KEY_NAME, data.name);
-              localStorage.setItem(KEY_INFO, JSON.stringify(info));
-            } catch (err) {
-              console.error(err);
-            }
-          }
-        } catch (error) {
-          console.error("Error cargando municipio por defecto:", error);
-        }
-      }
-    };
-
-    fetchDefaultMunicipality();
-
-    return () => {
-      isMounted = false;
-    };
-    // 🟠 FIX ALTO: Array de dependencias vacío. Bootstrap de un solo uso. Rompe el bucle de montado infinito.
-  }, []);
-
-  const setMunicipality = async (name: string, explicitId?: string) => {
+  // 🔴 FIX AUDITORÍA: Envolver en useCallback para evitar el bucle infinito de renders
+  const setMunicipality = useCallback(async (name: string, explicitId?: string) => {
     if (!name) {
       setMun("");
       setMunInfo(null);
@@ -171,7 +126,52 @@ export function MunicipalityProvider({ children }: { children: ReactNode }) {
         console.error(err);
       }
     }
-  };
+  }, []); // Dependencias vacías porque no usamos estado o props externas en la función
+
+  // Resolver el municipio por defecto en el primer montaje si no hay caché
+  useEffect(() => {
+    let isMounted = true;
+
+    const fetchDefaultMunicipality = async () => {
+      // Usamos el valor del local storage en lugar del state para evitar referencias obsoletas
+      const rawInfo = localStorage.getItem(KEY_INFO);
+      
+      if (!rawInfo) {
+        try {
+          const { data } = await supabase
+            .from("municipalities")
+            .select("id, name, slug")
+            .eq("is_default", true)
+            .maybeSingle();
+
+          if (data && isMounted) {
+            const info: MunicipalityInfo = {
+              id: data.id,
+              name: data.name,
+              slug: data.slug,
+            };
+            municipalityCache.set(data.name, info); // Guardamos en caché
+            setMun(data.name);
+            setMunInfo(info);
+            try {
+              localStorage.setItem(KEY_NAME, data.name);
+              localStorage.setItem(KEY_INFO, JSON.stringify(info));
+            } catch (err) {
+              console.error(err);
+            }
+          }
+        } catch (error) {
+          console.error("Error cargando municipio por defecto:", error);
+        }
+      }
+    };
+
+    fetchDefaultMunicipality();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []); // Bootrstrap de un solo uso
 
   const municipalityId = municipalityInfo?.id || "";
 
@@ -182,6 +182,5 @@ export function MunicipalityProvider({ children }: { children: ReactNode }) {
   );
 }
 
-// SOLUCIÓN ESLINT: Export default para evitar errores de react-refresh
 export default C;
 export const useMunicipality = () => useContext(C);

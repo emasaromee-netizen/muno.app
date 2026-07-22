@@ -1,10 +1,12 @@
-import { useState } from "react";
+import { useState, useContext } from "react";
 import { X } from "lucide-react";
 import { ORIGINS } from "@/data/mock";
 import { track } from "@/lib/analytics";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 import type { Json } from "@/integrations/supabase/types";
+
+import MunicipalityContext from "@/context/MunicipalityContext";
 
 interface Props {
   open: boolean;
@@ -17,7 +19,16 @@ interface Props {
   onSuccess?: (data: { name?: string; email?: string; origin?: string }) => void;
 }
 
+// 🔴 FIX TS: Interfaz limpia sin el index signature que causaba el conflicto
+interface MunicipalityContextType {
+  id?: string;
+}
+
 export default function LeadDialog({ open, title, description, fields, kind, meta, onClose, onSuccess }: Props) {
+  // 🔴 FIX TS: Doble casteo seguro (unknown -> Tipo Estricto) recomendado por el compilador, evitando 'any'
+  const ctx = (useContext(MunicipalityContext) as unknown) as MunicipalityContextType | null;
+  const municipalityId = ctx?.id || null;
+
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [origin, setOrigin] = useState("");
@@ -41,6 +52,7 @@ export default function LeadDialog({ open, title, description, fields, kind, met
           email: email || null,
           source: kind,
           meta: meta || {},
+          municipality_id: municipalityId // Sello Multi-Tenant dinámico
         });
       } catch (_) {
         // silent

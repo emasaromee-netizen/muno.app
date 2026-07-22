@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { Megaphone, Pencil, Save, X } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/context/AuthContext";
@@ -18,24 +18,40 @@ interface DBAnnouncement {
 interface AnnouncementPayload {
   message: string;
   updated_by?: string;
+  municipality_id?: string | null;
 }
 
 export default function InternalAnnouncement() {
   const { user, roles, area } = useAuth();
   
-  // SOLUCIÓN P1: Utilizar el sistema centralizado de permisos
-  const isInternal = can(roles, area, PERMISSIONS.TASKS_MANAGE) || can(roles, area, PERMISSIONS.ANALYTICS_VIEW);
-  const isAdmin = can(roles, area, PERMISSIONS.CONTENT_PUBLISH);
+  // Tipado estricto de roles
+  type AppRoles = Parameters<typeof can>[0];
+  const safeRoles = roles as AppRoles;
+  
+  const isInternal = can(safeRoles, area, PERMISSIONS.TASKS_MANAGE) || can(safeRoles, area, PERMISSIONS.ANALYTICS_VIEW);
+  const isAdmin = can(safeRoles, area, PERMISSIONS.CONTENT_PUBLISH) || can(safeRoles, area, PERMISSIONS.SYSTEM_ADMIN);
   
   const [row, setRow] = useState<DBAnnouncement | null>(null);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
 
-  const load = async () => {
+  // 🔴 FIX ESLint: useCallback memoriza la función y resuelve la advertencia de dependencias
+  const load = useCallback(async () => {
+    if (!user) return;
+    
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("municipality_id")
+      .eq("id", user.id)
+      .maybeSingle();
+      
+    if (!profile?.municipality_id) return;
+
     const { data } = await supabase
       .from("internal_announcements")
       .select("*")
+      .eq("municipality_id", profile.municipality_id)
       .order("updated_at", { ascending: false })
       .limit(1)
       .maybeSingle();
@@ -43,13 +59,12 @@ export default function InternalAnnouncement() {
     const safeData = data as DBAnnouncement | null;
     setRow(safeData);
     setDraft(safeData?.message || "");
-  };
+  }, [user]);
 
   useEffect(() => {
     if (isInternal) load();
-  }, [isInternal]);
+  }, [isInternal, load]); // Linter feliz y memory-leak prevenido
 
-  // Resguardo: solo Intendente / Jefes de Área. Vecinos y Turistas no lo ven.
   if (!isInternal) return null;
 
   const save = async () => {
@@ -59,7 +74,17 @@ export default function InternalAnnouncement() {
     
     setSaving(true);
     
-    const payload: AnnouncementPayload = { message, updated_by: user?.id };
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("municipality_id")
+      .eq("id", user?.id)
+      .maybeSingle();
+      
+    const payload: AnnouncementPayload = { 
+      message, 
+      updated_by: user?.id,
+      municipality_id: profile?.municipality_id || null
+    };
     
     const res = row?.id
       ? await supabase.from("internal_announcements").update(payload).eq("id", row.id)
